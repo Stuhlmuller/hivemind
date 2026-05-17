@@ -1,0 +1,3 @@
+display_name: Hivemind Shipping Loop
+short_description: Ship Hivemind in tight checkpoints.
+default_prompt: Use this skill to keep Hivemind moving toward a shippable self-hosted app with tests, browser checks, and frequent commits.

@@ -1,0 +1,3 @@
+display_name: Hivemind JIT Credentials
+short_description: Preserve brokered credential security.
+default_prompt: Use this skill when changing Hivemind credentials, JIT leases, policy checks, secret redaction, or brokered actions.
