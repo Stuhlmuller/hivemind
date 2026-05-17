@@ -1570,6 +1570,13 @@ class HivemindStore:
                 "SELECT COUNT(*) FROM schedules WHERE enabled = 1 AND next_run_at <= ?",
                 (now_iso,),
             ).fetchone()[0]
+            due_schedule_ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM schedules WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC",
+                    (now_iso,),
+                )
+            ]
             due_schedule_rows = list(
                 conn.execute(
                     "SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT ?",
@@ -1586,6 +1593,20 @@ class HivemindStore:
                 """,
                 (now_iso, *TERMINAL_TASK_STATUSES),
             ).fetchone()[0]
+            stale_heartbeat_task_ids = [
+                row["id"]
+                for row in conn.execute(
+                    """
+                    SELECT id
+                    FROM tasks
+                    WHERE next_heartbeat_at IS NOT NULL
+                      AND next_heartbeat_at <= ?
+                      AND lower(status) NOT IN (?, ?, ?)
+                    ORDER BY next_heartbeat_at ASC
+                    """,
+                    (now_iso, *TERMINAL_TASK_STATUSES),
+                )
+            ]
             stale_heartbeat_rows = list(
                 conn.execute(
                     """
@@ -1618,6 +1639,8 @@ class HivemindStore:
                 "stale_heartbeats": stale_heartbeat_count,
                 "failed_tasks": failed_task_count,
             },
+            "due_schedule_ids": due_schedule_ids,
+            "stale_heartbeat_task_ids": stale_heartbeat_task_ids,
             "due_schedules": [self.runtime_schedule_view(row, now) for row in due_schedule_rows],
             "stale_heartbeats": [self.runtime_task_view(row, "next_heartbeat_at", now) for row in stale_heartbeat_rows],
             "failed_tasks": [self.runtime_task_view(row, "updated_at", now) for row in failed_task_rows],

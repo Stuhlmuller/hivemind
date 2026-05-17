@@ -2785,6 +2785,28 @@ def test_health_reports_db_and_scheduler_state(tmp_path: Path) -> None:
     require_equal(payload["scheduler"]["status"], "disabled", "health should report disabled test scheduler")
 
 
+def test_health_reports_scheduler_run_loop_failures(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "scheduler-health.db")
+    app = create_app(store, start_scheduler=False)
+
+    class AliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    with TestClient(app) as client:
+        app.state.scheduler_enabled = True
+        app.state.scheduler_thread = AliveThread()
+        app.state.scheduler_last_error = "scheduled task run failed"
+
+        response = client.get("/health")
+
+    payload = response.json()
+    require_equal(response.status_code, 200, "scheduler failures should keep health endpoint reachable")
+    require_equal(payload["status"], "degraded", "scheduler failures should degrade runtime health")
+    require_equal(payload["scheduler"]["status"], "error", "scheduler status should report run-loop failures")
+    require_equal(payload["scheduler"]["last_error"], "scheduled task run failed", "scheduler failure should keep operator-safe detail")
+
+
 def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch) -> None:
     store = HivemindStore(tmp_path / "health.db")
     app = create_app(store, start_scheduler=False)
@@ -2877,11 +2899,58 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
         "runtime overview should count active and overdue work",
     )
     require_equal(payload["scheduler"]["status"], "disabled", "runtime overview should include scheduler status")
+    require_equal(payload["due_schedule_ids"], [schedule["id"]], "runtime overview should include all due schedule ids")
+    require_equal(payload["stale_heartbeat_task_ids"], [running_task["id"]], "runtime overview should include all stale task ids")
     require_equal(payload["due_schedules"][0]["name"], "Overdue review", "runtime overview should list overdue schedule")
     require_true(payload["due_schedules"][0]["overdue_seconds"] > 0, "due schedule should include overdue seconds")
     require_equal(payload["stale_heartbeats"][0]["id"], running_task["id"], "runtime overview should list stale heartbeat")
     require_true(payload["stale_heartbeats"][0]["overdue_seconds"] > 0, "stale heartbeat should include overdue seconds")
     require_equal(payload["failed_tasks"][0]["id"], failed_task["id"], "runtime overview should list failed task")
+
+
+def test_runtime_overview_exposes_full_due_and_stale_id_sets(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "runtime-ids.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    due_schedule_ids = []
+    stale_task_ids = []
+
+    for index in range(2):
+        task = client.post(
+            "/tasks",
+            json={
+                "title": f"Heartbeat-bound task {index}",
+                "assigned_agent_id": agent["id"],
+                "heartbeat_seconds": 60,
+            },
+        ).json()
+        client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
+        stale_task_ids.append(task["id"])
+        schedule = client.post(
+            "/schedules",
+            json={
+                "name": f"Overdue review {index}",
+                "interval_seconds": 60,
+                "task_title": "Scheduled review",
+                "assigned_agent_id": agent["id"],
+                "next_run_at": f"2000-01-01T00:0{index}:00+00:00",
+            },
+        ).json()
+        due_schedule_ids.append(schedule["id"])
+
+    with store.connect() as conn:
+        for task_id in stale_task_ids:
+            conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", task_id))
+
+    overview = store.runtime_overview(limit=1)
+
+    require_equal(overview["counts"]["due_schedules"], 2, "runtime overview should count all due schedules")
+    require_equal(overview["counts"]["stale_heartbeats"], 2, "runtime overview should count all stale heartbeats")
+    require_equal(len(overview["due_schedules"]), 1, "runtime detail list should still honor the display limit")
+    require_equal(len(overview["stale_heartbeats"]), 1, "stale heartbeat detail list should still honor the display limit")
+    require_equal(set(overview["due_schedule_ids"]), set(due_schedule_ids), "runtime overview should expose all due schedule ids")
+    require_equal(set(overview["stale_heartbeat_task_ids"]), set(stale_task_ids), "runtime overview should expose all stale task ids")
 
 
 def test_runtime_overview_uses_operator_safe_error_detail(tmp_path: Path, monkeypatch) -> None:

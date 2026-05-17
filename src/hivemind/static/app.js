@@ -393,6 +393,8 @@ function runtimeOverviewFallback(error) {
       stale_heartbeats: 0,
       failed_tasks: 0,
     },
+    due_schedule_ids: [],
+    stale_heartbeat_task_ids: [],
     due_schedules: [],
     stale_heartbeats: [],
     failed_tasks: [],
@@ -646,7 +648,7 @@ function renderRuntimeOverview() {
 }
 
 function renderTasks() {
-  const staleTaskIds = new Set((state.runtime?.stale_heartbeats || []).map((task) => task.id));
+  const staleTaskIds = new Set(state.runtime?.stale_heartbeat_task_ids || (state.runtime?.stale_heartbeats || []).map((task) => task.id));
   $("#task-count").textContent = state.tasks.length;
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
@@ -667,7 +669,7 @@ function renderTasks() {
 }
 
 function renderSchedules() {
-  const dueScheduleIds = new Set((state.runtime?.due_schedules || []).map((schedule) => schedule.id));
+  const dueScheduleIds = new Set(state.runtime?.due_schedule_ids || (state.runtime?.due_schedules || []).map((schedule) => schedule.id));
   $("#schedule-count").textContent = state.schedules.length;
   $("#schedules-list").innerHTML = state.schedules
     .map((schedule) => {
