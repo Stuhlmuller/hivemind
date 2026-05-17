@@ -1887,6 +1887,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
         ),
         ("PATCH", "/schedules/sched_demo", {"enabled": False}),
         ("POST", "/schedules/run-due", None),
+        ("GET", "/runtime/overview", None),
         ("GET", "/audit-events", None),
     ]
 
@@ -2927,6 +2928,17 @@ def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, c
     stored_event = store.list_audit_events()[0]
     require_equal(stored_event["metadata"]["lease_token"], "[redacted]", "persisted audit event should redact lease tokens")
     require_equal(stored_event["metadata"]["secret_ref"], "[redacted]", "persisted audit event should redact secret refs")
+    store.audit(
+        "task.heartbeat",
+        "agent_demo",
+        "task_demo",
+        "allowed",
+        "heartbeat recorded",
+        {"note": "operator pasted password=hunter2"},
+    )
+    records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
+    require_equal([record["type"] for record in records], ["credential.lease.issued"], "structured logs should stay scoped to broker decisions")
+    require_true("hunter2" not in caplog.text, "runtime note content should not be emitted to structured broker logs")
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
