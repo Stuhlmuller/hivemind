@@ -564,8 +564,6 @@ def test_codex_oauth_flow_audits_unknown_state_callback(
     assert audit_events[0]["type"] == "credential.oauth.failed"
     assert audit_events[0]["reason"] == "unknown oauth state"
     assert audit_events[0]["target_id"] == "codex"
-
-
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
