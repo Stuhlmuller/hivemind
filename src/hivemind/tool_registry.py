@@ -117,24 +117,53 @@ def payload_type_matches(value: Any, expected_type: str) -> bool:
     return bool(matcher and matcher(value))
 
 
-def payload_schema_error(schema: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
-    required = schema.get("required", [])
-    properties = schema.get("properties", {})
+def payload_required_error(required: Any, payload: Mapping[str, Any]) -> str | None:
     for field in required:
         if field not in payload:
             return f"payload missing required field: {field}"
-    for field, field_schema in properties.items():
-        if field not in payload or not isinstance(field_schema, Mapping):
-            continue
-        expected_type = field_schema.get("type")
-        if isinstance(expected_type, str):
-            if expected_type not in PAYLOAD_TYPE_MATCHERS:
-                return f"payload field {field} uses unsupported type: {expected_type}"
-            if not payload_type_matches(payload[field], expected_type):
-                return f"payload field {field} must be {expected_type}"
-    if schema.get("additionalProperties", True) is False:
-        allowed_fields = set(properties)
-        extra_fields = sorted(set(payload) - allowed_fields)
-        if extra_fields:
-            return f"payload includes unknown field: {extra_fields[0]}"
     return None
+
+
+def payload_property_error(field: str, field_schema: Any, payload: Mapping[str, Any]) -> str | None:
+    if field not in payload or not isinstance(field_schema, Mapping):
+        return None
+    expected_type = field_schema.get("type")
+    if not isinstance(expected_type, str):
+        return None
+    if expected_type not in PAYLOAD_TYPE_MATCHERS:
+        return f"payload field {field} uses unsupported type: {expected_type}"
+    if not payload_type_matches(payload[field], expected_type):
+        return f"payload field {field} must be {expected_type}"
+    return None
+
+
+def payload_properties_error(properties: Any, payload: Mapping[str, Any]) -> str | None:
+    for field, field_schema in properties.items():
+        error = payload_property_error(field, field_schema, payload)
+        if error:
+            return error
+    return None
+
+
+def payload_additional_properties_error(schema: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+    if schema.get("additionalProperties", True) is not False:
+        return None
+    properties = schema.get("properties", {})
+    allowed_fields = set(properties) if isinstance(properties, Mapping) else set()
+    extra_fields = sorted(set(payload) - allowed_fields)
+    if extra_fields:
+        return f"payload includes unknown field: {extra_fields[0]}"
+    return None
+
+
+def payload_schema_error(schema: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    required_error = payload_required_error(required, payload)
+    if required_error:
+        return required_error
+    if isinstance(properties, Mapping):
+        properties_error = payload_properties_error(properties, payload)
+        if properties_error:
+            return properties_error
+    return payload_additional_properties_error(schema, payload)

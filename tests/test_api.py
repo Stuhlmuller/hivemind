@@ -727,7 +727,7 @@ def test_tool_action_registry_rejects_inconsistent_input_schemas(tmp_path: Path)
             "risk_level": "low",
             "input_schema": {
                 "type": "object",
-                "properties": {"repo": {"type": "strng"}},
+                "properties": {"repo": {"type": "text"}},
                 "required": ["repo"],
                 "additionalProperties": False,
             },

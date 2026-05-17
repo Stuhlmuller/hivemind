@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Thread
+from typing import Any
 import unittest
 
 from hivemind.credentials import CredentialError, CredentialService, CredentialVault
 from hivemind.models import CredentialPolicy, LeaseStatus
 
 
-def make_service(service_class: type[CredentialService] = CredentialService) -> CredentialService:
+def make_service(
+    service_class: type[CredentialService] = CredentialService,
+    *,
+    tool_actions: list[dict[str, Any]] | None = None,
+) -> CredentialService:
     vault = CredentialVault()
     vault.add(
         credential_id="github.main",
@@ -21,7 +26,7 @@ def make_service(service_class: type[CredentialService] = CredentialService) -> 
             max_ttl_seconds=60,
         ),
     )
-    return service_class(vault)
+    return service_class(vault, tool_actions=tool_actions)
 
 
 class CredentialServiceTests(unittest.TestCase):
@@ -306,7 +311,7 @@ class CredentialServiceTests(unittest.TestCase):
                     "risk_level": "low",
                     "input_schema": {
                         "type": "object",
-                        "properties": {"repo": {"type": "strng"}},
+                        "properties": {"repo": {"type": "text"}},
                         "required": ["repo"],
                         "additionalProperties": True,
                     },
