@@ -7,9 +7,3 @@ approval_rules:
     requires:
       conditions:
         has_valid_signatures: true
-  - name: cursor bot approved
-    requires:
-      conditions:
-        count: 1
-        users:
-          - "chatgpt-codex-connector[bot]"
