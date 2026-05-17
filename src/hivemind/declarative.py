@@ -4,7 +4,11 @@ from collections.abc import Mapping, Sequence
 import sqlite3
 from typing import Any
 
-from hivemind.secret_refs import validate_external_credential_metadata, validate_external_secret_ref
+from hivemind.secret_refs import (
+    BROKER_SECRET_REF_SCHEME,
+    validate_external_credential_metadata,
+    validate_external_secret_ref,
+)
 from hivemind.store import (
     SCHEDULE_CATCH_UP_POLICIES,
     HivemindStore,
@@ -63,9 +67,8 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
                 """
             )
         ]
-        credentials = [
-            _credential_config(row)
-            for row in conn.execute(
+        credential_rows = list(
+            conn.execute(
                 """
                 SELECT id, name, provider, secret_ref, allowed_agents, allowed_actions,
                        approval_required_actions, max_ttl_seconds, require_intent, metadata
@@ -73,7 +76,9 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
                 ORDER BY id
                 """
             )
-        ]
+        )
+        credentials = [_credential_config(row) for row in credential_rows if _is_exportable_credential(row)]
+        exported_credential_ids = {credential["id"] for credential in credentials}
         schedules = [
             _schedule_config(row)
             for row in conn.execute(
@@ -85,6 +90,7 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
                 ORDER BY id
                 """
             )
+            if not row["credential_id"] or row["credential_id"] in exported_credential_ids
         ]
     return {
         "version": CONFIG_VERSION,
@@ -96,6 +102,7 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
 
 def validate_declarative_config(store: HivemindStore, config: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalize_config(config)
+    _validate_references(store, normalized["agents"], normalized["credentials"], normalized["schedules"])
     _validate_store_credential_rows(store, normalized["credentials"])
     return {
         "valid": True,
@@ -113,6 +120,7 @@ def import_declarative_config(
     dry_run: bool,
 ) -> dict[str, Any]:
     normalized = _normalize_config(config)
+    _validate_references(store, normalized["agents"], normalized["credentials"], normalized["schedules"])
     _validate_store_credential_rows(store, normalized["credentials"])
     plan = _build_plan(store, normalized)
     if dry_run:
@@ -164,6 +172,16 @@ def _credential_config(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _is_exportable_credential(row: sqlite3.Row) -> bool:
+    metadata = loads(row["metadata"], {})
+    if str(row["secret_ref"]).startswith(f"{BROKER_SECRET_REF_SCHEME}://"):
+        return False
+    kind = metadata.get("credential_kind")
+    if kind is not None and str(kind).strip().lower() == "managed_secret":
+        return False
+    return True
+
+
 def _credential_policy_config(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "allowed_agents": loads(row["allowed_agents"], []),
@@ -203,7 +221,6 @@ def _normalize_config(config: Mapping[str, Any]) -> dict[str, Any]:
     agents = _normalize_agents(_list(root.get("agents", []), "agents"))
     credentials = _normalize_credentials(_list(root.get("credentials", []), "credentials"))
     schedules = _normalize_schedules(_list(root.get("schedules", []), "schedules"))
-    _validate_references(agents, credentials, schedules)
     return {
         "agents": agents,
         "credentials": credentials,
@@ -358,12 +375,15 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
 
 
 def _validate_references(
+    store: HivemindStore,
     agents: list[dict[str, Any]],
     credentials: list[dict[str, Any]],
     schedules: list[dict[str, Any]],
 ) -> None:
-    agent_ids = {agent["id"] for agent in agents}
-    credential_by_id = {credential["id"]: credential for credential in credentials}
+    with store.connect() as conn:
+        agent_ids = _existing_ids(conn, "agents") | {agent["id"] for agent in agents}
+        credential_by_id = _existing_credential_policies(conn)
+    credential_by_id.update({credential["id"]: credential for credential in credentials})
     _validate_credential_references(credentials, agent_ids)
     _validate_schedule_references(schedules, agent_ids, credential_by_id)
 
@@ -710,6 +730,23 @@ def _is_forbidden_metadata_key(key: object) -> bool:
 
 def _existing_ids(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["id"] for row in conn.execute(EXISTING_ID_QUERIES[table])}
+
+
+def _existing_credential_policies(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    return {
+        row["id"]: {
+            "id": row["id"],
+            "allowed_agents": loads(row["allowed_agents"], []),
+            "allowed_actions": loads(row["allowed_actions"], []),
+            "require_intent": bool(row["require_intent"]),
+        }
+        for row in conn.execute(
+            """
+            SELECT id, allowed_agents, allowed_actions, require_intent
+            FROM credentials
+            """
+        )
+    }
 
 
 def _row_exists(conn: sqlite3.Connection, table: str, row_id: str) -> bool:

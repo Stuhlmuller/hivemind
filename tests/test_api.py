@@ -2058,6 +2058,108 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     assert "BEGIN TEST SECRET" not in secret_row[0]
 
 
+def test_declarative_config_export_excludes_broker_managed_secret_refs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    managed_value = secrets.token_urlsafe(16)
+
+    managed_response = client.post(
+        "/credentials",
+        json={
+            "name": "Broker Secret",
+            "provider": "openrouter",
+            "secret_value": managed_value,
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": [],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {"note": "local only"},
+        },
+    )
+    require_equal(managed_response.status_code, 201, "managed credential fixture should be created")
+    managed_credential = managed_response.json()
+
+    external_response = client.post(
+        "/credentials",
+        json={
+            "name": "Portable Secret Ref",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_PORTABLE_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": [],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(external_response.status_code, 201, "external credential fixture should be created")
+    external_credential = external_response.json()
+
+    managed_schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Local secret schedule",
+            "enabled": True,
+            "interval_seconds": 120,
+            "catch_up_policy": "skip_missed",
+            "task_title": "Use local secret",
+            "assigned_agent_id": agent["id"],
+            "credential_id": managed_credential["id"],
+            "action": "read_repo",
+            "intent": "Use a local broker-managed credential only on this host.",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(managed_schedule_response.status_code, 201, "managed schedule fixture should be created")
+    managed_schedule = managed_schedule_response.json()
+
+    external_schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Portable schedule",
+            "enabled": True,
+            "interval_seconds": 120,
+            "catch_up_policy": "skip_missed",
+            "task_title": "Use portable ref",
+            "assigned_agent_id": agent["id"],
+            "credential_id": external_credential["id"],
+            "action": "read_repo",
+            "intent": "Use a portable external credential reference after import.",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(external_schedule_response.status_code, 201, "external schedule fixture should be created")
+    external_schedule = external_schedule_response.json()
+
+    export_response = client.get("/declarative-config")
+    require_equal(export_response.status_code, 200, "declarative config export should succeed")
+    exported = export_response.json()
+    exported_credential_ids = {credential["id"] for credential in exported["credentials"]}
+    exported_schedule_ids = {schedule["id"] for schedule in exported["schedules"]}
+
+    require_true(
+        managed_credential["id"] not in exported_credential_ids,
+        "declarative export should omit broker-managed credentials",
+    )
+    require_true(
+        managed_schedule["id"] not in exported_schedule_ids,
+        "declarative export should omit schedules that depend on omitted credentials",
+    )
+    require_true(external_credential["id"] in exported_credential_ids, "portable credentials should still export")
+    require_true(external_schedule["id"] in exported_schedule_ids, "portable schedules should still export")
+    require_true("secret://" not in export_response.text, "declarative export should not include broker refs")
+    require_true(managed_value not in export_response.text, "declarative export should not include managed values")
+    validate_response = client.post("/declarative-config/validate", json={"config": exported})
+    require_equal(validate_response.status_code, 200, "declarative export should be self-validating")
+
+
 def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> None:
     source = client_for(tmp_path / "source")
     setup(source)
@@ -2312,6 +2414,94 @@ def test_declarative_config_normalizes_mixed_case_policy_actions(tmp_path: Path)
         ["open_issue"],
         "imported approval gates should be normalized",
     )
+
+
+def test_declarative_config_accepts_existing_runtime_references(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Runtime credential",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_RUNTIME_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": [],
+            "max_ttl_seconds": 120,
+            "require_intent": True,
+            "metadata": {},
+        },
+    )
+    require_equal(credential_response.status_code, 201, "runtime credential fixture should be created")
+    credential = credential_response.json()
+
+    credential_update = {
+        "version": 1,
+        "agents": [],
+        "credentials": [
+            {
+                "id": credential["id"],
+                "name": "Runtime credential updated by config",
+                "provider": "github",
+                "secret_ref": "env://HIVEMIND_RUNTIME_TOKEN",
+                "policy": {
+                    "allowed_agents": [agent["id"]],
+                    "allowed_actions": ["read_repo", "open_issue"],
+                    "approval_required_actions": ["open_issue"],
+                    "max_ttl_seconds": 240,
+                    "require_intent": True,
+                },
+                "metadata": {},
+            }
+        ],
+        "schedules": [],
+    }
+    validate_update_response = client.post("/declarative-config/validate", json={"config": credential_update})
+    require_equal(validate_update_response.status_code, 200, "partial credential update should validate")
+    import_update_response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": credential_update},
+    )
+    require_equal(import_update_response.status_code, 200, "partial credential update should import")
+    updated_credential = next(item for item in client.get("/credentials").json() if item["id"] == credential["id"])
+    require_equal(
+        updated_credential["policy"]["approval_required_actions"],
+        ["open_issue"],
+        "partial credential import should update policy without redeclaring the agent",
+    )
+
+    schedule_import = {
+        "version": 1,
+        "agents": [],
+        "credentials": [],
+        "schedules": [
+            {
+                "id": "sched_runtime_refs",
+                "name": "Runtime refs",
+                "enabled": True,
+                "interval_seconds": 120,
+                "catch_up_policy": "run_once",
+                "next_run_at": "2030-01-01T00:00:00+00:00",
+                "task_template": {
+                    "title": "Use existing runtime refs",
+                    "assigned_agent_id": agent["id"],
+                    "credential_id": credential["id"],
+                    "action": "read_repo",
+                    "intent": "Use existing runtime references in a partial config import.",
+                },
+            }
+        ],
+    }
+    validate_schedule_response = client.post("/declarative-config/validate", json={"config": schedule_import})
+    require_equal(validate_schedule_response.status_code, 200, "partial schedule import should validate")
+    import_schedule_response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": schedule_import},
+    )
+    require_equal(import_schedule_response.status_code, 200, "partial schedule import should apply")
 
 
 def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
