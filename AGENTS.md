@@ -29,6 +29,9 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
+Commit signing rule: every git commit for this repository must be signed.
+Unsigned commits are not acceptable because policy checks reject them. If commit
+signing fails, stop and fix signing before creating or pushing more commits.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
@@ -60,6 +63,10 @@ Skill capture rule: use the project-local `hivemind-skill-capture` skill when a
 new ask creates a durable project rule, workflow, taste preference, security
 boundary, or implementation pattern. Prefer small project-local skills so future
 agents can replicate Hivemind work with little context.
+
+Git workflow rule: use the project-local `hivemind-git-commits` skill before
+staging, committing, or pushing Hivemind changes so branch scope, commit
+signing, and verification stay consistent.
 
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
