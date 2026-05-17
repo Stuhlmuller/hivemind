@@ -2503,6 +2503,25 @@ def test_declarative_config_accepts_existing_runtime_references(tmp_path: Path) 
     )
     require_equal(import_schedule_response.status_code, 200, "partial schedule import should apply")
 
+    default_time_import = deepcopy(schedule_import)
+    default_time_schedule = default_time_import["schedules"][0]
+    default_time_schedule["id"] = "sched_default_time"
+    default_time_schedule["interval_seconds"] = 300
+    default_time_schedule.pop("next_run_at")
+    before_import = datetime.now(timezone.utc)
+    default_time_response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": default_time_import},
+    )
+    after_import = datetime.now(timezone.utc)
+    require_equal(default_time_response.status_code, 200, "missing next_run_at should use interval default")
+    default_time_result = next(item for item in client.get("/schedules").json() if item["id"] == "sched_default_time")
+    default_next_run_at = datetime.fromisoformat(default_time_result["next_run_at"])
+    require_true(
+        before_import + timedelta(seconds=300) <= default_next_run_at <= after_import + timedelta(seconds=300),
+        "declarative schedule import should default next_run_at to the first interval boundary",
+    )
+
 
 def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
     client = client_for(tmp_path)

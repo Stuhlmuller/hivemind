@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
 import sqlite3
 from typing import Any
 
@@ -336,7 +337,7 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
             raise DeclarativeConfigError(f"{prefix}.id duplicates {schedule_id}")
         seen.add(schedule_id)
         interval = _int(schedule.get("interval_seconds"), f"{prefix}.interval_seconds", 60, 365 * 24 * 60 * 60)
-        next_run_at = _schedule_next_run_at(schedule, prefix)
+        next_run_at = _schedule_next_run_at(schedule, prefix, interval)
         task_template = _mapping(schedule.get("task_template"), f"{prefix}.task_template")
         _reject_unknown_keys(
             task_template,
@@ -650,9 +651,9 @@ def _bool(value: Any, name: str) -> bool:
     return value
 
 
-def _schedule_next_run_at(schedule: Mapping[str, Any], prefix: str) -> str:
+def _schedule_next_run_at(schedule: Mapping[str, Any], prefix: str, interval_seconds: int) -> str:
     name = f"{prefix}.next_run_at"
-    value = _optional_str(schedule, "next_run_at") or iso(utcnow())
+    value = _optional_str(schedule, "next_run_at") or iso(utcnow() + timedelta(seconds=interval_seconds))
     try:
         parsed = parse_dt(value)
     except ValueError as exc:
