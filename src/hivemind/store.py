@@ -124,6 +124,7 @@ CREDENTIAL_INSERT_SQL = """
     (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
     VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
 """
+SAFE_ACTION_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 BACKUP_FORMAT = "hivemind-logical-backup"
 BACKUP_FORMAT_VERSION = 1
 BACKUP_TABLE_QUERIES: dict[str, str] = {
@@ -970,10 +971,10 @@ class HivemindStore:
         allow_managed_secret_metadata: bool = False,
     ) -> dict[str, Any]:
         now = iso()
-        actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
+        actions = sorted(set(self.normalize_action_name(action) for action in data["allowed_actions"] if action.strip()))
         agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
         approval_required_actions = sorted(
-            set(action.strip().lower() for action in (data.get("approval_required_actions") or []) if action.strip())
+            set(self.normalize_action_name(action) for action in (data.get("approval_required_actions") or []) if action.strip())
         )
         provider = str(data["provider"]).strip().lower()
         name = str(data["name"]).strip()
@@ -1013,6 +1014,14 @@ class HivemindStore:
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
         return row
+
+    def normalize_action_name(self, action: str) -> str:
+        normalized = action.strip().lower()
+        if not normalized:
+            raise StoreError("action is required")
+        if len(normalized) > 64 or SAFE_ACTION_NAME.fullmatch(normalized) is None:
+            raise StoreError("actions must use lowercase snake_case names")
+        return normalized
 
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
@@ -1237,6 +1246,16 @@ class HivemindStore:
     ) -> tuple[str | None, dict[str, Any]]:
         normalized_action = action.strip().lower()
         base_audit_metadata = dict(audit_metadata or {})
+
+        def lease_audit_metadata(*, ttl_seconds: int | None = None, lease_id: str | None = None) -> dict[str, Any]:
+            metadata = {
+                **base_audit_metadata,
+                **self.audit_action_metadata(normalized_action, ttl_seconds=ttl_seconds),
+            }
+            if lease_id is not None:
+                metadata["lease_id"] = lease_id
+            return metadata
+
         try:
             self.get_agent(agent_id)
         except StoreError as exc:
@@ -1246,7 +1265,7 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 str(exc),
-                {"action": normalized_action, **base_audit_metadata},
+                lease_audit_metadata(),
             )
             raise
         try:
@@ -1258,7 +1277,7 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 str(exc),
-                {"action": normalized_action, **base_audit_metadata},
+                lease_audit_metadata(),
             )
             raise
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
@@ -1283,7 +1302,7 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 review.reason,
-                {"action": normalized_action, **base_audit_metadata},
+                lease_audit_metadata(),
             )
             raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
@@ -1318,7 +1337,7 @@ class HivemindStore:
                 credential_id,
                 "pending",
                 "action requires operator approval",
-                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+                lease_audit_metadata(ttl_seconds=ttl, lease_id=row["id"]),
             )
             return None, self.public_lease(row)
         self.audit(
@@ -1327,7 +1346,7 @@ class HivemindStore:
             credential_id,
             "allowed",
             review.reason,
-            {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+            lease_audit_metadata(ttl_seconds=ttl, lease_id=row["id"]),
         )
         public = self.public_lease(row)
         public["lease_token"] = token
@@ -1336,19 +1355,36 @@ class HivemindStore:
     def perform_credential_action(self, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         token_hash = self.hash_token(lease_token)
         normalized_action = action.strip().lower()
+        payload_key_count = len(payload)
         error_detail: str | None = None
         result: dict[str, Any] | None = None
         with self.connect() as conn:
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
             if lease is None:
                 error_detail = "unknown credential lease token"
-                self._insert_unknown_credential_action_denial(conn, normalized_action, error_detail)
+                self._insert_unknown_credential_action_denial(
+                    conn,
+                    normalized_action,
+                    error_detail,
+                    payload_key_count,
+                )
             else:
                 error_detail = self._credential_action_denial_reason(lease, normalized_action)
                 if error_detail is not None:
-                    self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+                    self._insert_credential_action_denial(
+                        conn,
+                        lease,
+                        normalized_action,
+                        error_detail,
+                        payload_key_count,
+                    )
                 else:
-                    result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
+                    result, error_detail = self._consume_credential_action(
+                        conn,
+                        lease,
+                        normalized_action,
+                        payload_key_count,
+                    )
         if error_detail is not None:
             raise StoreError(error_detail)
         if result is None:
@@ -1371,6 +1407,7 @@ class HivemindStore:
         conn: sqlite3.Connection,
         normalized_action: str,
         error_detail: str,
+        payload_key_count: int,
     ) -> None:
         self._insert_audit(
             conn,
@@ -1379,7 +1416,7 @@ class HivemindStore:
             "credential_lease",
             "denied",
             error_detail,
-            {"action": normalized_action},
+            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
         )
 
     def _insert_credential_action_denial(
@@ -1388,6 +1425,7 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         error_detail: str,
+        payload_key_count: int,
     ) -> None:
         self._insert_audit(
             conn,
@@ -1396,7 +1434,7 @@ class HivemindStore:
             lease["credential_id"],
             "denied",
             error_detail,
-            {"action": normalized_action},
+            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
         )
 
     def _consume_credential_action(
@@ -1404,12 +1442,12 @@ class HivemindStore:
         conn: sqlite3.Connection,
         lease: sqlite3.Row,
         normalized_action: str,
-        payload: dict[str, Any],
+        payload_key_count: int,
     ) -> tuple[dict[str, Any] | None, str | None]:
         credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
         if credential is None:
             error_detail = "credential no longer exists"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
             return None, error_detail
         consumed_at = utcnow()
         cursor = conn.execute(
@@ -1425,7 +1463,7 @@ class HivemindStore:
         )
         if cursor.rowcount != 1:
             error_detail = "credential lease is expired or revoked"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
             return None, error_detail
         self._insert_audit(
             conn,
@@ -1434,7 +1472,7 @@ class HivemindStore:
             lease["credential_id"],
             "allowed",
             "action matched active credential lease",
-            {"action": normalized_action, "payload_keys": sorted(payload.keys())},
+            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
         )
         return (
             {
@@ -1471,18 +1509,16 @@ class HivemindStore:
             updated["status"] = "active"
             updated["issued_at"] = iso(now)
             updated["expires_at"] = iso(expires_at)
+        approval_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
+        approval_metadata["agent_id"] = updated["agent_id"]
+        approval_metadata["lease_id"] = updated["id"]
         self.audit(
             "credential.lease.approved",
             actor_id,
             updated["credential_id"],
             "allowed",
             "operator approved lease request",
-            {
-                "action": updated["action"],
-                "agent_id": updated["agent_id"],
-                "lease_id": updated["id"],
-                "ttl_seconds": updated["ttl_seconds"],
-            },
+            approval_metadata,
         )
         public = self.public_lease(updated)
         public["lease_token"] = token
@@ -1498,18 +1534,16 @@ class HivemindStore:
             conn.execute("UPDATE leases SET status = ? WHERE id = ?", ("denied", lease_id))
             updated = dict(lease)
             updated["status"] = "denied"
+        denial_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
+        denial_metadata["agent_id"] = updated["agent_id"]
+        denial_metadata["lease_id"] = updated["id"]
         self.audit(
             LEASE_DENIED_EVENT,
             actor_id,
             updated["credential_id"],
             "denied",
             "operator denied lease request",
-            {
-                "action": updated["action"],
-                "agent_id": updated["agent_id"],
-                "lease_id": updated["id"],
-                "ttl_seconds": updated["ttl_seconds"],
-            },
+            denial_metadata,
         )
         return self.public_lease(updated)
 
@@ -1536,6 +1570,26 @@ class HivemindStore:
             "status": status,
             "token_preview": row["token_preview"] if status not in {"pending", "denied"} else "not issued",
         }
+
+    def audit_action_metadata(
+        self,
+        action: str,
+        *,
+        ttl_seconds: int | None = None,
+        payload_key_count: int | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"action": self.audit_action_label(action)}
+        if ttl_seconds is not None:
+            metadata["ttl_seconds"] = ttl_seconds
+        if payload_key_count is not None:
+            metadata["payload_key_count"] = payload_key_count
+        return metadata
+
+    def audit_action_label(self, action: str) -> str:
+        normalized = action.strip().lower()
+        if normalized and len(normalized) <= 64 and SAFE_ACTION_NAME.fullmatch(normalized):
+            return normalized
+        return "<redacted>"
 
     def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
         normalized_note = note.strip()
@@ -1967,32 +2021,38 @@ class HivemindStore:
 
     def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
         now = utcnow()
-        with self.connect() as conn:
-            task = self.get_task_row(conn, task_id)
-            provided_agent_id = agent_id or None
-            self.validate_optional_agent_reference(
-                conn,
-                field_name="agent_id",
-                value=provided_agent_id,
-            )
-            next_heartbeat = None
-            if task["heartbeat_seconds"]:
-                next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
-            event = {
-                "id": f"hb_{secrets.token_urlsafe(10)}",
-                "task_id": task_id,
-                "agent_id": provided_agent_id or task["assigned_agent_id"],
-                "note": note,
-                "created_at": iso(now),
-            }
-            try:
-                conn.execute(
-                    "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
-                    event,
+        provided_agent_id = agent_id or None
+        audit_actor_id = provided_agent_id or "user"
+        audit_metadata = self.heartbeat_audit_metadata(note)
+        try:
+            with self.connect() as conn:
+                task = self.get_task_row(conn, task_id)
+                self.validate_optional_agent_reference(
+                    conn,
+                    field_name="agent_id",
+                    value=provided_agent_id,
                 )
-            except sqlite3.IntegrityError as exc:
-                raise StoreValidationError("agent_id references unknown agent") from exc
-            conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
+                next_heartbeat = None
+                if task["heartbeat_seconds"]:
+                    next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
+                event = {
+                    "id": f"hb_{secrets.token_urlsafe(10)}",
+                    "task_id": task_id,
+                    "agent_id": provided_agent_id or task["assigned_agent_id"],
+                    "note": note,
+                    "created_at": iso(now),
+                }
+                try:
+                    conn.execute(
+                        "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
+                        event,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StoreValidationError("agent_id references unknown agent") from exc
+                conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
+        except StoreError as exc:
+            self.audit("task.heartbeat.denied", audit_actor_id, task_id, "denied", str(exc), audit_metadata)
+            raise
         self.audit(
             "task.heartbeat",
             event["agent_id"] or "user",

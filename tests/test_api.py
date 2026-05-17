@@ -617,6 +617,7 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
+    payload_key = f"token-{secrets.token_hex(8)}"
     payload_secret = f"demo-{secrets.token_hex(8)}"
 
     assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]
@@ -639,7 +640,7 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
         json={
             "lease_token": lease["lease_token"],
             "action": "read_repo",
-            "payload": {"repo": "hivemind", "token": payload_secret},
+            "payload": {"repo": "hivemind", payload_key: payload_secret},
         },
     )
     assert action_response.status_code == 200
@@ -648,7 +649,8 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
     assert performed_event["actor_id"] == agent["id"]
     assert performed_event["target_id"] == credential["id"]
-    assert performed_event["metadata"] == {"action": "read_repo", "payload_keys": ["repo", "token"]}
+    assert performed_event["metadata"] == {"action": "read_repo", "payload_key_count": 2}
+    assert payload_key not in str(audit_events)
     assert payload_secret not in str(audit_events)
 
 
@@ -657,6 +659,7 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
+    payload_key = f"token-{secrets.token_hex(8)}"
     payload_secret = f"demo-{secrets.token_hex(8)}"
 
     lease_response = client.post(
@@ -677,7 +680,7 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
         json={
             "lease_token": lease["lease_token"],
             "action": "delete_repo",
-            "payload": {"repo": "hivemind", "token": payload_secret},
+            "payload": {"repo": "hivemind", payload_key: payload_secret},
         },
     )
     assert action_response.status_code == 403
@@ -688,7 +691,8 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
     assert denied_event["decision"] == "denied"
     assert denied_event["actor_id"] == agent["id"]
     assert denied_event["target_id"] == credential["id"]
-    assert denied_event["metadata"] == {"action": "delete_repo", "payload_keys": ["repo", "token"]}
+    assert denied_event["metadata"] == {"action": "delete_repo", "payload_key_count": 2}
+    assert payload_key not in str(audit_events)
     assert payload_secret not in str(audit_events)
 
 
@@ -741,6 +745,36 @@ def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) 
         for event in audit_events
     )
 
+def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    unsafe_action = f"token-{secrets.token_hex(8)}"
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": unsafe_action,
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "action is outside this credential policy"
+
+    audit_events = client.get("/audit-events").json()
+    denied_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied"
+        and event["reason"] == "action is outside this credential policy"
+    )
+    assert denied_event["metadata"] == {"action": "<redacted>"}
+    assert unsafe_action not in str(audit_events)
 
     replay_response = client.post(
         "/credential-actions",
@@ -2998,6 +3032,7 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
     client = client_for(tmp_path)
     setup(client)
     credential = client.get("/credentials").json()[0]
+    heartbeat_note = f"token={secrets.token_hex(8)}"
 
     bad_task_agent = client.post(
         "/tasks",
@@ -3052,10 +3087,20 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
     ).json()
     bad_heartbeat_agent = client.post(
         f"/tasks/{task['id']}/heartbeats",
-        json={"agent_id": "agent_missing", "note": "still working"},
+        json={"agent_id": "agent_missing", "note": heartbeat_note},
     )
     assert bad_heartbeat_agent.status_code == 400
     assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
+    audit_events = client.get("/audit-events").json()
+    assert any(
+        event["type"] == "task.heartbeat.denied"
+        and event["actor_id"] == "agent_missing"
+        and event["target_id"] == task["id"]
+        and event["reason"] == "agent_id references unknown agent: agent_missing"
+        and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+        for event in audit_events
+    )
+    assert heartbeat_note not in str(audit_events)
 
 
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
