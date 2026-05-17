@@ -41,7 +41,7 @@ class SpawnAgentRequest(BaseModel):
     name: str = Field(min_length=1)
     role: str = Field(min_length=1)
     provider: str = Field(default="local", min_length=1)
-    model: str = Field(default="deterministic-policy", min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     system_prompt: str = ""
 
 

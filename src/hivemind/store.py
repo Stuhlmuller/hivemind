@@ -23,6 +23,7 @@ from hivemind.providers import (
     AgentProviderError,
     AgentProviderRegistry,
     CREDENTIAL_OPTIONAL_AGENT_PROVIDERS,
+    MissingAgentProviderAdapterError,
     ProviderMessage,
     ProviderRunRequest,
     ProviderToolRequest,
@@ -110,6 +111,7 @@ class StoreValidationError(StoreError):
 LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
+REDACTED_VALUE = "[redacted]"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
@@ -122,15 +124,19 @@ CREDENTIAL_INSERT_SQL = """
 """
 SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
     {
-        "access_token",
-        "api_key",
-        "client_secret",
-        "credential_ref",
-        "lease_token",
+        "accesstoken",
+        "apikey",
+        "authorization",
+        "bearer",
+        "clientsecret",
+        "credentialref",
+        "leasetoken",
         "password",
-        "refresh_token",
-        "secret_ref",
-        "secret_value",
+        "refreshtoken",
+        "secret",
+        "secretref",
+        "secretkey",
+        "secretvalue",
         "token",
     }
 )
@@ -146,18 +152,42 @@ def provider_redaction_values(credential_ref: str | None) -> tuple[str, ...]:
     return tuple(values)
 
 
+def normalize_sensitive_provider_key(key: Any) -> str:
+    return "".join(char for char in str(key).lower() if char.isalnum())
+
+
 def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
     redactions = provider_redaction_values(credential_ref)
     if isinstance(value, str):
         redacted = value
         for secret_value in redactions:
-            redacted = redacted.replace(secret_value, "[redacted]")
+            redacted = redacted.replace(secret_value, REDACTED_VALUE)
         return redacted
     if isinstance(value, list):
         return [redact_provider_public_value(item, credential_ref) for item in value]
     if isinstance(value, dict):
         return {
-            key: "[redacted]" if str(key).lower() in SENSITIVE_PROVIDER_RESULT_KEYS else redact_provider_public_value(item, credential_ref)
+            key: REDACTED_VALUE
+            if normalize_sensitive_provider_key(key) in SENSITIVE_PROVIDER_RESULT_KEYS
+            else redact_provider_public_value(item, credential_ref)
+            for key, item in value.items()
+        }
+    return value
+
+
+def redact_public_metadata_value(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return preview_secret_ref(validate_secret_ref(value))
+        except ValueError:
+            return value
+    if isinstance(value, list):
+        return [redact_public_metadata_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: REDACTED_VALUE
+            if normalize_sensitive_provider_key(key) in SENSITIVE_PROVIDER_RESULT_KEYS
+            else redact_public_metadata_value(item)
             for key, item in value.items()
         }
     return value
@@ -573,12 +603,13 @@ class HivemindStore:
 
     def create_agent(self, data: dict[str, Any]) -> dict[str, Any]:
         now = iso()
+        provider = normalize_agent_provider_id(data.get("provider") or "local")
         row = {
             "id": f"agent_{secrets.token_urlsafe(8)}",
             "name": data["name"],
             "role": data["role"],
-            "provider": data.get("provider") or "local",
-            "model": data.get("model") or "deterministic-policy",
+            "provider": provider,
+            "model": data.get("model") or self.config.agent_provider(provider).model,
             "status": "idle",
             "system_prompt": data.get("system_prompt") or "",
             "created_at": now,
@@ -895,7 +926,7 @@ class HivemindStore:
                 "max_ttl_seconds": row["max_ttl_seconds"],
                 "require_intent": bool(row["require_intent"]),
             },
-            "metadata": loads(row["metadata"], {}),
+            "metadata": redact_public_metadata_value(loads(row["metadata"], {})),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1337,19 +1368,27 @@ class HivemindStore:
         )
         try:
             result = self._agent_provider_registry.run(request)
-        except AgentProviderError as exc:
-            reason = redact_provider_public_value(str(exc), provider_config.credential_ref)
-            if reason != str(exc):
-                reason = AGENT_PROVIDER_FAILED_CLOSED_REASON
+        except MissingAgentProviderAdapterError as exc:
+            reason = f"agent provider adapter is not configured: {exc.provider}"
             self._finish_task_execution(
                 task_id=task_id,
                 agent_id=agent["id"],
                 status="failed",
                 decision="denied",
-                reason=str(reason),
+                reason=reason,
                 metadata={"provider": provider_id, "model": request.model},
             )
-            raise StoreError(str(reason)) from exc
+            raise StoreError(reason) from exc
+        except AgentProviderError as exc:
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason=AGENT_PROVIDER_FAILED_CLOSED_REASON,
+                metadata={"provider": provider_id, "model": request.model},
+            )
+            raise StoreError(AGENT_PROVIDER_FAILED_CLOSED_REASON) from exc
         except Exception as exc:
             self._finish_task_execution(
                 task_id=task_id,

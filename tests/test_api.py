@@ -65,7 +65,7 @@ class LeakingAgentProviderAdapter:
 
     def run(self, request: ProviderRunRequest) -> ProviderRunResult:
         if self.fail:
-            raise AgentProviderError(f"upstream rejected {request.credential_ref}")
+            raise AgentProviderError("upstream rejected apiKey=raw-provider-token clientSecret=raw-provider-secret")
         return ProviderRunResult(
             provider=request.provider,
             model=request.model,
@@ -76,6 +76,9 @@ class LeakingAgentProviderAdapter:
                     arguments={
                         "credential_ref": request.credential_ref,
                         "token": "placeholder",
+                        "accessToken": "LEAKME_TOKEN",
+                        "apiKey": "raw-api-key",
+                        "clientSecret": "LEAKME_SECRET",
                     },
                 ),
             ),
@@ -384,6 +387,17 @@ def test_config_exposes_redacted_provider_backed_reviewer_settings(tmp_path: Pat
     require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose the raw reviewer credential ref")
 
 
+def test_config_rejects_invalid_reviewer_credential_ref(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "sk-raw-provider-secret")
+
+    try:
+        HivemindConfig.from_env()
+    except ValueError as exc:
+        require_equal(str(exc), "secret_ref must use env://, file://, vault://, oauth://, or secret://", "invalid reviewer refs should fail closed")
+    else:
+        raise AssertionError("invalid reviewer credential_ref was accepted")
+
+
 def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
@@ -400,6 +414,24 @@ def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeyp
     require_equal(providers["openrouter"]["credential_ref_preview"], "env://OPE...", "provider config should redact credential refs")
     require_true("credential_ref" not in providers["openrouter"], "provider config should not expose raw credential refs")
     require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose raw provider credential refs")
+
+
+def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/agents",
+        json={
+            "name": "Provider default runner",
+            "role": "run tasks through configured model",
+            "provider": "openrouter",
+        },
+    )
+
+    require_equal(response.status_code, 201, "agent creation should allow omitted model")
+    require_equal(response.json()["model"], "anthropic/claude-sonnet-4", "remote agents should use provider config model by default")
 
 
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
@@ -922,6 +954,9 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
     require_true("env://OPENROUTER_API_KEY" not in response.text, "provider result should not expose full credential refs")
     require_equal(result["tool_requests"][0]["arguments"]["credential_ref"], "[redacted]", "credential_ref arguments should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["token"], "[redacted]", "token-like arguments should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["accessToken"], "[redacted]", "camelCase token fields should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["apiKey"], "[redacted]", "camelCase key fields should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["clientSecret"], "[redacted]", "camelCase secret fields should be redacted")
 
 
 def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audit(tmp_path: Path, monkeypatch) -> None:
@@ -956,6 +991,8 @@ def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audi
 
     require_equal(response.status_code, 403, "provider errors should fail closed")
     require_equal(response.json()["detail"], "agent provider failed closed", "provider error details should be sanitized")
+    require_true("raw-provider-token" not in response.text, "provider error response should not expose adapter token details")
+    require_true("raw-provider-secret" not in str(audit_events), "provider error audit should not expose adapter secret details")
     require_true("OPENROUTER_API_KEY" not in response.text, "provider error response should not expose credential refs")
     require_true("OPENROUTER_API_KEY" not in str(audit_events), "provider error audit should not expose credential refs")
 
@@ -993,6 +1030,39 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert credential["policy"]["approval_required_actions"] == []
     assert credential["secret_ref_preview"].startswith("file://")
     assert "github-app.pem" not in response.text
+
+
+def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Metadata",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "metadata": {
+                "credential_kind": "generic_reference",
+                "credential_ref": "env://OPENROUTER_API_KEY",
+                "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
+                "nested": {"apiKey": "LEAKME_KEY"},
+            },
+        },
+    )
+
+    credential = response.json()
+
+    require_equal(response.status_code, 201, "credential metadata with secret-like values should be accepted")
+    require_equal(credential["metadata"]["credential_ref"], "[redacted]", "metadata credential refs should be redacted by key")
+    require_equal(credential["metadata"]["fallback_ref"], "env://SEC...", "secret refs in metadata values should be previewed")
+    require_equal(credential["metadata"]["nested"]["apiKey"], "[redacted]", "nested secret-like metadata keys should be redacted")
+    require_true("OPENROUTER_API_KEY" not in response.text, "credential metadata should not expose the primary secret ref target")
+    require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "credential metadata should not expose secondary secret ref targets")
+    require_true("LEAKME_KEY" not in response.text, "credential metadata should not expose token-like metadata values")
 
 
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:

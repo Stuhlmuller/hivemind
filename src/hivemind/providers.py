@@ -77,6 +77,12 @@ class AgentProviderError(ValueError):
     pass
 
 
+class MissingAgentProviderAdapterError(AgentProviderError):
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        super().__init__(f"agent provider adapter is not configured: {provider}")
+
+
 class LocalDeterministicProviderAdapter:
     def provider_id(self) -> str:
         return "local"
@@ -107,5 +113,5 @@ class AgentProviderRegistry:
         provider_id = normalize_agent_provider_id(request.provider)
         adapter = self._adapters.get(provider_id)
         if adapter is None:
-            raise AgentProviderError(f"agent provider adapter is not configured: {provider_id}")
+            raise MissingAgentProviderAdapterError(provider_id)
         return adapter.run(request)

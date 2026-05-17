@@ -56,6 +56,10 @@ class IntentReviewerConfig:
     model: str = "deterministic-policy"
     credential_ref: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.credential_ref:
+            validate_secret_ref(self.credential_ref)
+
     def provider_id(self) -> str:
         return normalize_intent_reviewer_provider(self.provider)
 
