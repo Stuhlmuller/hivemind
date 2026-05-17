@@ -12,7 +12,7 @@ from hivemind.models import (
     LeaseStatus,
 )
 from hivemind.policy import PolicyEngine
-from hivemind.secret_refs import validate_secret_ref
+from hivemind.secret_refs import validate_external_secret_ref
 
 
 class CredentialError(ValueError):
@@ -44,7 +44,7 @@ class CredentialVault:
             if credential_id in self._credentials:
                 raise CredentialError(f"credential already exists: {credential_id}")
             try:
-                secret_ref = validate_secret_ref(secret_ref)
+                secret_ref = validate_external_secret_ref(secret_ref)
             except ValueError as exc:
                 raise CredentialError(str(exc)) from exc
             record = CredentialRecord(

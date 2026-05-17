@@ -81,6 +81,22 @@ class CredentialServiceTests(unittest.TestCase):
                         ),
                     )
 
+    def test_vault_rejects_broker_generated_secret_refs(self) -> None:
+        vault = CredentialVault()
+
+        with self.assertRaisesRegex(CredentialError, "secret:// refs are broker-generated"):
+            vault.add(
+                credential_id="cred_forged_broker_secret",
+                name="Forged Broker Secret",
+                provider="github",
+                secret_ref="secret://cred_existing",  # nosec B106
+                policy=CredentialPolicy(
+                    allowed_agents=frozenset({"agent.scout"}),
+                    allowed_actions=frozenset({"read_repo"}),
+                    max_ttl_seconds=60,
+                ),
+            )
+
     def test_lease_only_allows_matching_action(self) -> None:
         service = make_service()
         lease = service.request_lease(

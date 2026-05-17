@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from hivemind.config import HivemindConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
-from hivemind.secret_refs import ALLOWED_SECRET_REF_SCHEMES, preview_secret_ref, validate_secret_ref
+from hivemind.secret_refs import ALLOWED_SECRET_REF_SCHEMES, preview_secret_ref, validate_external_secret_ref, validate_secret_ref
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
@@ -617,8 +617,10 @@ class HivemindStore:
 
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
-        if row["secret_ref"].startswith(f"{BROKER_SECRET_SCHEME}://"):
-            raise StoreError("secret:// refs are broker-generated; provide secret_value for broker-managed storage")
+        try:
+            row["secret_ref"] = validate_external_secret_ref(row["secret_ref"])
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
         with self.connect() as conn:
             conn.execute(CREDENTIAL_INSERT_SQL, row)
         return self.public_credential(row)
