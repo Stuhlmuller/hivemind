@@ -2204,6 +2204,74 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
     )
 
 
+def test_declarative_config_normalizes_mixed_case_policy_actions(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    config = {
+        "version": 1,
+        "agents": [
+            {
+                "id": agent["id"],
+                "name": agent["name"],
+                "role": agent["role"],
+                "provider": agent["provider"],
+                "model": agent["model"],
+                "system_prompt": agent["system_prompt"],
+            }
+        ],
+        "credentials": [
+            {
+                "id": "cred_mixed_actions",
+                "name": "Mixed Actions",
+                "provider": "github",
+                "secret_ref": "env://HIVEMIND_MIXED_ACTION_TOKEN",
+                "policy": {
+                    "allowed_agents": [agent["id"]],
+                    "allowed_actions": ["Read_Repo", "Open_Issue"],
+                    "approval_required_actions": ["Open_Issue"],
+                    "max_ttl_seconds": 60,
+                    "require_intent": True,
+                },
+                "metadata": {},
+            }
+        ],
+        "schedules": [
+            {
+                "id": "sched_mixed_actions",
+                "name": "Mixed case action",
+                "enabled": True,
+                "interval_seconds": 60,
+                "next_run_at": "2030-01-01T00:00:00+00:00",
+                "task_template": {
+                    "title": "Read repo with mixed case action",
+                    "assigned_agent_id": agent["id"],
+                    "credential_id": "cred_mixed_actions",
+                    "action": "Read_Repo",
+                    "intent": "Read repository metadata with a normalized action.",
+                },
+            }
+        ],
+    }
+
+    validate_response = client.post("/declarative-config/validate", json={"config": config})
+    require_equal(validate_response.status_code, 200, "mixed-case action validation should succeed")
+    import_response = client.post("/declarative-config/import", json={"dry_run": False, "config": config})
+    require_equal(import_response.status_code, 200, "mixed-case action import should succeed")
+
+    credential = next(item for item in client.get("/credentials").json() if item["id"] == "cred_mixed_actions")
+    require_equal(
+        credential["policy"]["allowed_actions"],
+        ["open_issue", "read_repo"],
+        "imported credential actions should be normalized",
+    )
+    require_equal(
+        credential["policy"]["approval_required_actions"],
+        ["open_issue"],
+        "imported approval gates should be normalized",
+    )
+
+
 def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

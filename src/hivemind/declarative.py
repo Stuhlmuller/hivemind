@@ -257,8 +257,8 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
                 "provider": _required_str(credential, "provider", prefix),
                 "secret_ref": secret_ref,
                 "allowed_agents": _string_list(policy.get("allowed_agents", []), f"{prefix}.policy.allowed_agents"),
-                "allowed_actions": _string_list(policy.get("allowed_actions", []), f"{prefix}.policy.allowed_actions"),
-                "approval_required_actions": _string_list(
+                "allowed_actions": _action_list(policy.get("allowed_actions", []), f"{prefix}.policy.allowed_actions"),
+                "approval_required_actions": _action_list(
                     policy.get("approval_required_actions"),
                     f"{prefix}.policy.approval_required_actions",
                 ),
@@ -568,6 +568,10 @@ def _string_list(value: Any, name: str) -> list[str]:
             raise DeclarativeConfigError(f"{name}[{index}] must be a non-empty string")
         normalized.append(item.strip())
     return sorted(set(normalized))
+
+
+def _action_list(value: Any, name: str) -> list[str]:
+    return sorted(set(item.lower() for item in _string_list(value, name)))
 
 
 def _int(value: Any, name: str, minimum: int, maximum: int) -> int:
