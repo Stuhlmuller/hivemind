@@ -18,10 +18,11 @@ delegation, and safe PR handling.
 - Startup sections in the role prompts should stay brief and nix-first. `flake.nix` is the main toolchain source; `.agents/TOOLS.md` is for external or host-managed exceptions.
 - The official top-level roles are `reviewer`, `feature-requester`, `worker`, `scout`, and `beekeeper`.
 - `scout` is the only loop allowed to use the Codex browser tool, and only on the default branch to validate shipped behavior and file concrete new issues.
-- `reviewer` audits the repo, open PRs, tests, docs, and release posture, then opens grounded issue follow-ups without doing implementation.
+- `reviewer` audits the repo, oldest open PRs, tests, docs, and release posture, then opens grounded issue follow-ups without doing implementation.
 - `feature-requester` opens concrete feature backlog issues without using the browser tool or starting implementation.
 - `worker` owns one issue branch at a time in its own dedicated worktree.
-- `beekeeper` owns the PR queue, merges ready PRs, and fixes obvious CI failures only when it is not stealing an active worker branch.
+- `worker` uses the default label priority `security,bug,help wanted`, unless `HIVEMIND_WORKER_PRIORITY_LABELS` overrides or clears it. Active branch, open PR, and lane-ownership checks still take precedence.
+- `beekeeper` owns the PR queue, prioritizes oldest open PRs, merges ready PRs, closes irrelevant or obsolete PRs with a reason, and fixes obvious CI failures only when it is not stealing an active worker branch.
 - Compatibility wrappers and aliases such as `browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should keep routing into the canonical roles instead of reintroducing separate lane logic.
 - Workers, beekeeper, feature-request drafting, and general development loops must not use the Codex browser tool.
 - Every loop should prepend the shared subagent prompt and allow bounded subagents whenever delegation is available and the tasks are concrete and non-overlapping.

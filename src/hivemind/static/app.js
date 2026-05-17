@@ -12,6 +12,7 @@ const state = {
   schedules: [],
   heartbeats: [],
   auditEvents: [],
+  editingTaskIds: new Set(),
   selectedCredentialTemplate: "github_oauth_app",
 };
 
@@ -159,6 +160,16 @@ const ROUTES = {
   hives: "/control/hives",
   credentials: "/control/credentials",
 };
+const TASK_STATUSES = ["queued", "running", "blocked", "done", "failed", "cancelled"];
+const TASK_TRANSITIONS = {
+  queued: ["running", "blocked", "done", "failed", "cancelled"],
+  running: ["blocked", "done", "failed", "cancelled"],
+  blocked: ["queued", "running", "done", "failed", "cancelled"],
+  done: [],
+  failed: [],
+  cancelled: [],
+};
+const CLOSED_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -236,6 +247,15 @@ function splitCsv(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeTaskPayload(payload) {
+  return {
+    ...payload,
+    assigned_agent_id: payload.assigned_agent_id || null,
+    credential_id: payload.credential_id || null,
+    heartbeat_seconds: payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null,
+  };
 }
 
 function credentialKindLabel(kind) {
@@ -347,8 +367,23 @@ function item(title, meta, pills = [], actions = "") {
 }
 
 function optionList(items, labelKey = "name", includeEmpty = false) {
-  const empty = includeEmpty ? '<option value="">None</option>' : "";
-  return empty + items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item[labelKey])}</option>`).join("");
+  return optionListWithSelected(items, null, labelKey, includeEmpty);
+}
+
+function optionListWithSelected(items, selectedValue, labelKey = "name", includeEmpty = false) {
+  const emptySelected = selectedValue === null || selectedValue === undefined || selectedValue === "";
+  const empty = includeEmpty ? `<option value=""${emptySelected ? " selected" : ""}>None</option>` : "";
+  return empty + items.map((item) => {
+    const selected = selectedValue === item.id ? " selected" : "";
+    return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(item[labelKey])}</option>`;
+  }).join("");
+}
+
+function scalarOptionList(values, selectedValue) {
+  return values.map((value) => {
+    const selected = selectedValue === value ? " selected" : "";
+    return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+  }).join("");
 }
 
 function currentPage() {
@@ -370,6 +405,123 @@ function credentialName(credentialId) {
 function agentName(agentId) {
   const agent = state.agents.find((item) => item.id === agentId);
   return agent ? agent.name : agentId;
+}
+
+function taskAssignmentLabel(task) {
+  return task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned";
+}
+
+function taskCredentialLabel(task) {
+  return task.credential_id ? credentialName(task.credential_id) : "none";
+}
+
+function taskHeartbeatLabel(task) {
+  return task.heartbeat_seconds ? `${escapeHtml(task.heartbeat_seconds)}s` : "manual";
+}
+
+function taskHeartbeatState(task) {
+  if (!task.heartbeat_seconds) return "manual";
+  if (!task.next_heartbeat_at) return "pending";
+  const nextHeartbeatAt = Date.parse(task.next_heartbeat_at);
+  if (Number.isNaN(nextHeartbeatAt)) return "pending";
+  return nextHeartbeatAt <= Date.now() ? "stale" : "waiting";
+}
+
+function latestHeartbeatsByTask() {
+  const latest = new Map();
+  for (const heartbeat of state.heartbeats) {
+    if (!latest.has(heartbeat.task_id)) {
+      latest.set(heartbeat.task_id, heartbeat);
+    }
+  }
+  return latest;
+}
+
+function toggleTaskEdit(taskId) {
+  if (state.editingTaskIds.has(taskId)) {
+    state.editingTaskIds.delete(taskId);
+  } else {
+    state.editingTaskIds.add(taskId);
+  }
+  renderTasks();
+}
+
+function renderTaskStatusButtons(task) {
+  const visibleStatuses = [task.status, ...(TASK_TRANSITIONS[task.status] || [])];
+  return visibleStatuses.map((status) => {
+    const current = status === task.status;
+    return `<button class="status-button${current ? " is-current" : ""}" ${current ? "disabled" : ""} data-task-status="${escapeHtml(task.id)}" data-status="${escapeHtml(status)}" type="button">${escapeHtml(status)}</button>`;
+  }).join("");
+}
+
+function renderTaskEditForm(task) {
+  if (!state.editingTaskIds.has(task.id)) {
+    return "";
+  }
+  return `
+    <form class="task-edit-form stack" data-task-edit-form="${escapeHtml(task.id)}">
+      <div class="inline-heading task-edit-header">
+        <div>
+          <h3>edit task</h3>
+          <p>status stays on explicit transition buttons</p>
+        </div>
+        <code>${escapeHtml(task.id)}</code>
+      </div>
+      <div class="two-col">
+        <label>title<input name="title" value="${escapeHtml(task.title)}" autocomplete="off" required /></label>
+        <label>priority<select name="priority">${scalarOptionList(["low", "normal", "high", "urgent"], task.priority)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>agent<select name="assigned_agent_id">${optionListWithSelected(state.agents, task.assigned_agent_id, "name", true)}</select></label>
+        <label>credential<select name="credential_id">${optionListWithSelected(state.credentials, task.credential_id, "name", true)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>action<input name="action" value="${escapeHtml(task.action || "")}" autocomplete="off" /></label>
+        <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="${escapeHtml(task.heartbeat_seconds ?? "")}" /></label>
+      </div>
+      <label>description<textarea name="description" rows="3">${escapeHtml(task.description || "")}</textarea></label>
+      <label>intent<textarea name="intent" rows="3">${escapeHtml(task.intent || "")}</textarea></label>
+      <div class="button-row">
+        <button type="submit">save edit</button>
+        <button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">close</button>
+      </div>
+    </form>`;
+}
+
+function renderTaskHealth() {
+  const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0]));
+  let staleHeartbeats = 0;
+  for (const task of state.tasks) {
+    counts[task.status] = (counts[task.status] || 0) + 1;
+    if (taskHeartbeatState(task) === "stale") {
+      staleHeartbeats += 1;
+    }
+  }
+  const dueSchedules = state.schedules.filter((schedule) => {
+    if (!schedule.enabled || !schedule.next_run_at) {
+      return false;
+    }
+    const nextRunAt = Date.parse(schedule.next_run_at);
+    return !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
+  }).length;
+  const taskAudits = state.auditEvents.filter((event) => event.type.startsWith("task.")).length;
+  $("#running-task-count").textContent = counts.running;
+  $("#blocked-task-count").textContent = counts.blocked;
+  $("#due-schedule-count").textContent = dueSchedules;
+  $("#stale-heartbeat-count").textContent = staleHeartbeats;
+  $("#task-health").innerHTML = [
+    ["queued", counts.queued],
+    ["running", counts.running],
+    ["blocked", counts.blocked],
+    ["due runs", dueSchedules],
+    ["stale hb", staleHeartbeats],
+    ["task audit", taskAudits],
+  ]
+    .map(
+      ([label, value]) =>
+        `<div class="status-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`,
+    )
+    .join("");
 }
 
 function leaseTimestampLabel(lease) {
@@ -397,7 +549,7 @@ function renderNavigation() {
       ? "credential broker / policies, leases, audit"
       : page === "hives"
         ? "hives / projects, trackers, issue request rates"
-        : "runtime overview / agents, tasks, schedules";
+        : "runtime overview / agents, tasks, schedules, heartbeats";
   for (const link of $$("[data-page-link]")) {
     const active = link.dataset.pageLink === page;
     link.classList.toggle("active", active);
@@ -612,19 +764,32 @@ function renderPendingApprovals() {
 }
 
 function renderTasks() {
+  const heartbeatsByTask = latestHeartbeatsByTask();
   $("#task-count").textContent = state.tasks.length;
+  renderTaskHealth();
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
+      const heartbeatState = taskHeartbeatState(task);
+      const lastHeartbeat = heartbeatsByTask.get(task.id);
+      const editAction = `<button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">${state.editingTaskIds.has(task.id) ? "close edit" : "edit task"}</button>`;
+      const heartbeatAction = CLOSED_TASK_STATUSES.has(task.status)
+        ? '<span class="meta">Heartbeat closed</span>'
+        : `<button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>`;
       const actions = `
-        <div class="button-row">
-          <button data-task-status="${escapeHtml(task.id)}" data-status="running" type="button">Start</button>
-          <button data-task-status="${escapeHtml(task.id)}" data-status="done" type="button">Done</button>
-          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>
+        <div class="task-actions">
+          <div class="status-row">
+            ${renderTaskStatusButtons(task)}
+          </div>
+          <div class="button-row">
+            ${editAction}
+            ${heartbeatAction}
+          </div>
+          ${renderTaskEditForm(task)}
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description)}<br>Status: ${escapeHtml(task.status)}<br>Hive: ${escapeHtml(hiveName(task.hive_id))}<br>Agent: ${escapeHtml(task.assigned_agent_id || "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
-        [task.priority],
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Hive: ${escapeHtml(hiveName(task.hive_id))}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Updated: ${escapeHtml(task.updated_at)}`,
+        [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${heartbeatState}`],
         actions,
       );
     })
@@ -635,6 +800,8 @@ function renderSchedules() {
   $("#schedule-count").textContent = state.schedules.length;
   $("#schedules-list").innerHTML = state.schedules
     .map((schedule) => {
+      const nextRunAt = Date.parse(schedule.next_run_at || "");
+      const due = schedule.enabled && !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
       const actions = `
         <div class="button-row">
           <button data-schedule-enabled="${escapeHtml(schedule.id)}" data-enabled="${schedule.enabled ? "false" : "true"}" type="button">
@@ -643,8 +810,13 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Hive: ${escapeHtml(hiveName(schedule.hive_id))}<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
-        [schedule.enabled ? "enabled" : "paused"],
+        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Hive: ${escapeHtml(hiveName(schedule.hive_id))}<br>Agent: ${escapeHtml(schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned")}<br>Credential: ${escapeHtml(schedule.credential_id ? credentialName(schedule.credential_id) : "none")}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
+        [
+          schedule.enabled ? "enabled" : "paused",
+          schedule.priority,
+          scheduleCatchUpPolicyLabel(schedule.catch_up_policy),
+          due ? "due now" : "scheduled",
+        ],
         actions,
       );
     })
@@ -656,7 +828,9 @@ function renderAudit() {
   $("#audit-list").innerHTML = state.auditEvents
     .map(
       (event) =>
-        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}<br>${escapeHtml(event.created_at)}</div></article>`,
+        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${Object.entries(event.metadata || {}).length ? `<br>${Object.entries(event.metadata)
+          .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(typeof value === "string" ? value : JSON.stringify(value))}`)
+          .join("<br>")}` : ""}<br>${escapeHtml(event.created_at)}</div></article>`,
     )
     .join("") || '<p class="meta">No audit events yet.</p>';
 }
@@ -985,8 +1159,7 @@ $("#pending-approvals-list").addEventListener("click", async (event) => {
 
 $("#task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
-  payload.heartbeat_seconds = payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null;
+  const payload = normalizeTaskPayload(readForm(event.currentTarget));
   await api("/tasks", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Task created.");
@@ -995,21 +1168,49 @@ $("#task-form").addEventListener("submit", async (event) => {
 $("#tasks-list").addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
-  if (target.dataset.taskStatus) {
-    await api(`/tasks/${target.dataset.taskStatus}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: target.dataset.status }),
-    });
+  try {
+    if (target.dataset.taskEditToggle) {
+      toggleTaskEdit(target.dataset.taskEditToggle);
+      return;
+    }
+    if (target.dataset.taskStatus) {
+      await api(`/tasks/${target.dataset.taskStatus}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: target.dataset.status }),
+      });
+      await refresh();
+      toast("Task updated.");
+    }
+    if (target.dataset.taskHeartbeat) {
+      await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
+        method: "POST",
+        body: JSON.stringify({ note: "manual heartbeat from console" }),
+      });
+      await refresh();
+      toast("Heartbeat recorded.");
+    }
+  } catch (error) {
     await refresh();
-    toast("Task updated.");
+    toast(error.message);
   }
-  if (target.dataset.taskHeartbeat) {
-    await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
-      method: "POST",
-      body: JSON.stringify({ note: "manual heartbeat from console" }),
-    });
+});
+
+$("#tasks-list").addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const taskId = form.dataset.taskEditForm;
+  if (!taskId) return;
+  event.preventDefault();
+  try {
+    const payload = normalizeTaskPayload(readForm(form));
+    await api(`/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    state.editingTaskIds.delete(taskId);
     await refresh();
-    toast("Heartbeat recorded.");
+    toast("Task details updated.");
+  } catch (error) {
+    state.editingTaskIds.add(taskId);
+    await refresh();
+    toast(error.message);
   }
 });
 
