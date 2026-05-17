@@ -75,7 +75,11 @@ Idea rule: use the project-local `hivemind-idea-issues` skill when the user
 asks for new Hivemind ideas, backlog or roadmap suggestions, gap analysis, or
 "what should we build next" without asking to start coding. This workflow must
 create GitHub issues only and must not start implementation, branches, or PRs
-unless the user explicitly changes scope.
+unless the user explicitly changes scope. Default toward backlog growth:
+assume there are usually more grounded issues to find, widen the audit across
+product, security, operations, docs, tests, release readiness, and developer
+experience before concluding, and only stop when further tickets would be
+duplicate or filler.
 
 Git workflow rule: use the project-local `hivemind-git-commits` skill before
 staging, committing, or pushing Hivemind changes so branch scope, commit
