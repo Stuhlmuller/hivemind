@@ -89,12 +89,14 @@ class LeakingAgentProviderAdapter:
         return ProviderRunResult(
             provider=request.provider,
             model=request.model,
-            output_text=f"provider used {request.credential_ref}",
+            output_text=f"provider used {request.credential_ref} with fallback env://SECONDARY_PROVIDER_SECRET",
             tool_requests=(
                 ProviderToolRequest(
                     name="debug",
                     arguments={
                         "credential_ref": request.credential_ref,
+                        "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
+                        "notes": ["secondary ref env://SECONDARY_PROVIDER_SECRET"],
                         "token": "placeholder",
                         "accessToken": "LEAKME_TOKEN",
                         "apiKey": "raw-api-key",
@@ -1041,7 +1043,19 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
     require_equal(response.status_code, 201, "provider result redaction should still allow successful task runs")
     require_true("OPENROUTER_API_KEY" not in response.text, "provider result should not expose credential ref targets")
     require_true("env://OPENROUTER_API_KEY" not in response.text, "provider result should not expose full credential refs")
+    require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "provider result should not expose other secret ref targets")
+    require_true("env://SEC..." in response.text, "provider result should preview other secret refs")
     require_equal(result["tool_requests"][0]["arguments"]["credential_ref"], "[redacted]", "credential_ref arguments should be redacted")
+    require_equal(
+        result["tool_requests"][0]["arguments"]["fallback_ref"],
+        "env://SEC...",
+        "non-sensitive secret-ref arguments should be previewed",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["notes"],
+        ["secondary ref env://SEC..."],
+        "secret refs embedded in free-text provider output should be previewed",
+    )
     require_equal(result["tool_requests"][0]["arguments"]["token"], "[redacted]", "token-like arguments should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["accessToken"], "[redacted]", "camelCase token fields should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["apiKey"], "[redacted]", "camelCase key fields should be redacted")

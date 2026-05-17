@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -140,6 +141,7 @@ SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
         "token",
     }
 )
+SECRET_REF_TEXT_PATTERN = re.compile(r"\b(?:env|file|vault|oauth|secret)://[^\s\"'<>),\]}]+")
 
 
 def provider_redaction_values(credential_ref: str | None) -> tuple[str, ...]:
@@ -167,7 +169,10 @@ def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
         redacted = value
         for secret_value in redactions:
             redacted = redacted.replace(secret_value, REDACTED_VALUE)
-        return redacted
+        return SECRET_REF_TEXT_PATTERN.sub(
+            lambda match: preview_secret_ref(validate_secret_ref(match.group(0))) or REDACTED_VALUE,
+            redacted,
+        )
     if isinstance(value, list):
         return [redact_provider_public_value(item, credential_ref) for item in value]
     if isinstance(value, dict):
