@@ -77,8 +77,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             emit_summary("backed up", args.path, bundle["summary"])
             return 0
         if args.command == "restore":
-            store = HivemindStore.from_env()
             bundle = read_json_document(args.path)
+            store = HivemindStore.from_env()
             summary = store.restore_backup_bundle(bundle)
             emit_summary("restored", args.path, summary)
             return 0

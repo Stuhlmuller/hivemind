@@ -358,6 +358,23 @@ def test_cli_backup_rejects_missing_hivemind_db_path_without_creating_database(
     require_true(backup_path.exists() is False, "backup should not write an output bundle after source validation fails")
 
 
+def test_cli_restore_reads_input_before_opening_destination_database(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    target_db = tmp_path / "target.db"
+    malformed_backup = tmp_path / "malformed-backup.json"
+    malformed_backup.write_text("{", encoding="utf-8")
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(target_db))
+
+    require_equal(main(["restore", str(malformed_backup)]), 1, "restore command should reject malformed input")
+
+    captured = capsys.readouterr()
+    require_true("Traceback" not in captured.err, "restore should not emit a raw traceback")
+    require_true(target_db.exists() is False, "restore should not create the destination DB before reading input")
+
+
 def test_backup_exports_declared_user_columns_from_upgraded_databases(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
     source.setup_admin("admin", TEST_PASSWORD)
