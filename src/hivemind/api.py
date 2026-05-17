@@ -41,7 +41,7 @@ class SpawnAgentRequest(BaseModel):
     name: str = Field(min_length=1)
     role: str = Field(min_length=1)
     provider: str = Field(default="local", min_length=1)
-    model: str = Field(default="deterministic-policy", min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     system_prompt: str = ""
 
 
@@ -101,6 +101,10 @@ class UpdateTaskStatusRequest(BaseModel):
 class HeartbeatRequest(BaseModel):
     agent_id: str | None = None
     note: str = Field(default="still working", min_length=1)
+
+
+class RunTaskRequest(BaseModel):
+    input: str = ""
 
 
 class CreateScheduleRequest(BaseModel):
@@ -481,6 +485,17 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return db.update_task_status(task_id, request.status)
         except StoreError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/run", status_code=201)
+    def run_task(task_id: str, request: RunTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.run_task(task_id, request.input)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/tasks/{task_id}/heartbeats", status_code=201)
     def record_heartbeat(task_id: str, request: HeartbeatRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
