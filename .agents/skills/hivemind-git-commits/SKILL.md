@@ -18,6 +18,10 @@ push unsigned commits.
 4. Create a signed commit. If signing fails, stop and fix signing instead of using an unsigned fallback.
 5. Before push or PR creation, verify the new commit is signed and the worktree is in the expected state.
 
+For multi-step implementation branches, use `hivemind-branch-checkpoints`
+earlier in the loop so you do not accumulate a large uncommitted pile before
+you reach this workflow.
+
 ## Guardrails
 
 - Do not disable commit signing for repository commits.
