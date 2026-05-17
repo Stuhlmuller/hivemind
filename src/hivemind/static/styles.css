@@ -291,7 +291,21 @@ main {
   gap: 10px;
 }
 
+.signal-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+}
+
 .metrics div {
+  padding: 12px;
+}
+
+.signal-strip div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(13, 17, 23, 0.96);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.28);
   padding: 12px;
 }
 
@@ -303,7 +317,23 @@ main {
   font-weight: 800;
 }
 
+.signal-strip span {
+  display: block;
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
 .metrics p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.signal-strip p {
   margin: 4px 0 0;
   color: var(--muted);
   font-family: var(--mono);
@@ -486,6 +516,38 @@ select[multiple] {
   margin-top: 12px;
 }
 
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.status-card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #090d13;
+  padding: 10px;
+}
+
+.status-card strong,
+.status-card span {
+  display: block;
+  font-family: var(--mono);
+}
+
+.status-card strong {
+  color: var(--cyan);
+  font-size: 1rem;
+}
+
+.status-card span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
 .item,
 .event {
   border: 1px solid var(--line);
@@ -535,6 +597,30 @@ select[multiple] {
 
 .button-row button {
   padding: 6px 8px;
+}
+
+.task-actions,
+.status-row {
+  display: grid;
+  gap: 8px;
+}
+
+.status-row {
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  margin-top: 10px;
+}
+
+.status-button {
+  width: 100%;
+  padding: 6px 8px;
+}
+
+.status-button.is-current,
+button:disabled {
+  border-color: rgba(104, 211, 145, 0.48);
+  background: rgba(104, 211, 145, 0.08);
+  color: var(--green);
+  cursor: default;
 }
 
 .audit {
@@ -671,6 +757,10 @@ select[multiple] {
   .template-grid {
     grid-template-columns: 1fr;
   }
+
+  .signal-strip {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
 }
 
 @media (max-width: 680px) {
@@ -689,6 +779,7 @@ select[multiple] {
   }
 
   .metrics,
+  .signal-strip,
   .two-col {
     grid-template-columns: 1fr;
   }

@@ -125,6 +125,8 @@ const ROUTES = {
   overview: "/",
   credentials: "/control/credentials",
 };
+const TASK_STATUSES = ["queued", "running", "blocked", "done", "failed", "cancelled"];
+const CLOSED_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -280,12 +282,85 @@ function agentName(agentId) {
   return agent ? agent.name : agentId;
 }
 
+function taskAssignmentLabel(task) {
+  return task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned";
+}
+
+function taskCredentialLabel(task) {
+  return task.credential_id ? credentialName(task.credential_id) : "none";
+}
+
+function taskHeartbeatLabel(task) {
+  return task.heartbeat_seconds ? `${escapeHtml(task.heartbeat_seconds)}s` : "manual";
+}
+
+function taskHeartbeatState(task) {
+  if (!task.heartbeat_seconds) return "manual";
+  if (!task.next_heartbeat_at) return "pending";
+  const nextHeartbeatAt = Date.parse(task.next_heartbeat_at);
+  if (Number.isNaN(nextHeartbeatAt)) return "pending";
+  return nextHeartbeatAt <= Date.now() ? "stale" : "waiting";
+}
+
+function latestHeartbeatsByTask() {
+  const latest = new Map();
+  for (const heartbeat of state.heartbeats) {
+    if (!latest.has(heartbeat.task_id)) {
+      latest.set(heartbeat.task_id, heartbeat);
+    }
+  }
+  return latest;
+}
+
+function renderTaskStatusButtons(task) {
+  return TASK_STATUSES.map((status) => {
+    const current = status === task.status;
+    return `<button class="status-button${current ? " is-current" : ""}" ${current ? "disabled" : ""} data-task-status="${escapeHtml(task.id)}" data-status="${escapeHtml(status)}" type="button">${escapeHtml(status)}</button>`;
+  }).join("");
+}
+
+function renderTaskHealth() {
+  const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0]));
+  let staleHeartbeats = 0;
+  for (const task of state.tasks) {
+    counts[task.status] = (counts[task.status] || 0) + 1;
+    if (taskHeartbeatState(task) === "stale") {
+      staleHeartbeats += 1;
+    }
+  }
+  const dueSchedules = state.schedules.filter((schedule) => {
+    if (!schedule.enabled || !schedule.next_run_at) {
+      return false;
+    }
+    const nextRunAt = Date.parse(schedule.next_run_at);
+    return !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
+  }).length;
+  const taskAudits = state.auditEvents.filter((event) => event.type.startsWith("task.")).length;
+  $("#running-task-count").textContent = counts.running;
+  $("#blocked-task-count").textContent = counts.blocked;
+  $("#due-schedule-count").textContent = dueSchedules;
+  $("#stale-heartbeat-count").textContent = staleHeartbeats;
+  $("#task-health").innerHTML = [
+    ["queued", counts.queued],
+    ["running", counts.running],
+    ["blocked", counts.blocked],
+    ["due runs", dueSchedules],
+    ["stale hb", staleHeartbeats],
+    ["task audit", taskAudits],
+  ]
+    .map(
+      ([label, value]) =>
+        `<div class="status-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`,
+    )
+    .join("");
+}
+
 function renderNavigation() {
   const page = currentPage();
   $("#overview-page").hidden = page !== "overview";
   $("#credentials-page").hidden = page !== "credentials";
   $("#surface-line").textContent =
-    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules";
+    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules, heartbeats";
   for (const link of $$("[data-page-link]")) {
     const active = link.dataset.pageLink === page;
     link.classList.toggle("active", active);
@@ -411,19 +486,26 @@ function renderLeases() {
 }
 
 function renderTasks() {
+  const heartbeatsByTask = latestHeartbeatsByTask();
   $("#task-count").textContent = state.tasks.length;
+  renderTaskHealth();
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
+      const heartbeatState = taskHeartbeatState(task);
+      const lastHeartbeat = heartbeatsByTask.get(task.id);
       const actions = `
-        <div class="button-row">
-          <button data-task-status="${escapeHtml(task.id)}" data-status="running" type="button">Start</button>
-          <button data-task-status="${escapeHtml(task.id)}" data-status="done" type="button">Done</button>
-          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>
+        <div class="task-actions">
+          <div class="status-row">
+            ${renderTaskStatusButtons(task)}
+          </div>
+          <div class="button-row">
+          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button"${CLOSED_TASK_STATUSES.has(task.status) ? " disabled" : ""}>Heartbeat</button>
+          </div>
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description)}<br>Status: ${escapeHtml(task.status)}<br>Agent: ${escapeHtml(task.assigned_agent_id || "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
-        [task.priority],
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
+        [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${heartbeatState}`],
         actions,
       );
     })
@@ -433,13 +515,15 @@ function renderTasks() {
 function renderSchedules() {
   $("#schedule-count").textContent = state.schedules.length;
   $("#schedules-list").innerHTML = state.schedules
-    .map((schedule) =>
-      item(
+    .map((schedule) => {
+      const nextRunAt = Date.parse(schedule.next_run_at || "");
+      const due = schedule.enabled && !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
+      return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Task: ${escapeHtml(schedule.task_title)}`,
-        [schedule.enabled ? "enabled" : "paused"],
-      ),
-    )
+        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned")}<br>Credential: ${escapeHtml(schedule.credential_id ? credentialName(schedule.credential_id) : "none")}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
+        [schedule.enabled ? "enabled" : "paused", schedule.priority, due ? "due now" : "scheduled"],
+      );
+    })
     .join("") || '<p class="meta">No schedules yet.</p>';
 }
 
@@ -448,7 +532,9 @@ function renderAudit() {
   $("#audit-list").innerHTML = state.auditEvents
     .map(
       (event) =>
-        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}<br>${escapeHtml(event.created_at)}</div></article>`,
+        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${Object.entries(event.metadata || {}).length ? `<br>${Object.entries(event.metadata)
+          .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(typeof value === "string" ? value : JSON.stringify(value))}`)
+          .join("<br>")}` : ""}<br>${escapeHtml(event.created_at)}</div></article>`,
     )
     .join("") || '<p class="meta">No broker activity yet.</p>';
 }
@@ -685,21 +771,26 @@ $("#task-form").addEventListener("submit", async (event) => {
 $("#tasks-list").addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
-  if (target.dataset.taskStatus) {
-    await api(`/tasks/${target.dataset.taskStatus}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: target.dataset.status }),
-    });
+  try {
+    if (target.dataset.taskStatus) {
+      await api(`/tasks/${target.dataset.taskStatus}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: target.dataset.status }),
+      });
+      await refresh();
+      toast("Task updated.");
+    }
+    if (target.dataset.taskHeartbeat) {
+      await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
+        method: "POST",
+        body: JSON.stringify({ note: "manual heartbeat from console" }),
+      });
+      await refresh();
+      toast("Heartbeat recorded.");
+    }
+  } catch (error) {
     await refresh();
-    toast("Task updated.");
-  }
-  if (target.dataset.taskHeartbeat) {
-    await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
-      method: "POST",
-      body: JSON.stringify({ note: "manual heartbeat from console" }),
-    });
-    await refresh();
-    toast("Heartbeat recorded.");
+    toast(error.message);
   }
 });
 

@@ -16,6 +16,13 @@ from threading import RLock
 from typing import Any, Iterator
 
 from hivemind.oauth import SecretBox
+from hivemind.models import (
+    INITIAL_TASK_STATUSES,
+    TASK_STATUS_TRANSITIONS,
+    TERMINAL_TASK_STATUSES,
+    TaskPriority,
+    TaskStatus,
+)
 from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
 
@@ -76,6 +83,14 @@ class StoreValidationError(StoreError):
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
+VALID_TASK_PRIORITIES = frozenset(priority.value for priority in TaskPriority)
+VALID_TASK_STATUSES = frozenset(status.value for status in TaskStatus)
+VALID_INITIAL_TASK_STATUSES = frozenset(status.value for status in INITIAL_TASK_STATUSES)
+TERMINAL_TASK_STATUS_VALUES = frozenset(status.value for status in TERMINAL_TASK_STATUSES)
+VALID_TASK_STATUS_TRANSITIONS = {
+    status.value: frozenset(next_status.value for next_status in next_statuses)
+    for status, next_statuses in TASK_STATUS_TRANSITIONS.items()
+}
 
 
 @dataclass(frozen=True)
@@ -821,7 +836,29 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown credential: {value}")
 
-    def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
+    def validate_task_priority(self, priority: str) -> None:
+        if priority not in VALID_TASK_PRIORITIES:
+            choices = ", ".join(sorted(VALID_TASK_PRIORITIES))
+            raise StoreValidationError(f"priority must be one of: {choices}")
+
+    def validate_task_status(self, status: str) -> None:
+        if status not in VALID_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_TASK_STATUSES))
+            raise StoreValidationError(f"status must be one of: {choices}")
+
+    def validate_initial_task_status(self, status: str) -> None:
+        if status not in VALID_INITIAL_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_INITIAL_TASK_STATUSES))
+            raise StoreValidationError(f"new tasks must start in one of: {choices}")
+
+    def validate_task_transition(self, current_status: str, next_status: str) -> None:
+        if current_status == next_status:
+            return
+        allowed_statuses = VALID_TASK_STATUS_TRANSITIONS.get(current_status)
+        if allowed_statuses is None or next_status not in allowed_statuses:
+            raise StoreValidationError(f"cannot transition task from {current_status} to {next_status}")
+
+    def create_task(self, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
         now = utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
         row = {
@@ -840,6 +877,9 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
+            self.validate_task_status(str(row["status"]))
+            self.validate_initial_task_status(str(row["status"]))
+            self.validate_task_priority(str(row["priority"]))
             self.validate_optional_agent_reference(
                 conn,
                 field_name="assigned_agent_id",
@@ -861,29 +901,58 @@ class HivemindStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("task references an unknown agent or credential") from exc
-        self.audit("task.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "task created", {"status": row["status"]})
+        self.audit(
+            "task.created",
+            actor_id,
+            row["id"],
+            "allowed",
+            "task created",
+            {
+                "status": row["status"],
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "heartbeat_seconds": row["heartbeat_seconds"],
+            },
+        )
         return row
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
 
-    def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
+    def update_task_status(self, task_id: str, status: str, *, actor_id: str) -> dict[str, Any]:
         now = iso()
+        self.validate_task_status(str(status))
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
+            current_status = str(row["status"])
+            self.validate_task_transition(current_status, str(status))
+            if current_status == str(status):
+                return dict(row)
             conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (status, now, task_id))
-        self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
+        self.audit(
+            "task.status.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            f"task marked {status}",
+            {"from_status": current_status, "to_status": str(status)},
+        )
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as conn:
             return dict(self.get_task_row(conn, task_id))
 
-    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
+    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str, *, actor_id: str) -> dict[str, Any]:
         now = utcnow()
         with self.connect() as conn:
             task = self.get_task_row(conn, task_id)
+            if task["status"] in TERMINAL_TASK_STATUS_VALUES:
+                raise StoreValidationError(f"cannot record heartbeat for task in terminal status: {task['status']}")
             provided_agent_id = agent_id or None
             self.validate_optional_agent_reference(
                 conn,
@@ -908,7 +977,14 @@ class HivemindStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("agent_id references unknown agent") from exc
             conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
-        self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
+        self.audit(
+            "task.heartbeat",
+            actor_id,
+            task_id,
+            "allowed",
+            "heartbeat recorded",
+            {"note": note, "agent_id": event["agent_id"]},
+        )
         return event
 
     def list_heartbeats(self, task_id: str | None = None) -> list[dict[str, Any]]:
@@ -919,7 +995,7 @@ class HivemindStore:
                 rows = conn.execute("SELECT * FROM heartbeat_events ORDER BY created_at DESC")
             return [dict(row) for row in rows]
 
-    def create_schedule(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_schedule(self, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
         now = utcnow()
         interval = int(data["interval_seconds"])
         if interval < 60:
@@ -942,6 +1018,7 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
+            self.validate_task_priority(str(row["priority"]))
             self.validate_optional_agent_reference(
                 conn,
                 field_name="assigned_agent_id",
@@ -963,14 +1040,29 @@ class HivemindStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("schedule references an unknown agent or credential") from exc
-        self.audit("schedule.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "schedule created", {"interval_seconds": interval})
+        self.audit(
+            "schedule.created",
+            actor_id,
+            row["id"],
+            "allowed",
+            "schedule created",
+            {
+                "interval_seconds": interval,
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "enabled": bool(row["enabled"]),
+            },
+        )
         return self.public_schedule(row)
 
     def list_schedules(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [self.public_schedule(row) for row in conn.execute("SELECT * FROM schedules ORDER BY created_at DESC")]
 
-    def run_due_schedules_once(self) -> list[dict[str, Any]]:
+    def run_due_schedules_once(self, *, actor_id: str = "scheduler") -> list[dict[str, Any]]:
         now = utcnow()
         created: list[dict[str, Any]] = []
         with self.connect() as conn:
@@ -986,7 +1078,8 @@ class HivemindStore:
                     "action": row["action"],
                     "intent": row["intent"],
                     "heartbeat_seconds": None,
-                }
+                },
+                actor_id=actor_id,
             )
             next_run = now + timedelta(seconds=int(row["interval_seconds"]))
             with self.connect() as conn:
@@ -994,7 +1087,14 @@ class HivemindStore:
                     "UPDATE schedules SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
                     (iso(now), iso(next_run), iso(now), row["id"]),
                 )
-            self.audit("schedule.ran", row["assigned_agent_id"] or "scheduler", row["id"], "allowed", "scheduled task created", {"task_id": task["id"]})
+            self.audit(
+                "schedule.ran",
+                actor_id,
+                row["id"],
+                "allowed",
+                "scheduled task created",
+                {"task_id": task["id"]},
+            )
             created.append(task)
         return created
 

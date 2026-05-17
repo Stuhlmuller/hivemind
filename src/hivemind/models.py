@@ -19,6 +19,69 @@ class LeaseStatus(StrEnum):
     REVOKED = "revoked"
 
 
+class TaskStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    BLOCKED = "blocked"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class TaskPriority(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+INITIAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        TaskStatus.BLOCKED,
+    }
+)
+TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }
+)
+TASK_STATUS_TRANSITIONS = {
+    TaskStatus.QUEUED: frozenset(
+        {
+            TaskStatus.RUNNING,
+            TaskStatus.BLOCKED,
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    TaskStatus.RUNNING: frozenset(
+        {
+            TaskStatus.BLOCKED,
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    TaskStatus.BLOCKED: frozenset(
+        {
+            TaskStatus.QUEUED,
+            TaskStatus.RUNNING,
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    TaskStatus.DONE: frozenset(),
+    TaskStatus.FAILED: frozenset(),
+    TaskStatus.CANCELLED: frozenset(),
+}
+
+
 @dataclass(frozen=True)
 class Agent:
     id: str
@@ -140,4 +203,3 @@ class AuditEvent:
             "created_at": self.created_at.isoformat(),
             "metadata": self.metadata,
         }
-

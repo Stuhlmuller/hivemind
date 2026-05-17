@@ -97,7 +97,7 @@ agents: brokered capabilities</pre>
                   <p class="eyebrow">overview</p>
                   <h2>runtime surface</h2>
                 </div>
-                <p>agents, tasks, schedules, and the live audit stream stay in the main control surface.</p>
+                <p>agents, tasks, schedules, stale heartbeats, and the live audit stream stay in one operator surface.</p>
               </div>
 
               <section class="metrics" aria-label="Runtime summary">
@@ -107,6 +107,13 @@ agents: brokered capabilities</pre>
                 <div><span id="schedule-count">0</span><p>schedules</p></div>
                 <div><span id="lease-count">0</span><p>leases</p></div>
                 <div><span id="audit-count">0</span><p>audit</p></div>
+              </section>
+
+              <section class="signal-strip" aria-label="Task and schedule signals">
+                <div><span id="running-task-count">0</span><p>running tasks</p></div>
+                <div><span id="blocked-task-count">0</span><p>blocked tasks</p></div>
+                <div><span id="due-schedule-count">0</span><p>due schedules</p></div>
+                <div><span id="stale-heartbeat-count">0</span><p>stale heartbeats</p></div>
               </section>
 
               <section class="workspace overview-workspace">
@@ -131,7 +138,7 @@ agents: brokered capabilities</pre>
                 <div class="panel">
                   <div class="panel-heading">
                     <h2>tasks</h2>
-                    <p>tickets with heartbeat</p>
+                    <p>queue, assignment, heartbeat SLA</p>
                   </div>
                   <form id="task-form" class="stack">
                     <label>title<input name="title" value="review credential policy" autocomplete="off" /></label>
@@ -141,19 +148,36 @@ agents: brokered capabilities</pre>
                       <label>credential<select name="credential_id"></select></label>
                     </div>
                     <div class="two-col">
+                      <label>priority<select name="priority">
+                        <option value="low">low</option>
+                        <option value="normal" selected>normal</option>
+                        <option value="high">high</option>
+                        <option value="urgent">urgent</option>
+                      </select></label>
                       <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                    </div>
+                    <div class="two-col">
                       <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="300" /></label>
+                      <label>status<select name="status">
+                        <option value="queued" selected>queued</option>
+                        <option value="running">running</option>
+                        <option value="blocked">blocked</option>
+                        <option value="done">done</option>
+                        <option value="failed">failed</option>
+                        <option value="cancelled">cancelled</option>
+                      </select></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Use repo metadata to produce an actionable implementation note.</textarea></label>
                     <button type="submit">create task</button>
                   </form>
+                  <div id="task-health" class="status-strip" aria-label="Task health"></div>
                   <div id="tasks-list" class="list"></div>
                 </div>
 
                 <div class="panel">
                   <div class="panel-heading">
                     <h2>schedules</h2>
-                    <p>local interval jobs</p>
+                    <p>interval jobs and due runs</p>
                   </div>
                   <form id="schedule-form" class="stack">
                     <label>name<input name="name" value="policy review cadence" autocomplete="off" /></label>
@@ -165,7 +189,16 @@ agents: brokered capabilities</pre>
                     <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
                     <div class="two-col">
                       <label>credential<select name="credential_id"></select></label>
+                      <label>priority<select name="priority">
+                        <option value="low">low</option>
+                        <option value="normal" selected>normal</option>
+                        <option value="high">high</option>
+                        <option value="urgent">urgent</option>
+                      </select></label>
+                    </div>
+                    <div class="two-col">
                       <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>schedule state<input value="enabled" autocomplete="off" readonly /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
                     <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
