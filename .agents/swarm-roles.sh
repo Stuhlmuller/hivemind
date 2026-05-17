@@ -4,6 +4,10 @@ swarm_role_names() {
   printf '%s\n' reviewer worker feature-requester scout beekeeper
 }
 
+default_worker_priority_labels() {
+  printf '%s\n' "security,bug,help wanted"
+}
+
 trim_swarm_label() {
   local value="$1"
 
@@ -13,12 +17,18 @@ trim_swarm_label() {
 }
 
 worker_priority_labels() {
-  local raw="${HIVEMIND_WORKER_PRIORITY_LABELS:-}"
+  local raw
   local remaining
   local item
   local label
   local labels=""
   local allowed_label_pattern='^[[:alnum:] ._:/+-]+$'
+
+  if [[ "${HIVEMIND_WORKER_PRIORITY_LABELS+x}" == "x" ]]; then
+    raw="$HIVEMIND_WORKER_PRIORITY_LABELS"
+  else
+    raw="$(default_worker_priority_labels)"
+  fi
 
   if [[ -z "$raw" ]]; then
     return 0
