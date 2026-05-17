@@ -636,7 +636,7 @@ class HivemindStore:
             raise StoreError("secret_value is required")
         credential_id = data.get("id") or f"cred_{secrets.token_urlsafe(8)}"
         metadata = dict(data.get("metadata") or {})
-        metadata.setdefault("credential_kind", "managed_secret")
+        metadata["credential_kind"] = "managed_secret"
         credential_row = self._prepare_credential_row(
             {
                 **data,

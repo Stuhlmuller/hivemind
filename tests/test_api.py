@@ -884,6 +884,7 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
             "allowed_actions": ["review_intent"],
             "max_ttl_seconds": 180,
             "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference", "note": "operator supplied"},
         },
     )
 
@@ -891,6 +892,7 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     credential = response.json()
     assert credential["provider"] == "openrouter"
     assert credential["metadata"]["credential_kind"] == "managed_secret"
+    require_equal(credential["metadata"]["note"], "operator supplied", "managed secrets should preserve non-kind metadata")
     assert credential["secret_ref_preview"].startswith("secret://")
     assert "secret_value" not in credential
     assert managed_value not in response.text
