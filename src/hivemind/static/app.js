@@ -448,10 +448,10 @@ function renderSelectors() {
     '#spawn-form select[name="hive_id"]',
     '#task-form select[name="hive_id"]',
     '#schedule-form select[name="hive_id"]',
-    '#hive-issue-form select[name="hive_id"]',
   ]) {
     $(selector).innerHTML = optionList(state.hives, "name", true);
   }
+  $('#hive-issue-form select[name="hive_id"]').innerHTML = optionList(state.hives);
   for (const selector of [
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
@@ -845,6 +845,14 @@ $("#hive-form").addEventListener("submit", async (event) => {
 $("#hive-issue-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const payload = readForm(event.currentTarget);
+  if (!payload.hive_id) {
+    toast("Create a hive before queueing issue requests.");
+    return;
+  }
+  if (!payload.agent_id) {
+    toast("Register an agent before queueing issue requests.");
+    return;
+  }
   payload.labels = splitCsv(payload.labels);
   await api("/issue-requests", { method: "POST", body: JSON.stringify(payload) });
   await refresh();

@@ -380,8 +380,10 @@ def test_hives_frontend_route_is_served(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
     response = client.get("/control/hives")
+    script_response = client.get("/static/app.js")
 
     require_equal(response.status_code, 200, "hives frontend route should render")
+    require_equal(script_response.status_code, 200, "frontend script should render")
     require_true('data-page-link="hives"' in response.text, "hives route should expose navigation")
     require_true('id="hive-form"' in response.text, "hives route should expose the hive form")
     require_true('id="hive-issue-form"' in response.text, "hives route should expose issue request form")
@@ -390,6 +392,15 @@ def test_hives_frontend_route_is_served(tmp_path: Path) -> None:
         "hives route should expose issue rate controls",
     )
     require_true('name="can_spawn_subagents"' in response.text, "hives route should expose subagent controls")
+    require_true(
+        "$('#hive-issue-form select[name=\"hive_id\"]').innerHTML = optionList(state.hives);"
+        in script_response.text,
+        "issue request hive selector should default to a concrete hive",
+    )
+    require_true(
+        'toast("Create a hive before queueing issue requests.")' in script_response.text,
+        "issue request flow should guard missing hives before posting",
+    )
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
