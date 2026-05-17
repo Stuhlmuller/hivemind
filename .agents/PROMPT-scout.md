@@ -1,6 +1,6 @@
 # Hivemind Scout Loop
 
-Use this prompt for the issue-scout loop. This loop audits the repository and backlog, then opens or refines GitHub issues. It does not implement code or open pull requests.
+Use this prompt for a scout loop. This loop audits the repository and shipped behavior on the default branch, then opens or refines GitHub issues. It does not implement code or open pull requests.
 
 ## Startup requirements
 
@@ -20,16 +20,17 @@ Before doing any other work:
 
 ## Mission
 
-1. Inspect the repository issues before proposing work:
+1. Read the injected lane assignment above first.
+2. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
-2. Audit the current codebase, tests, docs, automation scripts, and release gaps.
-3. Open new issues only for gaps that are not already covered by existing issues or open PRs.
-4. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
-5. Keep each new issue focused on one concern.
-6. Include concrete evidence from the codebase in every issue body.
-7. Open at most 2 new issues per run unless the backlog is empty.
-8. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
+3. Audit the current codebase, tests, docs, automation scripts, release gaps, and shipped behavior on the default branch.
+4. Open new issues only for gaps that are not already covered by existing issues or open PRs.
+5. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
+6. Keep each new issue focused on one concern.
+7. Include concrete evidence from the codebase or shipped behavior in every issue body.
+8. Open at most 2 new issues per run unless the backlog is empty.
+9. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
 
 ## Browser Scope
 
