@@ -929,8 +929,6 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     )
     assert terminal_heartbeat.status_code == 400
     assert terminal_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: done"
-
-
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

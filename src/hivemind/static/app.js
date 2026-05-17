@@ -126,6 +126,14 @@ const ROUTES = {
   credentials: "/control/credentials",
 };
 const TASK_STATUSES = ["queued", "running", "blocked", "done", "failed", "cancelled"];
+const TASK_TRANSITIONS = {
+  queued: ["running", "blocked", "done", "failed", "cancelled"],
+  running: ["blocked", "done", "failed", "cancelled"],
+  blocked: ["queued", "running", "done", "failed", "cancelled"],
+  done: [],
+  failed: [],
+  cancelled: [],
+};
 const CLOSED_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
 
 const $ = (selector) => document.querySelector(selector);
@@ -313,7 +321,8 @@ function latestHeartbeatsByTask() {
 }
 
 function renderTaskStatusButtons(task) {
-  return TASK_STATUSES.map((status) => {
+  const visibleStatuses = [task.status, ...(TASK_TRANSITIONS[task.status] || [])];
+  return visibleStatuses.map((status) => {
     const current = status === task.status;
     return `<button class="status-button${current ? " is-current" : ""}" ${current ? "disabled" : ""} data-task-status="${escapeHtml(task.id)}" data-status="${escapeHtml(status)}" type="button">${escapeHtml(status)}</button>`;
   }).join("");
@@ -493,13 +502,16 @@ function renderTasks() {
     .map((task) => {
       const heartbeatState = taskHeartbeatState(task);
       const lastHeartbeat = heartbeatsByTask.get(task.id);
+      const heartbeatAction = CLOSED_TASK_STATUSES.has(task.status)
+        ? '<span class="meta">Heartbeat closed</span>'
+        : `<button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>`;
       const actions = `
         <div class="task-actions">
           <div class="status-row">
             ${renderTaskStatusButtons(task)}
           </div>
           <div class="button-row">
-          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button"${CLOSED_TASK_STATUSES.has(task.status) ? " disabled" : ""}>Heartbeat</button>
+            ${heartbeatAction}
           </div>
         </div>`;
       return item(
