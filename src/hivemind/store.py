@@ -18,6 +18,7 @@ from typing import Any, Iterator
 
 from hivemind.config import HivemindConfig
 from hivemind.models import (
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
     INITIAL_TASK_STATUSES,
     TASK_STATUS_TRANSITIONS,
     TERMINAL_TASK_STATUSES,
@@ -46,6 +47,9 @@ from hivemind.secret_refs import (
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
+LEASE_REQUEST_RATE_LIMIT_EVENTS = ("credential.lease.issued", "credential.lease.pending")
+ACTION_RATE_LIMIT_EVENTS = ("credential.action.performed",)
+CREDENTIAL_BY_ID_QUERY = "SELECT * FROM credentials WHERE id = ?"
 
 
 def utcnow() -> datetime:
@@ -145,8 +149,20 @@ BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
     INSERT INTO credentials
-    (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-    VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+    (
+        id, name, provider, secret_ref, allowed_agents, allowed_actions,
+        approval_required_actions, max_ttl_seconds, require_intent,
+        agent_lease_limit, credential_lease_limit, credential_action_limit,
+        rate_limit_window_seconds, provider_token_budget, provider_cost_budget_cents,
+        metadata, created_at, updated_at
+    )
+    VALUES (
+        :id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions,
+        :approval_required_actions, :max_ttl_seconds, :require_intent,
+        :agent_lease_limit, :credential_lease_limit, :credential_action_limit,
+        :rate_limit_window_seconds, :provider_token_budget, :provider_cost_budget_cents,
+        :metadata, :created_at, :updated_at
+    )
 """
 BACKUP_FORMAT = "hivemind-logical-backup"
 BACKUP_FORMAT_VERSION = 1
@@ -176,6 +192,12 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "approval_required_actions",
         "max_ttl_seconds",
         "require_intent",
+        "agent_lease_limit",
+        "credential_lease_limit",
+        "credential_action_limit",
+        "rate_limit_window_seconds",
+        "provider_token_budget",
+        "provider_cost_budget_cents",
         "metadata",
         "created_at",
         "updated_at",
@@ -216,6 +238,14 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
     "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
 }
+BACKUP_CREDENTIAL_ROW_DEFAULTS: dict[str, Any] = {
+    "agent_lease_limit": None,
+    "credential_lease_limit": None,
+    "credential_action_limit": None,
+    "rate_limit_window_seconds": DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    "provider_token_budget": None,
+    "provider_cost_budget_cents": None,
+}
 BACKUP_INSERT_STATEMENTS: dict[str, str] = {
     "users": (
         "INSERT INTO users (id, username, password_hash, role, created_at) "
@@ -227,11 +257,15 @@ BACKUP_INSERT_STATEMENTS: dict[str, str] = {
     ),
     "credentials": (
         "INSERT INTO credentials (id, name, provider, secret_ref, allowed_agents, allowed_actions, "
-        "approval_required_actions, "
-        "max_ttl_seconds, require_intent, metadata, created_at, updated_at) "
+        "approval_required_actions, max_ttl_seconds, require_intent, "
+        "agent_lease_limit, credential_lease_limit, credential_action_limit, "
+        "rate_limit_window_seconds, provider_token_budget, provider_cost_budget_cents, "
+        "metadata, created_at, updated_at) "
         "VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, "
-        ":approval_required_actions, "
-        ":max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)"
+        ":approval_required_actions, :max_ttl_seconds, :require_intent, "
+        ":agent_lease_limit, :credential_lease_limit, :credential_action_limit, "
+        ":rate_limit_window_seconds, :provider_token_budget, :provider_cost_budget_cents, "
+        ":metadata, :created_at, :updated_at)"
     ),
     "tasks": (
         "INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, credential_id, "
@@ -364,6 +398,12 @@ class SessionUser:
     role: str
 
 
+@dataclass(frozen=True)
+class RateLimitDenial:
+    reason: str
+    metadata: dict[str, Any]
+
+
 class HivemindStore:
     def __init__(
         self,
@@ -469,6 +509,12 @@ class HivemindStore:
                   approval_required_actions TEXT NOT NULL DEFAULT '[]',
                   max_ttl_seconds INTEGER NOT NULL,
                   require_intent INTEGER NOT NULL,
+                  agent_lease_limit INTEGER,
+                  credential_lease_limit INTEGER,
+                  credential_action_limit INTEGER,
+                  rate_limit_window_seconds INTEGER NOT NULL DEFAULT 60,
+                  provider_token_budget INTEGER,
+                  provider_cost_budget_cents INTEGER,
                   metadata TEXT NOT NULL,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
@@ -575,6 +621,7 @@ class HivemindStore:
             self._migrate_users_to_username(conn)
             self._migrate_schedules_to_catch_up_policy(conn)
             self._migrate_credentials_to_approval_actions(conn)
+            self._migrate_credentials_to_rate_limits(conn)
             self._migrate_leases_to_store_ttl(conn)
             self._migrate_terminal_task_heartbeats(conn)
 
@@ -627,6 +674,22 @@ class HivemindStore:
         if "approval_required_actions" in columns:
             return
         conn.execute("ALTER TABLE credentials ADD COLUMN approval_required_actions TEXT NOT NULL DEFAULT '[]'")
+
+    def _migrate_credentials_to_rate_limits(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(credentials)")}
+        migrations = {
+            "agent_lease_limit": "ALTER TABLE credentials ADD COLUMN agent_lease_limit INTEGER",
+            "credential_lease_limit": "ALTER TABLE credentials ADD COLUMN credential_lease_limit INTEGER",
+            "credential_action_limit": "ALTER TABLE credentials ADD COLUMN credential_action_limit INTEGER",
+            "rate_limit_window_seconds": (
+                "ALTER TABLE credentials ADD COLUMN rate_limit_window_seconds INTEGER NOT NULL DEFAULT 60"
+            ),
+            "provider_token_budget": "ALTER TABLE credentials ADD COLUMN provider_token_budget INTEGER",
+            "provider_cost_budget_cents": "ALTER TABLE credentials ADD COLUMN provider_cost_budget_cents INTEGER",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                conn.execute(statement)
 
     def _migrate_leases_to_store_ttl(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(leases)")}
@@ -715,6 +778,19 @@ class HivemindStore:
             if not isinstance(metadata, dict):
                 raise ValueError("credential metadata must be a JSON object")
             validate_external_credential_metadata(metadata)
+            for field_name in (
+                "agent_lease_limit",
+                "credential_lease_limit",
+                "credential_action_limit",
+                "provider_token_budget",
+                "provider_cost_budget_cents",
+            ):
+                row[field_name] = self.normalize_optional_positive_int(row.get(field_name), field_name=field_name)
+            row["rate_limit_window_seconds"] = self.normalize_positive_int(
+                row.get("rate_limit_window_seconds"),
+                field_name="rate_limit_window_seconds",
+                default=DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            )
         except ValueError as exc:
             raise StoreValidationError(str(exc)) from exc
         return row
@@ -748,6 +824,8 @@ class HivemindStore:
             if extra_columns:
                 extras = ", ".join(extra_columns)
                 raise StoreValidationError(f"backup table {table} contains unsupported columns: {extras}")
+            if table == "credentials":
+                row_dict = {**BACKUP_CREDENTIAL_ROW_DEFAULTS, **row_dict}
             missing_columns = [column for column in columns if column not in row_dict]
             if missing_columns:
                 missing = ", ".join(missing_columns)
@@ -895,8 +973,14 @@ class HivemindStore:
             conn.execute(
                 """
                 INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (
+                  id, name, provider, secret_ref, allowed_agents, allowed_actions,
+                  approval_required_actions, max_ttl_seconds, require_intent,
+                  agent_lease_limit, credential_lease_limit, credential_action_limit,
+                  rate_limit_window_seconds, provider_token_budget, provider_cost_budget_cents,
+                  metadata, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "cred_demo_github",
@@ -908,6 +992,12 @@ class HivemindStore:
                     dumps([]),
                     120,
                     1,
+                    None,
+                    None,
+                    None,
+                    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+                    None,
+                    None,
                     dumps({"purpose": "safe local demo credential reference"}),
                     now,
                     now,
@@ -1000,6 +1090,23 @@ class HivemindStore:
             )
         return normalized
 
+    def normalize_optional_positive_int(self, value: Any, *, field_name: str) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as exc:
+            raise StoreError(f"{field_name} must be a positive integer") from exc
+        if normalized < 1:
+            raise StoreError(f"{field_name} must be at least 1")
+        return normalized
+
+    def normalize_positive_int(self, value: Any, *, field_name: str, default: int) -> int:
+        normalized = self.normalize_optional_positive_int(default if value is None or value == "" else value, field_name=field_name)
+        if normalized is None:
+            raise StoreError(f"{field_name} must be at least 1")
+        return normalized
+
     def _prepare_credential_row(
         self,
         data: dict[str, Any],
@@ -1041,6 +1148,31 @@ class HivemindStore:
             "approval_required_actions": dumps(approval_required_actions),
             "max_ttl_seconds": int(data.get("max_ttl_seconds") or 300),
             "require_intent": 1 if data.get("require_intent", True) else 0,
+            "agent_lease_limit": self.normalize_optional_positive_int(
+                data.get("agent_lease_limit"),
+                field_name="agent_lease_limit",
+            ),
+            "credential_lease_limit": self.normalize_optional_positive_int(
+                data.get("credential_lease_limit"),
+                field_name="credential_lease_limit",
+            ),
+            "credential_action_limit": self.normalize_optional_positive_int(
+                data.get("credential_action_limit"),
+                field_name="credential_action_limit",
+            ),
+            "rate_limit_window_seconds": self.normalize_positive_int(
+                data.get("rate_limit_window_seconds"),
+                field_name="rate_limit_window_seconds",
+                default=DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            ),
+            "provider_token_budget": self.normalize_optional_positive_int(
+                data.get("provider_token_budget"),
+                field_name="provider_token_budget",
+            ),
+            "provider_cost_budget_cents": self.normalize_optional_positive_int(
+                data.get("provider_cost_budget_cents"),
+                field_name="provider_cost_budget_cents",
+            ),
             "metadata": dumps(metadata),
             "created_at": now,
             "updated_at": now,
@@ -1225,7 +1357,7 @@ class HivemindStore:
 
     def get_credential(self, credential_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM credentials WHERE id = ?", (credential_id,)).fetchone()
+            row = conn.execute(CREDENTIAL_BY_ID_QUERY, (credential_id,)).fetchone()
             if row is None:
                 raise StoreNotFoundError(f"unknown credential: {credential_id}")
             return dict(row)
@@ -1242,11 +1374,169 @@ class HivemindStore:
                 "approval_required_actions": loads(row["approval_required_actions"], []),
                 "max_ttl_seconds": row["max_ttl_seconds"],
                 "require_intent": bool(row["require_intent"]),
+                "agent_lease_limit": row["agent_lease_limit"],
+                "credential_lease_limit": row["credential_lease_limit"],
+                "credential_action_limit": row["credential_action_limit"],
+                "rate_limit_window_seconds": row["rate_limit_window_seconds"] or DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+                "provider_token_budget": row["provider_token_budget"],
+                "provider_cost_budget_cents": row["provider_cost_budget_cents"],
             },
             "metadata": redact_public_metadata_value(loads(row["metadata"], {})),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def credential_policy_limit(self, credential: sqlite3.Row | dict[str, Any], field_name: str) -> int | None:
+        value = credential[field_name]
+        return int(value) if value is not None else None
+
+    def credential_rate_limit_window(self, credential: sqlite3.Row | dict[str, Any]) -> int:
+        return int(credential["rate_limit_window_seconds"] or DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
+
+    def count_recent_audit_events(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        event_types: tuple[str, ...],
+        target_id: str,
+        actor_id: str | None = None,
+        window_seconds: int,
+    ) -> int:
+        since = iso(utcnow() - timedelta(seconds=window_seconds))
+        if len(event_types) == 1:
+            query = "SELECT COUNT(*) FROM audit_events WHERE target_id = ? AND type = ? AND created_at >= ?"
+            params: list[Any] = [target_id, event_types[0], since]
+        elif len(event_types) == 2:
+            query = "SELECT COUNT(*) FROM audit_events WHERE target_id = ? AND type IN (?, ?) AND created_at >= ?"
+            params = [target_id, event_types[0], event_types[1], since]
+        else:
+            raise StoreError("unsupported audit event count shape")
+        if actor_id is not None:
+            query += " AND actor_id = ?"
+            params.append(actor_id)
+        return int(conn.execute(query, params).fetchone()[0])
+
+    def lease_request_rate_limit_denial(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        credential: sqlite3.Row | dict[str, Any],
+        agent_id: str,
+    ) -> RateLimitDenial | None:
+        window_seconds = self.credential_rate_limit_window(credential)
+        agent_limit = self.credential_policy_limit(credential, "agent_lease_limit")
+        if agent_limit is not None:
+            count = self.count_recent_audit_events(
+                conn,
+                event_types=LEASE_REQUEST_RATE_LIMIT_EVENTS,
+                target_id=credential["id"],
+                actor_id=agent_id,
+                window_seconds=window_seconds,
+            )
+            if count >= agent_limit:
+                return RateLimitDenial(
+                    reason="agent lease request rate limit exceeded",
+                    metadata={
+                        "rate_limit": "agent_lease_limit",
+                        "limit": agent_limit,
+                        "count": count,
+                        "window_seconds": window_seconds,
+                    },
+                )
+        credential_limit = self.credential_policy_limit(credential, "credential_lease_limit")
+        if credential_limit is not None:
+            count = self.count_recent_audit_events(
+                conn,
+                event_types=LEASE_REQUEST_RATE_LIMIT_EVENTS,
+                target_id=credential["id"],
+                window_seconds=window_seconds,
+            )
+            if count >= credential_limit:
+                return RateLimitDenial(
+                    reason="credential lease request rate limit exceeded",
+                    metadata={
+                        "rate_limit": "credential_lease_limit",
+                        "limit": credential_limit,
+                        "count": count,
+                        "window_seconds": window_seconds,
+                    },
+                )
+        return None
+
+    def credential_action_rate_limit_denial(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        lease: sqlite3.Row,
+    ) -> RateLimitDenial | None:
+        credential = conn.execute(CREDENTIAL_BY_ID_QUERY, (lease["credential_id"],)).fetchone()
+        if credential is None:
+            return None
+        action_limit = self.credential_policy_limit(credential, "credential_action_limit")
+        if action_limit is None:
+            return None
+        window_seconds = self.credential_rate_limit_window(credential)
+        count = self.count_recent_audit_events(
+            conn,
+            event_types=ACTION_RATE_LIMIT_EVENTS,
+            target_id=credential["id"],
+            window_seconds=window_seconds,
+        )
+        if count < action_limit:
+            return None
+        return RateLimitDenial(
+            reason="credential action rate limit exceeded",
+            metadata={
+                "rate_limit": "credential_action_limit",
+                "limit": action_limit,
+                "count": count,
+                "window_seconds": window_seconds,
+            },
+        )
+
+    def insert_lease_or_rate_limit_denial(
+        self,
+        *,
+        row: dict[str, Any],
+        credential: dict[str, Any],
+        agent_id: str,
+        credential_id: str,
+        normalized_action: str,
+        ttl: int,
+        requires_approval: bool,
+        review_reason: str,
+        base_audit_metadata: Mapping[str, Any],
+    ) -> str | None:
+        with self.connect() as conn:
+            denial = self.lease_request_rate_limit_denial(conn, credential=credential, agent_id=agent_id)
+            if denial is not None:
+                self._insert_audit(
+                    conn,
+                    LEASE_DENIED_EVENT,
+                    agent_id,
+                    credential_id,
+                    "denied",
+                    denial.reason,
+                    {"action": normalized_action, **denial.metadata, **base_audit_metadata},
+                )
+                return denial.reason
+            conn.execute(
+                """
+                INSERT INTO leases (id, token_hash, token_preview, credential_id, agent_id, action, intent, ttl_seconds, status, issued_at, expires_at)
+                VALUES (:id, :token_hash, :token_preview, :credential_id, :agent_id, :action, :intent, :ttl_seconds, :status, :issued_at, :expires_at)
+                """,
+                row,
+            )
+            self._insert_audit(
+                conn,
+                "credential.lease.pending" if requires_approval else "credential.lease.issued",
+                agent_id,
+                credential_id,
+                "pending" if requires_approval else "allowed",
+                "action requires operator approval" if requires_approval else review_reason,
+                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+            )
+        return None
 
     def resolve_broker_secret(self, credential_id: str, secret_box: SecretBox) -> str:
         credential = self.get_credential(credential_id)
@@ -1317,32 +1607,21 @@ class HivemindStore:
             "issued_at": iso(now),
             "expires_at": iso(now + timedelta(seconds=ttl)),
         }
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO leases (id, token_hash, token_preview, credential_id, agent_id, action, intent, ttl_seconds, status, issued_at, expires_at)
-                VALUES (:id, :token_hash, :token_preview, :credential_id, :agent_id, :action, :intent, :ttl_seconds, :status, :issued_at, :expires_at)
-                """,
-                row,
-            )
-        if requires_approval:
-            self.audit(
-                "credential.lease.pending",
-                agent_id,
-                credential_id,
-                "pending",
-                "action requires operator approval",
-                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
-            )
-            return None, self.public_lease(row)
-        self.audit(
-            "credential.lease.issued",
-            agent_id,
-            credential_id,
-            "allowed",
-            review.reason,
-            {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+        error_detail = self.insert_lease_or_rate_limit_denial(
+            row=row,
+            credential=credential,
+            agent_id=agent_id,
+            credential_id=credential_id,
+            normalized_action=normalized_action,
+            ttl=ttl,
+            requires_approval=requires_approval,
+            review_reason=review.reason,
+            base_audit_metadata=base_audit_metadata,
         )
+        if error_detail is not None:
+            raise StoreError(error_detail)
+        if requires_approval:
+            return None, self.public_lease(row)
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public
@@ -1362,7 +1641,18 @@ class HivemindStore:
                 if error_detail is not None:
                     self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
                 else:
-                    result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
+                    denial = self.credential_action_rate_limit_denial(conn, lease=lease)
+                    if denial is not None:
+                        error_detail = denial.reason
+                        self._insert_credential_action_denial(
+                            conn,
+                            lease,
+                            normalized_action,
+                            denial.reason,
+                            metadata=denial.metadata,
+                        )
+                    else:
+                        result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
         if error_detail is not None:
             raise StoreError(error_detail)
         if result is None:
@@ -1402,6 +1692,8 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         error_detail: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self._insert_audit(
             conn,
@@ -1410,7 +1702,7 @@ class HivemindStore:
             lease["credential_id"],
             "denied",
             error_detail,
-            {"action": normalized_action},
+            {"action": normalized_action, **dict(metadata or {})},
         )
 
     def _consume_credential_action(
@@ -1420,7 +1712,7 @@ class HivemindStore:
         normalized_action: str,
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any] | None, str | None]:
-        credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
+        credential = conn.execute(CREDENTIAL_BY_ID_QUERY, (lease["credential_id"],)).fetchone()
         if credential is None:
             error_detail = "credential no longer exists"
             self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)

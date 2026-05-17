@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ from hivemind.models import (
     CredentialLease,
     CredentialPolicy,
     CredentialRecord,
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
     LeaseStatus,
 )
 from hivemind.policy import PolicyEngine
@@ -17,6 +19,12 @@ from hivemind.secret_refs import validate_external_credential_metadata, validate
 
 class CredentialError(ValueError):
     pass
+
+
+LEASE_REQUEST_RATE_LIMIT_EVENTS = frozenset({"credential.lease.issued", "credential.lease.pending"})
+ACTION_RATE_LIMIT_EVENTS = frozenset({"credential.action.performed"})
+LEASE_DENIED_EVENT = "credential.lease.denied"
+LEASE_EXPIRED_OR_REVOKED_REASON = "credential lease is expired or revoked"
 
 
 class CredentialVault:
@@ -99,7 +107,7 @@ class CredentialService:
         if not review.allowed:
             self._record_audit(
                 AuditEvent(
-                    type="credential.lease.denied",
+                    type=LEASE_DENIED_EVENT,
                     actor_id=agent_id,
                     target_id=credential_id,
                     decision="denied",
@@ -108,6 +116,23 @@ class CredentialService:
                 )
             )
             raise CredentialError(review.reason)
+
+        denial_reason, denial_metadata = self._lease_request_rate_limit_denial(
+            credential=credential,
+            agent_id=agent_id,
+        )
+        if denial_reason is not None:
+            self._record_audit(
+                AuditEvent(
+                    type=LEASE_DENIED_EVENT,
+                    actor_id=agent_id,
+                    target_id=credential_id,
+                    decision="denied",
+                    reason=denial_reason,
+                    metadata={"action": review.normalized_action, **denial_metadata},
+                )
+            )
+            raise CredentialError(denial_reason)
 
         requested_ttl = ttl_seconds or credential.policy.max_ttl_seconds
         ttl = min(requested_ttl, credential.policy.max_ttl_seconds)
@@ -176,24 +201,42 @@ class CredentialService:
                 reason="credential lease request was denied",
             )
             raise CredentialError("credential lease request was denied")
-        consumed_lease = self._consume_active_lease(lease=lease, action=normalized_action)
-        if consumed_lease is None:
+        if not lease.is_active():
             self._record_action_denied(
                 lease=lease,
                 action=normalized_action,
-                reason="credential lease is expired or revoked",
+                reason=LEASE_EXPIRED_OR_REVOKED_REASON,
             )
-            raise CredentialError("credential lease is expired or revoked")
+            raise CredentialError(LEASE_EXPIRED_OR_REVOKED_REASON)
 
-        if consumed_lease.action != normalized_action:
+        if lease.action != normalized_action:
             self._record_action_denied(
-                lease=consumed_lease,
+                lease=lease,
                 action=normalized_action,
                 reason="credential lease does not allow this action",
             )
             raise CredentialError("credential lease does not allow this action")
 
-        credential = self._vault.get(consumed_lease.credential_id)
+        credential = self._vault.get(lease.credential_id)
+        denial_reason, denial_metadata = self._credential_action_rate_limit_denial(credential=credential)
+        if denial_reason is not None:
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason=denial_reason,
+                metadata=denial_metadata,
+            )
+            raise CredentialError(denial_reason)
+
+        consumed_lease = self._consume_active_lease(lease=lease, action=normalized_action)
+        if consumed_lease is None:
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason=LEASE_EXPIRED_OR_REVOKED_REASON,
+            )
+            raise CredentialError(LEASE_EXPIRED_OR_REVOKED_REASON)
+
         self._record_audit(
             AuditEvent(
                 type="credential.action.performed",
@@ -249,7 +292,7 @@ class CredentialService:
             self._leases[lease_id] = denied
         self._record_audit(
             AuditEvent(
-                type="credential.lease.denied",
+                type=LEASE_DENIED_EVENT,
                 actor_id=denied_by,
                 target_id=denied.credential_id,
                 decision="denied",
@@ -288,6 +331,94 @@ class CredentialService:
                     return lease
         raise CredentialError("unknown credential lease token")
 
+    def _lease_request_rate_limit_denial(
+        self,
+        *,
+        credential: CredentialRecord,
+        agent_id: str,
+    ) -> tuple[str | None, dict[str, Any]]:
+        window_seconds = credential.policy.rate_limit_window_seconds or DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+        if credential.policy.agent_lease_limit is not None:
+            count = self._count_recent_events(
+                event_types=LEASE_REQUEST_RATE_LIMIT_EVENTS,
+                target_id=credential.id,
+                actor_id=agent_id,
+                window_seconds=window_seconds,
+            )
+            if count >= credential.policy.agent_lease_limit:
+                return (
+                    "agent lease request rate limit exceeded",
+                    {
+                        "rate_limit": "agent_lease_limit",
+                        "limit": credential.policy.agent_lease_limit,
+                        "count": count,
+                        "window_seconds": window_seconds,
+                    },
+                )
+        if credential.policy.credential_lease_limit is not None:
+            count = self._count_recent_events(
+                event_types=LEASE_REQUEST_RATE_LIMIT_EVENTS,
+                target_id=credential.id,
+                actor_id=None,
+                window_seconds=window_seconds,
+            )
+            if count >= credential.policy.credential_lease_limit:
+                return (
+                    "credential lease request rate limit exceeded",
+                    {
+                        "rate_limit": "credential_lease_limit",
+                        "limit": credential.policy.credential_lease_limit,
+                        "count": count,
+                        "window_seconds": window_seconds,
+                    },
+                )
+        return None, {}
+
+    def _credential_action_rate_limit_denial(
+        self,
+        *,
+        credential: CredentialRecord,
+    ) -> tuple[str | None, dict[str, Any]]:
+        if credential.policy.credential_action_limit is None:
+            return None, {}
+        window_seconds = credential.policy.rate_limit_window_seconds or DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+        count = self._count_recent_events(
+            event_types=ACTION_RATE_LIMIT_EVENTS,
+            target_id=credential.id,
+            actor_id=None,
+            window_seconds=window_seconds,
+        )
+        if count < credential.policy.credential_action_limit:
+            return None, {}
+        return (
+            "credential action rate limit exceeded",
+            {
+                "rate_limit": "credential_action_limit",
+                "limit": credential.policy.credential_action_limit,
+                "count": count,
+                "window_seconds": window_seconds,
+            },
+        )
+
+    def _count_recent_events(
+        self,
+        *,
+        event_types: frozenset[str],
+        target_id: str,
+        actor_id: str | None,
+        window_seconds: int,
+    ) -> int:
+        window_start = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        with self._lock:
+            return sum(
+                1
+                for event in self._audit_events
+                if event.type in event_types
+                and event.target_id == target_id
+                and event.created_at >= window_start
+                and (actor_id is None or event.actor_id == actor_id)
+            )
+
     def _consume_active_lease(self, *, lease: CredentialLease, action: str) -> CredentialLease | None:
         with self._lock:
             current = self._leases.get(lease.id)
@@ -297,9 +428,16 @@ class CredentialService:
                 return current
             consumed = replace(current, status=LeaseStatus.REVOKED)
             self._leases[lease.id] = consumed
-            return consumed
+            return cast(CredentialLease, consumed)
 
-    def _record_action_denied(self, *, lease: CredentialLease, action: str, reason: str) -> None:
+    def _record_action_denied(
+        self,
+        *,
+        lease: CredentialLease,
+        action: str,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         self._record_audit(
             AuditEvent(
                 type="credential.action.denied",
@@ -307,7 +445,7 @@ class CredentialService:
                 target_id=lease.credential_id,
                 decision="denied",
                 reason=reason,
-                metadata={"action": action},
+                metadata={"action": action, **(metadata or {})},
             )
         )
 

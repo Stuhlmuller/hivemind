@@ -14,7 +14,7 @@ def make_service(service_class: type[CredentialService] = CredentialService) -> 
         credential_id="github.main",
         name="GitHub Main",
         provider="github",
-        secret_ref="env://GITHUB_TOKEN",
+        secret_ref="env://GITHUB_TOKEN",  # nosec B106
         policy=CredentialPolicy(
             allowed_agents=frozenset({"agent.scout"}),
             allowed_actions=frozenset({"read_repo"}),
@@ -164,6 +164,80 @@ class CredentialServiceTests(unittest.TestCase):
         self.assertEqual(event.type, "credential.action.denied")
         self.assertEqual(event.reason, "credential lease is expired or revoked")
 
+    def test_agent_lease_request_limit_denies_second_request(self) -> None:
+        vault = CredentialVault()
+        vault.add(
+            credential_id="github.limited",
+            name="GitHub Limited",
+            provider="github",
+            secret_ref="env://GITHUB_TOKEN",  # nosec B106
+            policy=CredentialPolicy(
+                allowed_agents=frozenset({"agent.scout"}),
+                allowed_actions=frozenset({"read_repo"}),
+                agent_lease_limit=1,
+                rate_limit_window_seconds=60,
+            ),
+        )
+        service = CredentialService(vault)
+
+        service.request_lease(
+            credential_id="github.limited",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "agent lease request rate limit exceeded"):
+            service.request_lease(
+                credential_id="github.limited",
+                agent_id="agent.scout",
+                action="read_repo",
+                intent="Read repository metadata for follow-up triage",
+            )
+
+        event = service.audit_events()[-1]
+        self.assertEqual(event.type, "credential.lease.denied")
+        self.assertEqual(event.metadata["rate_limit"], "agent_lease_limit")
+        self.assertNotIn("GITHUB_TOKEN", str(event.public_view()))
+
+    def test_credential_action_limit_denies_before_second_action(self) -> None:
+        vault = CredentialVault()
+        vault.add(
+            credential_id="github.action-limited",
+            name="GitHub Action Limited",
+            provider="github",
+            secret_ref="env://GITHUB_TOKEN",  # nosec B106
+            policy=CredentialPolicy(
+                allowed_agents=frozenset({"agent.scout"}),
+                allowed_actions=frozenset({"read_repo"}),
+                credential_action_limit=1,
+                rate_limit_window_seconds=60,
+            ),
+        )
+        service = CredentialService(vault)
+        first = service.request_lease(
+            credential_id="github.action-limited",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+        second = service.request_lease(
+            credential_id="github.action-limited",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for follow-up triage",
+        )
+
+        service.perform_action(lease_token=first.token, action="read_repo", payload={"repo": "example"})
+
+        with self.assertRaisesRegex(CredentialError, "credential action rate limit exceeded"):
+            service.perform_action(lease_token=second.token, action="read_repo", payload={"repo": "example"})
+
+        event = service.audit_events()[-1]
+        self.assertEqual(event.type, "credential.action.denied")
+        self.assertEqual(event.metadata["rate_limit"], "credential_action_limit")
+        self.assertEqual(service.list_leases()[1].status, LeaseStatus.ACTIVE)
+
     def test_concurrent_successful_action_consumes_lease_once(self) -> None:
         start_barrier = Barrier(3)
         lookup_barrier = Barrier(2)
@@ -234,7 +308,7 @@ class CredentialServiceTests(unittest.TestCase):
             credential_id="github.writer",
             name="GitHub Writer",
             provider="github",
-            secret_ref="env://GITHUB_WRITE_TOKEN",
+            secret_ref="env://GITHUB_WRITE_TOKEN",  # nosec B106
             policy=CredentialPolicy(
                 allowed_agents=frozenset({"agent.scout"}),
                 allowed_actions=frozenset({"open_issue"}),
