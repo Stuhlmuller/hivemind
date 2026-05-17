@@ -2336,7 +2336,8 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_equal(task["heartbeat_state"], "healthy", "new task should start on cadence")
     require_equal(task["last_heartbeat_at"], None, "new task should not have a heartbeat yet")
 
-    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": "policy review started"})
+    heartbeat_note = f"token={secrets.token_hex(8)}"
+    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": heartbeat_note})
     require_equal(heartbeat.status_code, 201, "heartbeat should record successfully")
     require_equal(client.get("/heartbeats").json()[0]["task_id"], task["id"], "heartbeat list should include the task")
     tasks = {item["id"]: item for item in client.get("/tasks").json()}
@@ -2345,9 +2346,15 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_true(tasks[task["id"]]["next_heartbeat_at"] != task["next_heartbeat_at"], "heartbeat should advance next expected heartbeat")
     audit_events = client.get("/audit-events").json()
     require_true(
-        any(event["type"] == "task.heartbeat" and event["target_id"] == task["id"] for event in audit_events),
-        "heartbeat should emit an audit event",
+        any(
+            event["type"] == "task.heartbeat"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_events
+        ),
+        "heartbeat should emit a redacted audit event",
     )
+    require_true(heartbeat_note not in str(audit_events), "heartbeat audit metadata should not include the raw note")
 
     schedule_response = client.post(
         "/schedules",
@@ -2797,6 +2804,15 @@ def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectati
     require_equal(done_task["heartbeat_state"], "disabled", "completed tasks should stop heartbeat tracking")
     require_equal(done_task["next_heartbeat_at"], None, "completed tasks should clear next heartbeat")
     require_equal(done_task["heartbeat_overdue_seconds"], None, "completed tasks should not report overdue heartbeats")
+    terminal_heartbeat = client.post(
+        f"/tasks/{stale_task['id']}/heartbeats",
+        json={"note": "terminal follow-up"},
+    )
+    require_equal(terminal_heartbeat.status_code, 201, "terminal tasks should accept heartbeat notes")
+    terminal_task = next(item for item in client.get("/tasks").json() if item["id"] == stale_task["id"])
+    require_equal(terminal_task["heartbeat_state"], "disabled", "terminal heartbeat notes should not restart tracking")
+    require_equal(terminal_task["next_heartbeat_at"], None, "terminal heartbeat notes should not restore next heartbeat")
+    require_equal(terminal_task["heartbeat_overdue_seconds"], None, "terminal heartbeat notes should keep overdue state disabled")
 
 
 def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path) -> None:

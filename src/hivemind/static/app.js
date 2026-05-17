@@ -167,6 +167,8 @@ const TASK_STATUS_TONES = {
   cancelled: "warning",
 };
 
+const TERMINAL_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
+
 const HEARTBEAT_STATES = {
   disabled: { label: "heartbeat off", tone: "neutral" },
   healthy: { label: "on cadence", tone: "good" },
@@ -596,11 +598,14 @@ function renderTasks() {
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
       const heartbeat = heartbeatState(task);
+      const heartbeatButton = TERMINAL_TASK_STATUSES.has(task.status)
+        ? ""
+        : `<button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>`;
       const actions = `
         <div class="button-row">
           <button data-task-status="${escapeHtml(task.id)}" data-status="running" type="button">Start</button>
           <button data-task-status="${escapeHtml(task.id)}" data-status="done" type="button">Done</button>
-          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>
+          ${heartbeatButton}
         </div>`;
       const lines = [
         task.description || "No task description.",

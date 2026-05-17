@@ -1560,6 +1560,13 @@ class HivemindStore:
         item["heartbeat_overdue_seconds"] = heartbeat_overdue_seconds
         return item
 
+    def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
+        normalized_note = note.strip()
+        return {
+            "note_present": bool(normalized_note),
+            "note_length": len(normalized_note),
+        }
+
     def validate_optional_agent_reference(
         self,
         conn: sqlite3.Connection,
@@ -1992,7 +1999,7 @@ class HivemindStore:
                 value=provided_agent_id,
             )
             next_heartbeat = None
-            if task["heartbeat_seconds"]:
+            if task["heartbeat_seconds"] and task["status"] not in TERMINAL_TASK_STATUSES:
                 next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
             event = {
                 "id": f"hb_{secrets.token_urlsafe(10)}",
@@ -2009,7 +2016,14 @@ class HivemindStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("agent_id references unknown agent") from exc
             conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
-        self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
+        self.audit(
+            "task.heartbeat",
+            event["agent_id"] or "user",
+            task_id,
+            "allowed",
+            "heartbeat recorded",
+            self.heartbeat_audit_metadata(note),
+        )
         return event
 
     def list_heartbeats(self, task_id: str | None = None) -> list[dict[str, Any]]:
