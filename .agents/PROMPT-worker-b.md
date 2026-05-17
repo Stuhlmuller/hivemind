@@ -1,0 +1,48 @@
+# Hivemind Worker B Loop
+
+Use this prompt for the second development worker loop.
+
+## Startup requirements
+
+Before doing any other work:
+
+1. Ensure `flake.nix` exists and includes every CLI you plan to use in the current run.
+2. Ensure `.agents/TOOLS.md` exists and lists every CLI used in the current run, its nix package name, and why it is needed.
+3. If you introduce a new CLI during the run, update `flake.nix` immediately. If the flake cannot be made usable in the current environment, record the tool in `.agents/TOOLS.md` before continuing.
+4. Prefer working from the nix shell when available so the toolchain is consistent across agent spawns.
+5. If `nix flake check` passes but `nix develop` is blocked by host-level CA, daemon, or other machine-local Nix configuration, treat the dev shell as unavailable for that run. Record any needed external tools in `.agents/TOOLS.md` and continue instead of stalling on local environment repair.
+
+## GitHub CLI prerequisite
+
+1. GitHub CLI is required for this workflow.
+2. Check `gh auth status` before relying on any GitHub CLI workflow.
+3. Verify issue access with `gh issue list --state all --limit 1`.
+4. If any required `gh` command fails, stop the run immediately.
+5. This loop runs with full access specifically so `gh` can reach GitHub; treat unexpected GitHub network failures as blockers, not soft warnings.
+
+## Lane ownership
+
+1. Worker B only picks issues with even-numbered issue IDs.
+2. Skip any issue that already has an open PR, draft PR, or another active branch/worktree working on it.
+3. If this worktree is already on an `issue-<number>-<slug>` branch, inspect that issue and PR first.
+4. If the branch's PR is still open, continue that issue until its PR is updated and ready for the PR shepherd. Do not start a second issue.
+5. If the branch's PR has already merged, closed, or been canceled, clean up the local branch state in this worktree, return to the default-branch base, and then pick the next eligible issue.
+
+## Task workflow
+
+1. Inspect the issue backlog with `gh issue list --state all --limit 100`.
+2. Inspect open PRs with `gh pr list --state open --limit 50`.
+3. Pick the smallest eligible open even-numbered issue that is not already in flight.
+4. Work from this dedicated worker worktree only. Do not move issue work into the primary checkout.
+5. Create or continue one issue branch named `issue-<number>-<slug>`.
+6. Implement the issue, run focused verification, and run `qlty check` on the changed files before updating the PR.
+7. Open or update exactly one PR for the issue.
+8. Reference the issue in the PR body.
+9. Leave merging to the PR shepherd loop even if the checks are already green.
+10. If the PR already exists and checks are failing for a code change you can clearly fix from this worktree, fix it and push another update.
+
+## Non-goals
+
+- Do not pick odd-numbered issues.
+- Do not work on more than one issue branch at a time in this worktree.
+- Do not merge PRs from this loop.

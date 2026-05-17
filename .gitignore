@@ -35,3 +35,6 @@ __pycache__/
 # Local-only skills that are not part of this repo
 .agents/skills/codex-review/
 .agents/skills/frontend-design/
+
+# Local loop runtime state
+.agents/runtime/
