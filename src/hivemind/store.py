@@ -129,6 +129,7 @@ TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id =
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
+AGENT_BY_ID_QUERY = "SELECT * FROM agents WHERE id = ?"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
     INSERT INTO credentials
@@ -136,23 +137,39 @@ CREDENTIAL_INSERT_SQL = """
     VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
 """
 BACKUP_FORMAT = "hivemind-logical-backup"
-BACKUP_FORMAT_VERSION = 1
+BACKUP_LEGACY_FORMAT_VERSION = 1
+BACKUP_FORMAT_VERSION = 2
+BACKUP_SUPPORTED_FORMAT_VERSIONS = (BACKUP_LEGACY_FORMAT_VERSION, BACKUP_FORMAT_VERSION)
 BACKUP_TABLE_QUERIES: dict[str, str] = {
     "users": "SELECT id, username, password_hash, role, created_at FROM users ORDER BY id",
-    "agents": "SELECT * FROM agents ORDER BY id",
     "credentials": (
         "SELECT * FROM credentials "
         "WHERE secret_ref NOT LIKE 'oauth://%' AND secret_ref NOT LIKE 'secret://%' "
         "ORDER BY id"
     ),
-    "tasks": "SELECT * FROM tasks ORDER BY id",
-    "schedules": "SELECT * FROM schedules ORDER BY id",
+    "hives": (
+        "SELECT id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, "
+        "tracker_credential_id, guidance, status, created_at, updated_at FROM hives ORDER BY id"
+    ),
+    "agents": (
+        "SELECT id, name, role, provider, model, status, system_prompt, hive_id, "
+        "can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, "
+        "issue_rate_limit_per_hour, issue_labels, created_at, updated_at FROM agents ORDER BY id"
+    ),
+    "tasks": (
+        "SELECT id, title, description, status, priority, hive_id, assigned_agent_id, credential_id, "
+        "action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at FROM tasks ORDER BY id"
+    ),
+    "schedules": (
+        "SELECT id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, "
+        "priority, hive_id, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, "
+        "created_at, updated_at FROM schedules ORDER BY id"
+    ),
     "heartbeat_events": "SELECT * FROM heartbeat_events ORDER BY id",
     "audit_events": "SELECT * FROM audit_events ORDER BY id",
 }
 BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "users": ("id", "username", "password_hash", "role", "created_at"),
-    "agents": ("id", "name", "role", "provider", "model", "status", "system_prompt", "created_at", "updated_at"),
     "credentials": (
         "id",
         "name",
@@ -167,6 +184,79 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "updated_at",
     ),
+    "hives": (
+        "id",
+        "name",
+        "project_ref",
+        "tracker_provider",
+        "tracker_project",
+        "tracker_base_url",
+        "tracker_credential_id",
+        "guidance",
+        "status",
+        "created_at",
+        "updated_at",
+    ),
+    "agents": (
+        "id",
+        "name",
+        "role",
+        "provider",
+        "model",
+        "status",
+        "system_prompt",
+        "hive_id",
+        "can_spawn_subagents",
+        "max_subagents",
+        "issue_creation_enabled",
+        "issue_kind",
+        "issue_rate_limit_per_hour",
+        "issue_labels",
+        "created_at",
+        "updated_at",
+    ),
+    "tasks": (
+        "id",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "hive_id",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "heartbeat_seconds",
+        "next_heartbeat_at",
+        "created_at",
+        "updated_at",
+    ),
+    "schedules": (
+        "id",
+        "name",
+        "enabled",
+        "interval_seconds",
+        "catch_up_policy",
+        "task_title",
+        "task_description",
+        "priority",
+        "hive_id",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "next_run_at",
+        "last_run_at",
+        "created_at",
+        "updated_at",
+    ),
+    "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
+    "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
+}
+BACKUP_LEGACY_V1_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "users": BACKUP_TABLE_COLUMNS["users"],
+    "credentials": BACKUP_TABLE_COLUMNS["credentials"],
+    "agents": ("id", "name", "role", "provider", "model", "status", "system_prompt", "created_at", "updated_at"),
     "tasks": (
         "id",
         "title",
@@ -200,17 +290,13 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "updated_at",
     ),
-    "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
-    "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
+    "heartbeat_events": BACKUP_TABLE_COLUMNS["heartbeat_events"],
+    "audit_events": BACKUP_TABLE_COLUMNS["audit_events"],
 }
 BACKUP_INSERT_STATEMENTS: dict[str, str] = {
     "users": (
         "INSERT INTO users (id, username, password_hash, role, created_at) "
         "VALUES (:id, :username, :password_hash, :role, :created_at)"
-    ),
-    "agents": (
-        "INSERT INTO agents (id, name, role, provider, model, status, system_prompt, created_at, updated_at) "
-        "VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :created_at, :updated_at)"
     ),
     "credentials": (
         "INSERT INTO credentials (id, name, provider, secret_ref, allowed_agents, allowed_actions, "
@@ -220,17 +306,31 @@ BACKUP_INSERT_STATEMENTS: dict[str, str] = {
         ":approval_required_actions, "
         ":max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)"
     ),
+    "hives": (
+        "INSERT INTO hives (id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, "
+        "tracker_credential_id, guidance, status, created_at, updated_at) "
+        "VALUES (:id, :name, :project_ref, :tracker_provider, :tracker_project, :tracker_base_url, "
+        ":tracker_credential_id, :guidance, :status, :created_at, :updated_at)"
+    ),
+    "agents": (
+        "INSERT INTO agents (id, name, role, provider, model, status, system_prompt, hive_id, "
+        "can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, issue_rate_limit_per_hour, "
+        "issue_labels, created_at, updated_at) "
+        "VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :hive_id, "
+        ":can_spawn_subagents, :max_subagents, :issue_creation_enabled, :issue_kind, "
+        ":issue_rate_limit_per_hour, :issue_labels, :created_at, :updated_at)"
+    ),
     "tasks": (
-        "INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, credential_id, "
+        "INSERT INTO tasks (id, title, description, status, priority, hive_id, assigned_agent_id, credential_id, "
         "action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at) "
-        "VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, "
+        "VALUES (:id, :title, :description, :status, :priority, :hive_id, :assigned_agent_id, :credential_id, "
         ":action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)"
     ),
     "schedules": (
         "INSERT INTO schedules (id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority, "
-        "assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at) "
+        "hive_id, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at) "
         "VALUES (:id, :name, :enabled, :interval_seconds, :catch_up_policy, :task_title, :task_description, :priority, "
-        ":assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)"
+        ":hive_id, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)"
     ),
     "heartbeat_events": (
         "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) "
@@ -251,11 +351,16 @@ BACKUP_DELETE_STATEMENTS = (
     "DELETE FROM schedules",
     "DELETE FROM tasks",
     "DELETE FROM audit_events",
-    "DELETE FROM credentials",
     "DELETE FROM agents",
+    "DELETE FROM hives",
+    "DELETE FROM credentials",
     "DELETE FROM users",
 )
-BACKUP_CREDENTIAL_REFERENCE_TABLES = ("tasks", "schedules")
+BACKUP_CREDENTIAL_REFERENCE_FIELDS = {
+    "hives": "tracker_credential_id",
+    "tasks": "credential_id",
+    "schedules": "credential_id",
+}
 SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
     {
         "accesstoken",
@@ -729,11 +834,11 @@ class HivemindStore:
     ) -> dict[str, list[dict[str, Any]]]:
         credential_ids = {row["id"] for row in tables.get("credentials", [])}
         normalized = dict(tables)
-        for table in BACKUP_CREDENTIAL_REFERENCE_TABLES:
+        for table, field in BACKUP_CREDENTIAL_REFERENCE_FIELDS.items():
             normalized[table] = [
                 {
                     **row,
-                    "credential_id": row["credential_id"] if row.get("credential_id") in credential_ids else None,
+                    field: row[field] if row.get(field) in credential_ids else None,
                 }
                 for row in normalized.get(table, [])
             ]
@@ -795,20 +900,77 @@ class HivemindStore:
             normalized_rows.append(row_dict)
         return normalized_rows
 
+    def normalize_legacy_v1_backup_tables(
+        self,
+        tables: Mapping[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        missing_tables = [table for table in BACKUP_LEGACY_V1_TABLE_COLUMNS if table not in tables]
+        if missing_tables:
+            missing = ", ".join(missing_tables)
+            raise StoreValidationError(f"backup bundle is missing required tables: {missing}")
+
+        legacy_tables = {
+            table: self.validate_backup_rows(
+                table=table,
+                rows=tables[table],
+                columns=BACKUP_LEGACY_V1_TABLE_COLUMNS[table],
+            )
+            for table in BACKUP_LEGACY_V1_TABLE_COLUMNS
+        }
+        return {
+            "users": legacy_tables["users"],
+            "credentials": legacy_tables["credentials"],
+            "hives": [],
+            "agents": [
+                {
+                    **row,
+                    "hive_id": None,
+                    "can_spawn_subagents": 0,
+                    "max_subagents": 0,
+                    "issue_creation_enabled": 0,
+                    "issue_kind": "issue",
+                    "issue_rate_limit_per_hour": 0,
+                    "issue_labels": "[]",
+                }
+                for row in legacy_tables["agents"]
+            ],
+            "tasks": [
+                {
+                    **row,
+                    "hive_id": None,
+                }
+                for row in legacy_tables["tasks"]
+            ],
+            "schedules": [
+                {
+                    **row,
+                    "hive_id": None,
+                }
+                for row in legacy_tables["schedules"]
+            ],
+            "heartbeat_events": legacy_tables["heartbeat_events"],
+            "audit_events": legacy_tables["audit_events"],
+        }
+
     def validate_backup_bundle(
         self,
         bundle: Mapping[str, Any],
     ) -> dict[str, list[dict[str, Any]]]:
         if bundle.get("format") != BACKUP_FORMAT:
             raise StoreValidationError(f"unsupported backup format: {bundle.get('format')!r}")
-        if bundle.get("format_version") != BACKUP_FORMAT_VERSION:
+        format_version = bundle.get("format_version")
+        if format_version not in BACKUP_SUPPORTED_FORMAT_VERSIONS:
+            supported = ", ".join(str(version) for version in BACKUP_SUPPORTED_FORMAT_VERSIONS)
             raise StoreValidationError(
                 "unsupported backup format version: "
-                f"{bundle.get('format_version')!r}; expected {BACKUP_FORMAT_VERSION}"
+                f"{format_version!r}; supported versions: {supported}"
             )
         tables = bundle.get("tables")
         if not isinstance(tables, Mapping):
             raise StoreValidationError("backup bundle tables must be a JSON object")
+
+        if format_version == BACKUP_LEGACY_FORMAT_VERSION:
+            tables = self.normalize_legacy_v1_backup_tables(tables)
 
         missing_tables = [table for table in BACKUP_TABLE_QUERIES if table not in tables]
         if missing_tables:
@@ -1244,7 +1406,7 @@ class HivemindStore:
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            row = conn.execute(AGENT_BY_ID_QUERY, (agent_id,)).fetchone()
             if row is None:
                 raise StoreNotFoundError(f"unknown agent: {agent_id}")
             return self.public_agent(row)
@@ -2012,7 +2174,7 @@ class HivemindStore:
         return reason
 
     def get_agent_row(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row:
-        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        row = conn.execute(AGENT_BY_ID_QUERY, (agent_id,)).fetchone()
         if row is None:
             raise StoreValidationError(f"agent_id references unknown agent: {agent_id}")
         return row
@@ -2205,7 +2367,7 @@ class HivemindStore:
                 raise StoreValidationError("task must be assigned to an agent before execution")
             if task["status"] != "queued":
                 raise StoreError("only queued tasks can be executed")
-            agent = conn.execute("SELECT * FROM agents WHERE id = ?", (task["assigned_agent_id"],)).fetchone()
+            agent = conn.execute(AGENT_BY_ID_QUERY, (task["assigned_agent_id"],)).fetchone()
             if agent is None:
                 raise StoreValidationError(f"assigned_agent_id references unknown agent: {task['assigned_agent_id']}")
             agent = dict(agent)
