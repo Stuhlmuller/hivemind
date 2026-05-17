@@ -2,20 +2,22 @@ policy:
   approval:
     - and:
       - signed
-      - cursor bot approved
+      - codex body approved
 
 approval_rules:
   - name: signed
     requires:
       conditions:
         has_valid_signatures: true
-  - name: cursor bot approved
+  - name: codex body approved
+    options:
+      allow_author: true
+      methods:
+        comments: []
+        github_review: false
+        body_patterns:
+          - '(?ms)^## Summary\n.*^## Issue\n\nCloses #[0-9]+\.?\n.*^## Verification\n'
     requires:
       count: 1
-      users:
-        - "chatgpt-codex-connector[bot]"
-    options:
-      methods:
-        body_patterns:
-          - ":+1:"
-          - "👍"
+      permissions:
+        - write
