@@ -11,7 +11,7 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `gh` | `gh` | Inspect GitHub issues and pull requests, create backlog issues, and merge or update PRs from the automation loops |
 | `git` | `git` | Inspect repository state and history |
 | `nix` | `external` | Evaluate `flake.nix` and verify whether the repo dev shell is usable in the local environment |
-| `python` | `python312` | Run the application test suite and repo-local verification commands |
+| `python` / `python3` / `python3.12` | `python312` | Run the application test suite, skill validation, and repo-local verification commands |
 | `pytest` | `python312Packages.pytest` | Execute focused regression coverage for the changed API and store paths |
 | `uvicorn` | `python312Packages.uvicorn` | Start the local FastAPI dev server from the repo checkout |
 | `qlty` | `external` | Run the required code-quality checks before finishing repository changes |
