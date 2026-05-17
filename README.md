@@ -124,11 +124,12 @@ export HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL=anthropic/claude-sonnet-4
 export HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
 ```
 
-`/config` exposes a redacted provider catalog for OpenAI, Codex, Claude,
-Gemini, OpenRouter, Bedrock, Hugging Face, and Ollama. Agents select a
-provider and model on their agent record. Task execution goes through the
-provider adapter registry, which currently ships only the deterministic local
-adapter; remote providers fail closed until an adapter is registered in code.
+`/config` exposes a redacted provider catalog for the deterministic local
+provider plus OpenAI, Codex, Claude, Gemini, OpenRouter, Bedrock, Hugging Face,
+and Ollama. Agents select a provider and model on their agent record. Task
+execution goes through the provider adapter registry, which currently ships
+only the deterministic local adapter; remote providers fail closed until an
+adapter is registered in code.
 Provider credentials are configured as secret references, not raw keys, and
 public responses do not include the full reference.
 

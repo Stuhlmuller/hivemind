@@ -810,6 +810,122 @@ def test_registered_agent_provider_adapter_receives_model_and_secret_ref_referen
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
 
 
+def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    allowed_agent = client.get("/agents").json()[0]
+    denied_agent = client.post(
+        "/agents",
+        json={
+            "name": "Denied provider runner",
+            "role": "should not receive credential-scoped tool requests",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Repo reader",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_TOKEN",
+            "allowed_agents": [allowed_agent["id"]],
+            "allowed_actions": ["read_repo"],
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Denied repository metadata read",
+            "description": "The assigned agent is outside the credential policy.",
+            "assigned_agent_id": denied_agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "credential policy denial should fail closed before provider execution")
+    require_equal(response.json()["detail"], "agent is not allowed to use this credential", "denial reason should match policy")
+    require_equal(adapter.requests, [], "provider adapter should not receive policy-denied credential tool requests")
+    require_equal(updated_task["status"], "failed", "policy-denied provider task should be marked failed")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["target_id"] == credential["id"]
+            and event["metadata"]["task_id"] == task["id"]
+            for event in audit_events
+        ),
+        "policy-denied provider tool requests should be audited",
+    )
+
+
+def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Approval gated provider runner",
+            "role": "should not bypass operator approval",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Repo reader",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": ["read_repo"],
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Approval-gated repository metadata read",
+            "description": "The credential action requires operator approval.",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+
+    require_equal(response.status_code, 403, "approval-gated actions should fail closed before provider execution")
+    require_equal(
+        response.json()["detail"],
+        "credential action requires operator-approved lease",
+        "approval-gated task runs should explain that a lease is required",
+    )
+    require_equal(adapter.requests, [], "provider adapter should not receive approval-gated credential tool requests")
+    require_equal(updated_task["status"], "failed", "approval-gated provider task should be marked failed")
+
+
 def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
     db_path = tmp_path / "task-run-race.db"
@@ -1167,7 +1283,8 @@ def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -
                 "credential_kind": "generic_reference",
                 "credential_ref": "env://OPENROUTER_API_KEY",
                 "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
-                "nested": {"apiKey": "LEAKME_KEY"},
+                "oauth_token_expires_at": "2026-05-17T19:00:00+00:00",
+                "nested": {"apiKey": "LEAKME_KEY", "accessToken": "LEAKME_ACCESS_TOKEN"},
             },
         },
     )
@@ -1177,10 +1294,17 @@ def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -
     require_equal(response.status_code, 201, "credential metadata with secret-like values should be accepted")
     require_equal(credential["metadata"]["credential_ref"], "[redacted]", "metadata credential refs should be redacted by key")
     require_equal(credential["metadata"]["fallback_ref"], "env://SEC...", "secret refs in metadata values should be previewed")
+    require_equal(
+        credential["metadata"]["oauth_token_expires_at"],
+        "2026-05-17T19:00:00+00:00",
+        "OAuth expiry metadata should remain visible because it is not token material",
+    )
     require_equal(credential["metadata"]["nested"]["apiKey"], "[redacted]", "nested secret-like metadata keys should be redacted")
+    require_equal(credential["metadata"]["nested"]["accessToken"], "[redacted]", "nested token metadata keys should be redacted")
     require_true("OPENROUTER_API_KEY" not in response.text, "credential metadata should not expose the primary secret ref target")
     require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "credential metadata should not expose secondary secret ref targets")
     require_true("LEAKME_KEY" not in response.text, "credential metadata should not expose token-like metadata values")
+    require_true("LEAKME_ACCESS_TOKEN" not in response.text, "credential metadata should not expose token-like metadata values")
 
 
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
