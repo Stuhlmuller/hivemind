@@ -1,15 +1,14 @@
 # Hivemind
 
-Hivemind is a security-focused, bee-themed agent runtime for coordinating many
-action-capable subagents without giving those agents direct access to
-credentials.
+Hivemind is a security-focused agent runtime for tracking agents, tasks, and
+brokered credential leases without storing raw secrets on agent records.
 
 The current implementation includes:
 
-- A swarm agent registry.
+- An agent registry.
 - A same-container frontend served from `/`.
 - Local username/password setup and login.
-- Environment-based intent reviewer configuration.
+- Redacted intent reviewer configuration exposed through `/config`.
 - SQLite persistence.
 - A credential broker that stores secret references instead of secret values.
 - Short-lived, scoped leases after policy and intent validation.
@@ -79,6 +78,10 @@ export HIVEMIND_INTENT_REVIEWER_PROVIDER=openrouter
 export HIVEMIND_INTENT_REVIEWER_MODEL=anthropic/claude-sonnet-4
 export HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
 ```
+
+These values are visible to operators through `/config`, with the credential
+reference redacted. The current policy engine still uses deterministic local
+checks for agent scope, action scope, TTL, and intent length.
 
 Optional Codex subscription OAuth configuration:
 

@@ -174,7 +174,7 @@ class CredentialService:
             "provider": credential.provider,
             "credential_id": credential.id,
             "action": normalized_action,
-            "result": "credential action accepted by broker",
+            "result": "credential lease matched requested action",
         }
 
     def approve_lease(self, *, lease_id: str, approved_by: str) -> CredentialLease:
