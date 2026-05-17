@@ -21,8 +21,9 @@ description: "Use only when the user explicitly asks to stage, commit, push, and
 - Confirm status, then stage everything: `git status -sb` then `git add -A`.
 - Commit tersely with the description: `git commit -m "{description}"`
 - Run checks if not already. If checks fail due to missing deps/tools, install dependencies and rerun once.
+- Before push or PR creation, use `hivemind-pr-sync`: fetch the latest `origin/main`, integrate it into the branch, resolve conflicts locally, and rerun the relevant checks.
 - Push with tracking: `git push -u origin $(git branch --show-current)`
-- If git push fails due to workflow auth errors, pull from master and retry the push.
+- If git push fails due to workflow auth errors, sync from `main` and retry the push.
 - Open a PR and edit title/body to reflect the description and the deltas: `GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 gh pr create --draft --fill --head $(git branch --show-current)`
 - Write the PR description to a temp file with real newlines (e.g. `pr-body.md` with heredoc content) and use that file so markdown does not end up with escaped `\n`.
 - PR description (markdown) must be detailed prose covering the issue, the cause and effect on users, the root cause, the fix, and any tests or checks used to validate.
