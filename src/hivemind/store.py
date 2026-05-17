@@ -1537,28 +1537,42 @@ class HivemindStore:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         item = dict(row)
-        last_heartbeat_row = conn.execute(
-            "SELECT created_at FROM heartbeat_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
-            (item["id"],),
-        ).fetchone()
-        last_heartbeat_at = last_heartbeat_row["created_at"] if last_heartbeat_row else None
-        heartbeat_state = "disabled"
-        heartbeat_overdue_seconds: int | None = None
-        if item["heartbeat_seconds"] and item["status"] not in TERMINAL_TASK_STATUSES:
-            deadline = parse_dt(item["next_heartbeat_at"])
-            if deadline is not None:
-                elapsed_seconds = ((now or utcnow()) - deadline).total_seconds()
-                if elapsed_seconds >= 0:
-                    heartbeat_overdue_seconds = int(elapsed_seconds)
-                    heartbeat_state = "stale" if last_heartbeat_at else "missing"
-                else:
-                    heartbeat_state = "healthy"
-            else:
-                heartbeat_state = "healthy"
+        last_heartbeat_at = self.task_last_heartbeat_at(conn, item)
+        heartbeat_state, heartbeat_overdue_seconds = self.task_heartbeat_state(
+            item,
+            last_heartbeat_at,
+            now=now,
+        )
         item["last_heartbeat_at"] = last_heartbeat_at
         item["heartbeat_state"] = heartbeat_state
         item["heartbeat_overdue_seconds"] = heartbeat_overdue_seconds
         return item
+
+    def task_last_heartbeat_at(self, conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
+        if "last_heartbeat_at" in item:
+            return item["last_heartbeat_at"]
+        last_heartbeat_row = conn.execute(
+            "SELECT created_at FROM heartbeat_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            (item["id"],),
+        ).fetchone()
+        return last_heartbeat_row["created_at"] if last_heartbeat_row else None
+
+    def task_heartbeat_state(
+        self,
+        item: dict[str, Any],
+        last_heartbeat_at: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[str, int | None]:
+        if not item["heartbeat_seconds"] or item["status"] in TERMINAL_TASK_STATUSES:
+            return ("disabled", None)
+        deadline = parse_dt(item["next_heartbeat_at"])
+        if deadline is None:
+            return ("healthy", None)
+        elapsed_seconds = ((now or utcnow()) - deadline).total_seconds()
+        if elapsed_seconds < 0:
+            return ("healthy", None)
+        return ("stale" if last_heartbeat_at else "missing", int(elapsed_seconds))
 
     def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
         normalized_note = note.strip()
@@ -1650,7 +1664,18 @@ class HivemindStore:
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            rows = conn.execute(
+                """
+                SELECT tasks.*, latest_heartbeats.last_heartbeat_at
+                FROM tasks
+                LEFT JOIN (
+                    SELECT task_id, MAX(created_at) AS last_heartbeat_at
+                    FROM heartbeat_events
+                    GROUP BY task_id
+                ) AS latest_heartbeats ON latest_heartbeats.task_id = tasks.id
+                ORDER BY tasks.created_at DESC
+                """
+            ).fetchall()
             return [self.public_task(conn, row) for row in rows]
 
     def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
@@ -1658,10 +1683,11 @@ class HivemindStore:
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
             next_heartbeat_at = row["next_heartbeat_at"]
+            was_terminal = row["status"] in TERMINAL_TASK_STATUSES
             if row["heartbeat_seconds"]:
                 if status in TERMINAL_TASK_STATUSES:
                     next_heartbeat_at = None
-                elif next_heartbeat_at is None:
+                elif was_terminal or next_heartbeat_at is None:
                     next_heartbeat_at = iso(now + timedelta(seconds=int(row["heartbeat_seconds"])))
             else:
                 next_heartbeat_at = None

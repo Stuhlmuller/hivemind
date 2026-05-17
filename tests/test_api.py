@@ -2814,6 +2814,21 @@ def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectati
     require_equal(terminal_task["next_heartbeat_at"], None, "terminal heartbeat notes should not restore next heartbeat")
     require_equal(terminal_task["heartbeat_overdue_seconds"], None, "terminal heartbeat notes should keep overdue state disabled")
 
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    try:
+        legacy_deadline = "2000-01-01T00:00:00+00:00"
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (legacy_deadline, stale_task["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    reactivated_response = client.patch(f"/tasks/{stale_task['id']}/status", json={"status": "running"})
+    require_equal(reactivated_response.status_code, 200, "reactivating terminal tasks should succeed")
+    reactivated_task = reactivated_response.json()
+    require_equal(reactivated_task["heartbeat_state"], "healthy", "reactivated tasks should start a fresh heartbeat window")
+    require_true(reactivated_task["next_heartbeat_at"] != legacy_deadline, "reactivated tasks should not preserve stale deadlines")
+    require_equal(reactivated_task["heartbeat_overdue_seconds"], None, "reactivated tasks should not be immediately overdue")
+
 
 def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "hivemind.db")
