@@ -19,11 +19,11 @@ swarm_script="$script_dir/swarm.sh"
 
 usage() {
   cat <<'EOF'
-usage: .agents/swarm-launchd.sh <print-plist|install|uninstall|status|paths> [fleet-flags...] [role...]
+usage: .agents/swarm-launchd.sh <print-plist|install|uninstall|status|paths> [role...]
 
 Commands:
-  print-plist  Render the LaunchAgent plist for the requested fleet or roles
-  install      Install and start the LaunchAgent for the requested fleet or roles
+  print-plist  Render the LaunchAgent plist for the requested roles
+  install      Install and start the LaunchAgent for the requested roles
   uninstall    Stop and remove the LaunchAgent
   status       Print the current LaunchAgent status
   paths        Show the plist, runtime, and worktree paths used by the LaunchAgent

@@ -20,17 +20,16 @@ Before doing any other work:
 
 ## Mission
 
-1. Read the injected lane assignment above first.
-2. Inspect the repository issues before proposing work:
+1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
-3. Audit the current codebase, tests, docs, automation scripts, release gaps, and shipped behavior on the default branch.
-4. Open new issues only for gaps that are not already covered by existing issues or open PRs.
-5. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
-6. Keep each new issue focused on one concern.
-7. Include concrete evidence from the codebase or shipped behavior in every issue body.
-8. Open at most 2 new issues per run unless the backlog is empty.
-9. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
+2. Audit the current codebase, tests, docs, automation scripts, release gaps, and shipped behavior on the default branch.
+3. Open new issues only for gaps that are not already covered by existing issues or open PRs.
+4. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
+5. Keep each new issue focused on one concern.
+6. Include concrete evidence from the codebase or shipped behavior in every issue body.
+7. Open at most 2 new issues per run unless the backlog is empty.
+8. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
 
 ## Browser Scope
 
@@ -40,11 +39,12 @@ Before doing any other work:
 
 ## Subagent Workflow
 
-1. For every real scout run, spawn at least two bounded subagents if delegation is available:
-   - one to audit code, tests, and security or reliability gaps
-   - one to audit docs, automation, CI, and backlog duplication
-2. Synthesize the findings yourself before opening or editing issues.
-3. Subagents may gather evidence or draft issue candidates, but the top-level scout loop decides what to file and posts the final issue bodies.
+1. Use subagents aggressively when delegation is available:
+   - start with one to audit code, tests, and security or reliability gaps
+   - start with another to audit docs, automation, CI, and backlog duplication
+2. Spawn more bounded subagents whenever you need distinct evidence trails or issue drafts.
+3. Synthesize the findings yourself before opening or editing issues.
+4. Subagents may gather evidence or draft issue candidates, but the top-level scout loop decides what to file and posts the final issue bodies.
 
 ## Non-goals
 
