@@ -358,7 +358,7 @@ show_logs_command() {
     arg="$1"
     shift
     case "$arg" in
-      -f|--follow)
+      -f|-F|--follow)
         follow_logs_mode="1"
         ;;
       *)
@@ -368,13 +368,24 @@ show_logs_command() {
   done
 
   if [[ "$follow_logs_mode" == "1" ]]; then
-    follow_logs "${target_roles[@]}"
+    if [[ "${#target_roles[@]}" -gt 0 ]]; then
+      follow_logs "${target_roles[@]}"
+    else
+      follow_logs
+    fi
+    return
+  fi
+
+  if [[ "${#target_roles[@]}" -gt 0 ]]; then
+    while IFS= read -r role; do
+      show_logs "$role"
+    done < <(selected_roles "${target_roles[@]}")
     return
   fi
 
   while IFS= read -r role; do
     show_logs "$role"
-  done < <(selected_roles "${target_roles[@]}")
+  done < <(selected_roles)
 }
 
 main() {
