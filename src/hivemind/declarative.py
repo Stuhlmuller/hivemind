@@ -342,7 +342,7 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
         if schedule_id in seen:
             raise DeclarativeConfigError(f"{prefix}.id duplicates {schedule_id}")
         seen.add(schedule_id)
-        interval = _int(schedule.get("interval_seconds"), f"{prefix}.interval_seconds", 60, 365 * 24 * 60 * 60)
+        interval = _int(schedule.get("interval_seconds"), f"{prefix}.interval_seconds", 60)
         next_run_at = _schedule_next_run_at(schedule, prefix, interval)
         task_template = _mapping(schedule.get("task_template"), f"{prefix}.task_template")
         _reject_unknown_keys(
@@ -643,10 +643,13 @@ def _action_list(value: Any, name: str) -> list[str]:
     return sorted(set(item.lower() for item in _string_list(value, name)))
 
 
-def _int(value: Any, name: str, minimum: int, maximum: int) -> int:
+def _int(value: Any, name: str, minimum: int, maximum: int | None = None) -> int:
     if not isinstance(value, int):
         raise DeclarativeConfigError(f"{name} must be an integer")
-    if value < minimum or value > maximum:
+    if maximum is None:
+        if value < minimum:
+            raise DeclarativeConfigError(f"{name} must be at least {minimum}")
+    elif value < minimum or value > maximum:
         raise DeclarativeConfigError(f"{name} must be between {minimum} and {maximum}")
     return value
 

@@ -2603,6 +2603,56 @@ def test_declarative_config_accepts_existing_runtime_references(tmp_path: Path) 
     )
 
 
+def test_declarative_config_round_trips_long_schedule_intervals(tmp_path: Path) -> None:
+    source = client_for(tmp_path / "source")
+    setup(source)
+    long_interval = 400 * 24 * 60 * 60
+
+    schedule_response = source.post(
+        "/schedules",
+        json={
+            "name": "Long interval schedule",
+            "enabled": True,
+            "interval_seconds": long_interval,
+            "catch_up_policy": "run_once",
+            "task_title": "Run long interval work",
+            "task_description": "Check long-interval schedule config portability.",
+            "priority": "normal",
+            "action": "",
+            "intent": "",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "runtime schedule creation should accept long intervals")
+    schedule_id = schedule_response.json()["id"]
+
+    export_response = source.get("/declarative-config")
+    require_equal(export_response.status_code, 200, "declarative config export should succeed")
+    exported = export_response.json()
+    exported_schedule = next(item for item in exported["schedules"] if item["id"] == schedule_id)
+    require_equal(
+        exported_schedule["interval_seconds"],
+        long_interval,
+        "declarative export should preserve runtime-valid long intervals",
+    )
+
+    validate_response = source.post("/declarative-config/validate", json={"config": exported})
+    require_equal(validate_response.status_code, 200, "long-interval declarative export should validate")
+
+    target = client_for(tmp_path / "target")
+    setup(target)
+    import_response = target.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": exported},
+    )
+    require_equal(import_response.status_code, 200, "long-interval declarative export should import")
+    imported_schedule = next(item for item in target.get("/schedules").json() if item["id"] == schedule_id)
+    require_equal(
+        imported_schedule["interval_seconds"],
+        long_interval,
+        "declarative import should preserve runtime-valid long intervals",
+    )
+
+
 def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
