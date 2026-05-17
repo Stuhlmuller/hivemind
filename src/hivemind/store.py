@@ -153,6 +153,7 @@ class HivemindStore:
                   secret_ref TEXT NOT NULL,
                   allowed_agents TEXT NOT NULL,
                   allowed_actions TEXT NOT NULL,
+                  approval_required_actions TEXT NOT NULL DEFAULT '[]',
                   max_ttl_seconds INTEGER NOT NULL,
                   require_intent INTEGER NOT NULL,
                   metadata TEXT NOT NULL,
@@ -189,6 +190,7 @@ class HivemindStore:
                   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
                   action TEXT NOT NULL,
                   intent TEXT NOT NULL,
+                  ttl_seconds INTEGER NOT NULL DEFAULT 0,
                   status TEXT NOT NULL,
                   issued_at TEXT NOT NULL,
                   expires_at TEXT NOT NULL
@@ -253,6 +255,8 @@ class HivemindStore:
             self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
             self._migrate_legacy_agent_statuses(conn)
+            self._migrate_credentials_to_approval_actions(conn)
+            self._migrate_leases_to_store_ttl(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -305,6 +309,26 @@ class HivemindStore:
             "UPDATE agents SET status = 'running', updated_at = ? WHERE status = 'working'",
             (iso(),),
         )
+
+    def _migrate_credentials_to_approval_actions(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(credentials)")}
+        if "approval_required_actions" in columns:
+            return
+        conn.execute("ALTER TABLE credentials ADD COLUMN approval_required_actions TEXT NOT NULL DEFAULT '[]'")
+
+    def _migrate_leases_to_store_ttl(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(leases)")}
+        if "ttl_seconds" in columns:
+            return
+        conn.execute("ALTER TABLE leases ADD COLUMN ttl_seconds INTEGER NOT NULL DEFAULT 0")
+        leases = conn.execute("SELECT id, issued_at, expires_at FROM leases").fetchall()
+        for row in leases:
+            issued_at = parse_dt(row["issued_at"])
+            expires_at = parse_dt(row["expires_at"])
+            ttl_seconds = 0
+            if issued_at is not None and expires_at is not None:
+                ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
+            conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
@@ -404,8 +428,8 @@ class HivemindStore:
             conn.execute(
                 """
                 INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "cred_demo_github",
@@ -414,6 +438,7 @@ class HivemindStore:
                     "env://HIVEMIND_DEMO_GITHUB_TOKEN",
                     dumps([agent_id]),
                     dumps(["open_issue", "read_repo"]),
+                    dumps([]),
                     120,
                     1,
                     dumps({"purpose": "safe local demo credential reference"}),
@@ -635,12 +660,17 @@ class HivemindStore:
         now = iso()
         actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
         agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
+        approval_required_actions = sorted(
+            set(action.strip().lower() for action in (data.get("approval_required_actions") or []) if action.strip())
+        )
         provider = str(data["provider"]).strip().lower()
         name = str(data["name"]).strip()
         secret_ref = str(data["secret_ref"]).strip()
         metadata = self.normalize_credential_metadata(provider, data.get("metadata"))
         if not actions:
             raise StoreError("credential must allow at least one action")
+        if not set(approval_required_actions).issubset(actions):
+            raise StoreError("approval_required_actions must be a subset of allowed_actions")
         if not name:
             raise StoreError("credential name is required")
         if not provider:
@@ -652,6 +682,7 @@ class HivemindStore:
             "secret_ref": secret_ref,
             "allowed_agents": dumps(agents),
             "allowed_actions": dumps(actions),
+            "approval_required_actions": dumps(approval_required_actions),
             "max_ttl_seconds": int(data.get("max_ttl_seconds") or 300),
             "require_intent": 1 if data.get("require_intent", True) else 0,
             "metadata": dumps(metadata),
@@ -675,8 +706,8 @@ class HivemindStore:
             conn.execute(
                 """
                 INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
+                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
                 """,
                 row,
             )
@@ -790,8 +821,8 @@ class HivemindStore:
             conn.execute(
                 """
                 INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
+                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
                 """,
                 credential_row,
             )
@@ -833,6 +864,7 @@ class HivemindStore:
             "policy": {
                 "allowed_agents": loads(row["allowed_agents"], []),
                 "allowed_actions": loads(row["allowed_actions"], []),
+                "approval_required_actions": loads(row["approval_required_actions"], []),
                 "max_ttl_seconds": row["max_ttl_seconds"],
                 "require_intent": bool(row["require_intent"]),
             },
@@ -841,12 +873,12 @@ class HivemindStore:
             "updated_at": row["updated_at"],
         }
 
-    def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str, dict[str, Any]]:
-        with self.connect() as conn:
-            self.get_agent_row(conn, agent_id)
+    def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str | None, dict[str, Any]]:
+        self.get_agent(agent_id)
         credential = self.get_credential(credential_id)
         allowed_agents = set(loads(credential["allowed_agents"], []))
         allowed_actions = set(loads(credential["allowed_actions"], []))
+        approval_required_actions = set(loads(credential["approval_required_actions"], []))
         normalized_action = action.strip().lower()
         reason = "intent and scope satisfy policy"
         if agent_id not in allowed_agents:
@@ -859,29 +891,41 @@ class HivemindStore:
             self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "intent is too short to authorize", {"action": normalized_action})
             raise StoreError("intent is too short to authorize")
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
-        token = f"hvl_{secrets.token_urlsafe(24)}"
+        requires_approval = normalized_action in approval_required_actions
+        token = f"hvp_{secrets.token_urlsafe(24)}" if requires_approval else f"hvl_{secrets.token_urlsafe(24)}"
         now = utcnow()
         row = {
             "id": f"lease_{secrets.token_urlsafe(12)}",
             "token_hash": self.hash_token(token),
-            "token_preview": f"{token[:8]}...",
+            "token_preview": "not issued" if requires_approval else f"{token[:8]}...",
             "credential_id": credential_id,
             "agent_id": agent_id,
             "action": normalized_action,
             "intent": intent,
-            "status": "active",
+            "ttl_seconds": ttl,
+            "status": "pending" if requires_approval else "active",
             "issued_at": iso(now),
             "expires_at": iso(now + timedelta(seconds=ttl)),
         }
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO leases (id, token_hash, token_preview, credential_id, agent_id, action, intent, status, issued_at, expires_at)
-                VALUES (:id, :token_hash, :token_preview, :credential_id, :agent_id, :action, :intent, :status, :issued_at, :expires_at)
+                INSERT INTO leases (id, token_hash, token_preview, credential_id, agent_id, action, intent, ttl_seconds, status, issued_at, expires_at)
+                VALUES (:id, :token_hash, :token_preview, :credential_id, :agent_id, :action, :intent, :ttl_seconds, :status, :issued_at, :expires_at)
                 """,
                 row,
             )
-        self.audit("credential.lease.issued", agent_id, credential_id, "allowed", reason, {"action": normalized_action, "ttl_seconds": ttl})
+        if requires_approval:
+            self.audit(
+                "credential.lease.pending",
+                agent_id,
+                credential_id,
+                "pending",
+                "action requires operator approval",
+                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl},
+            )
+            return None, self.public_lease(row)
+        self.audit("credential.lease.issued", agent_id, credential_id, "allowed", reason, {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl})
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public
@@ -893,6 +937,10 @@ class HivemindStore:
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
             if lease is None:
                 raise StoreError("unknown credential lease token")
+            if lease["status"] == "pending":
+                raise StoreError("credential lease is pending approval")
+            if lease["status"] == "denied":
+                raise StoreError("credential lease request was denied")
             if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
                 raise StoreError("credential lease is expired or revoked")
             if lease["action"] != normalized_action:
@@ -916,6 +964,72 @@ class HivemindStore:
             "result": "credential action accepted by broker",
         }
 
+    def approve_lease(self, lease_id: str, actor_id: str) -> tuple[str, dict[str, Any]]:
+        with self.connect() as conn:
+            lease = conn.execute("SELECT * FROM leases WHERE id = ?", (lease_id,)).fetchone()
+            if lease is None:
+                raise StoreNotFoundError(f"unknown lease: {lease_id}")
+            if lease["status"] != "pending":
+                raise StoreError("credential lease is not pending approval")
+            token = f"hvl_{secrets.token_urlsafe(24)}"
+            now = utcnow()
+            expires_at = now + timedelta(seconds=int(lease["ttl_seconds"]))
+            conn.execute(
+                """
+                UPDATE leases
+                SET token_hash = ?, token_preview = ?, status = ?, issued_at = ?, expires_at = ?
+                WHERE id = ?
+                """,
+                (self.hash_token(token), f"{token[:8]}...", "active", iso(now), iso(expires_at), lease_id),
+            )
+            updated = dict(lease)
+            updated["token_hash"] = self.hash_token(token)
+            updated["token_preview"] = f"{token[:8]}..."
+            updated["status"] = "active"
+            updated["issued_at"] = iso(now)
+            updated["expires_at"] = iso(expires_at)
+        self.audit(
+            "credential.lease.approved",
+            actor_id,
+            updated["credential_id"],
+            "allowed",
+            "operator approved lease request",
+            {
+                "action": updated["action"],
+                "agent_id": updated["agent_id"],
+                "lease_id": updated["id"],
+                "ttl_seconds": updated["ttl_seconds"],
+            },
+        )
+        public = self.public_lease(updated)
+        public["lease_token"] = token
+        return token, public
+
+    def deny_lease(self, lease_id: str, actor_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            lease = conn.execute("SELECT * FROM leases WHERE id = ?", (lease_id,)).fetchone()
+            if lease is None:
+                raise StoreNotFoundError(f"unknown lease: {lease_id}")
+            if lease["status"] != "pending":
+                raise StoreError("credential lease is not pending approval")
+            conn.execute("UPDATE leases SET status = ? WHERE id = ?", ("denied", lease_id))
+            updated = dict(lease)
+            updated["status"] = "denied"
+        self.audit(
+            LEASE_DENIED_EVENT,
+            actor_id,
+            updated["credential_id"],
+            "denied",
+            "operator denied lease request",
+            {
+                "action": updated["action"],
+                "agent_id": updated["agent_id"],
+                "lease_id": updated["id"],
+                "ttl_seconds": updated["ttl_seconds"],
+            },
+        )
+        return self.public_lease(updated)
+
     def hash_token(self, token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -935,8 +1049,9 @@ class HivemindStore:
             "intent": row["intent"],
             "issued_at": row["issued_at"],
             "expires_at": row["expires_at"],
+            "ttl_seconds": row["ttl_seconds"],
             "status": status,
-            "token_preview": row["token_preview"],
+            "token_preview": row["token_preview"] if status not in {"pending", "denied"} else "not issued",
         }
 
     def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:

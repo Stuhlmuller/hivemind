@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 
 from hivemind.models import (
     AuditEvent,
@@ -111,12 +110,23 @@ class CredentialService:
 
         requested_ttl = ttl_seconds or credential.policy.max_ttl_seconds
         ttl = min(requested_ttl, credential.policy.max_ttl_seconds)
-        lease = CredentialLease.issue(
-            credential_id=credential.id,
-            agent_id=agent_id,
-            action=review.normalized_action,
-            intent=intent,
-            ttl_seconds=ttl,
+        requires_approval = review.normalized_action in credential.policy.approval_required_actions
+        lease = (
+            CredentialLease.request_approval(
+                credential_id=credential.id,
+                agent_id=agent_id,
+                action=review.normalized_action,
+                intent=intent,
+                ttl_seconds=ttl,
+            )
+            if requires_approval
+            else CredentialLease.issue(
+                credential_id=credential.id,
+                agent_id=agent_id,
+                action=review.normalized_action,
+                intent=intent,
+                ttl_seconds=ttl,
+            )
         )
 
         with self._lock:
@@ -124,12 +134,12 @@ class CredentialService:
 
         self._record_audit(
             AuditEvent(
-                type="credential.lease.issued",
+                type="credential.lease.pending" if requires_approval else "credential.lease.issued",
                 actor_id=agent_id,
                 target_id=credential_id,
-                decision="allowed",
-                reason=review.reason,
-                metadata={"action": lease.action, "ttl_seconds": ttl},
+                decision="pending" if requires_approval else "allowed",
+                reason="action requires operator approval" if requires_approval else review.reason,
+                metadata={"action": lease.action, "ttl_seconds": ttl, "lease_id": lease.id},
             )
         )
         return lease
@@ -138,6 +148,10 @@ class CredentialService:
         lease = self._find_lease_by_token(lease_token)
         normalized_action = action.strip().lower()
 
+        if lease.status == LeaseStatus.PENDING:
+            raise CredentialError("credential lease is pending approval")
+        if lease.status == LeaseStatus.DENIED:
+            raise CredentialError("credential lease request was denied")
         if not lease.is_active():
             raise CredentialError("credential lease is expired or revoked")
 
@@ -163,12 +177,64 @@ class CredentialService:
             "result": "credential action accepted by broker",
         }
 
+    def approve_lease(self, *, lease_id: str, approved_by: str) -> CredentialLease:
+        with self._lock:
+            lease = self._leases.get(lease_id)
+            if lease is None:
+                raise CredentialError(f"unknown lease: {lease_id}")
+            if lease.status != LeaseStatus.PENDING:
+                raise CredentialError("credential lease is not pending approval")
+            approved = lease.activate()
+            self._leases[lease_id] = approved
+        self._record_audit(
+            AuditEvent(
+                type="credential.lease.approved",
+                actor_id=approved_by,
+                target_id=approved.credential_id,
+                decision="allowed",
+                reason="operator approved lease request",
+                metadata={
+                    "action": approved.action,
+                    "agent_id": approved.agent_id,
+                    "lease_id": approved.id,
+                    "ttl_seconds": approved.ttl_seconds,
+                },
+            )
+        )
+        return approved
+
+    def deny_lease(self, *, lease_id: str, denied_by: str) -> CredentialLease:
+        with self._lock:
+            lease = self._leases.get(lease_id)
+            if lease is None:
+                raise CredentialError(f"unknown lease: {lease_id}")
+            if lease.status != LeaseStatus.PENDING:
+                raise CredentialError("credential lease is not pending approval")
+            denied = lease.deny()
+            self._leases[lease_id] = denied
+        self._record_audit(
+            AuditEvent(
+                type="credential.lease.denied",
+                actor_id=denied_by,
+                target_id=denied.credential_id,
+                decision="denied",
+                reason="operator denied lease request",
+                metadata={
+                    "action": denied.action,
+                    "agent_id": denied.agent_id,
+                    "lease_id": denied.id,
+                    "ttl_seconds": denied.ttl_seconds,
+                },
+            )
+        )
+        return denied
+
     def revoke_lease(self, lease_id: str) -> CredentialLease:
         with self._lock:
             lease = self._leases.get(lease_id)
             if lease is None:
                 raise CredentialError(f"unknown lease: {lease_id}")
-            revoked = replace(lease, status=LeaseStatus.REVOKED)
+            revoked = cast(CredentialLease, replace(lease, status=LeaseStatus.REVOKED))
             self._leases[lease_id] = revoked
             return revoked
 
