@@ -11,7 +11,6 @@ approval_rules:
         has_valid_signatures: true
   - name: cursor bot approved
     requires:
+      count: 1
       users:
         - "chatgpt-codex-connector[bot]"
-      conditions:
-        count: 1
