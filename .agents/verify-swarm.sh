@@ -390,6 +390,16 @@ done
 
 swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
 
+rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
+
+swarm_env bash "$repo_root/.agents/swarm.sh" start --reviewers 2 --workers 3 --feature-requesters 2 --scouts 1 --pr-shepherds 1 >/dev/null
+
+for role in reviewer worker feature-requester scout beekeeper; do
+  wait_for_file "$capture_root/$role.exec"
+done
+
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
 rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 
 PATH="$bin_root:$PATH" \
@@ -416,6 +426,24 @@ HOME="$home_root" \
 HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
 HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
 HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_DEVELOPER_MAX_RUNS=1 \
+HIVEMIND_DEVELOPER_SLEEP_SECONDS=0 \
+HIVEMIND_DEVELOPER_REVIEW_PROMPT="Legacy developer review prompt" \
+bash "$repo_root/.agents/developer-loop.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+developer_pid="$!"
+
+wait_for_file "$capture_root/worker.review_prompt"
+wait_for_process_exit "$developer_pid"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy developer review prompt"
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
 HIVEMIND_WORKER_B_MAX_RUNS=1 \
 HIVEMIND_WORKER_B_SLEEP_SECONDS=0 \
 HIVEMIND_WORKER_B_REVIEW_PROMPT="Legacy worker B review prompt" \
@@ -425,6 +453,22 @@ worker_b_pid="$!"
 wait_for_file "$capture_root/worker.review_prompt"
 assert_file_contains "$capture_root/worker.review_prompt" "Legacy worker B review prompt"
 wait_for_process_exit "$worker_b_pid"
+
+rm -f "$capture_root/scout.exec" "$capture_root/scout.prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_BROWSER_USER_MAX_RUNS=1 \
+HIVEMIND_BROWSER_USER_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/browser-user-loop.sh" "$worktree_root/scout" >/dev/null 2>&1 &
+browser_user_pid="$!"
+
+wait_for_file "$capture_root/scout.exec"
+wait_for_process_exit "$browser_user_pid"
 
 rm -f "$capture_root/beekeeper.exec" "$capture_root/beekeeper.prompt"
 

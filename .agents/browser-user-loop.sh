@@ -15,4 +15,7 @@ if [[ -z "$run_root" ]]; then
 fi
 shift
 
+export HIVEMIND_SCOUT_SLEEP_SECONDS="${HIVEMIND_SCOUT_SLEEP_SECONDS:-${HIVEMIND_BROWSER_USER_SLEEP_SECONDS:-1800}}"
+export HIVEMIND_SCOUT_MAX_RUNS="${HIVEMIND_SCOUT_MAX_RUNS:-${HIVEMIND_BROWSER_USER_MAX_RUNS:-0}}"
+
 exec "$script_dir/scout-loop.sh" "$run_root" "$@"

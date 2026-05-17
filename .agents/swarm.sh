@@ -28,7 +28,7 @@ done < <(swarm_role_names)
 
 usage() {
   cat <<'EOF'
-usage: .agents/swarm.sh <start|run|status|logs|stop> [role...]
+usage: .agents/swarm.sh <start|run|status|logs|stop> [legacy-fleet-flags...] [role...]
 
 Commands:
   start   Provision dedicated worktrees and launch the requested loops
@@ -54,7 +54,28 @@ Compatibility aliases:
   worker-a -> worker
   worker-b -> worker
   pr-shepherd -> beekeeper
+
+Legacy fleet flags:
+  --reviewers N
+  --workers N
+  --feature-requesters N
+  --scouts N
+  --pr-shepherds N
 EOF
+}
+
+legacy_flag_role() {
+  case "$1" in
+    --reviewers) printf '%s\n' "reviewer" ;;
+    --workers) printf '%s\n' "worker" ;;
+    --feature-requesters) printf '%s\n' "feature-requester" ;;
+    --scouts) printf '%s\n' "scout" ;;
+    --pr-shepherds|--beekeepers) printf '%s\n' "beekeeper" ;;
+    *)
+      echo "[swarm] unknown option: $1" >&2
+      return 1
+      ;;
+  esac
 }
 
 role_script() {
@@ -84,8 +105,9 @@ role_pid_path() {
 }
 
 selected_roles() {
-  local requested_role
-  local role
+  local requested_role=""
+  local requested_count=""
+  local role=""
   local seen_roles=" "
 
   if [[ "$#" -eq 0 ]]; then
@@ -93,8 +115,38 @@ selected_roles() {
     return
   fi
 
-  for requested_role in "$@"; do
-    role="$(canonical_swarm_role "$requested_role")" || exit 1
+  while [[ "$#" -gt 0 ]]; do
+    requested_role="$1"
+    shift
+
+    case "$requested_role" in
+      --reviewers|--workers|--feature-requesters|--scouts|--pr-shepherds|--beekeepers)
+        requested_count="${1:-}"
+        if [[ -z "$requested_count" ]]; then
+          echo "[swarm] missing count for $requested_role" >&2
+          exit 1
+        fi
+        case "$requested_count" in
+          ''|*[!0-9]*)
+            echo "[swarm] invalid count for $requested_role: $requested_count" >&2
+            exit 1
+            ;;
+        esac
+        shift
+        if [[ "$requested_count" -eq 0 ]]; then
+          continue
+        fi
+        role="$(legacy_flag_role "$requested_role")" || exit 1
+        ;;
+      --*)
+        echo "[swarm] unknown option: $requested_role" >&2
+        exit 1
+        ;;
+      *)
+        role="$(canonical_swarm_role "$requested_role")" || exit 1
+        ;;
+    esac
+
     case "$seen_roles" in
       *" $role "*) ;;
       *)

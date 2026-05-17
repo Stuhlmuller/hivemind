@@ -21,6 +21,7 @@ aliases.
 - `browser-user` and `scout-1` map to `scout`.
 - `developer`, `worker-1`, `worker-a`, and `worker-b` map to `worker`.
 - `pr-shepherd` and `pr-shepherd-1` map to `beekeeper`.
+- Legacy fleet flags such as `--workers 3 --scouts 1` are still accepted as compatibility inputs. Counts now only decide whether the canonical role is enabled at all; they no longer create separate numbered lanes.
 
 ## Start and monitor
 
