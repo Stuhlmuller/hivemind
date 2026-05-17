@@ -839,71 +839,95 @@ class HivemindStore:
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
             if lease is None:
                 error_detail = "unknown credential lease token"
-                self._insert_audit(
-                    conn,
-                    ACTION_DENIED_EVENT,
-                    "unknown",
-                    "credential_lease",
-                    "denied",
-                    error_detail,
-                    {"action": normalized_action},
-                )
+                self._insert_unknown_credential_action_denial(conn, normalized_action, error_detail)
             else:
-                if lease["status"] == "pending":
-                    error_detail = "credential lease is pending approval"
-                elif lease["status"] == "denied":
-                    error_detail = "credential lease request was denied"
-                elif lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
-                    error_detail = "credential lease is expired or revoked"
-                elif lease["action"] != normalized_action:
-                    error_detail = "credential lease does not allow this action"
-
+                error_detail = self._credential_action_denial_reason(lease, normalized_action)
                 if error_detail is not None:
-                    self._insert_audit(
-                        conn,
-                        ACTION_DENIED_EVENT,
-                        lease["agent_id"],
-                        lease["credential_id"],
-                        "denied",
-                        error_detail,
-                        {"action": normalized_action},
-                    )
+                    self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
                 else:
-                    credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
-                    if credential is None:
-                        error_detail = "credential no longer exists"
-                        self._insert_audit(
-                            conn,
-                            ACTION_DENIED_EVENT,
-                            lease["agent_id"],
-                            lease["credential_id"],
-                            "denied",
-                            error_detail,
-                            {"action": normalized_action},
-                        )
-                    else:
-                        conn.execute("UPDATE leases SET status = ?, expires_at = ? WHERE id = ?", ("revoked", iso(utcnow()), lease["id"]))
-                        self._insert_audit(
-                            conn,
-                            "credential.action.performed",
-                            lease["agent_id"],
-                            lease["credential_id"],
-                            "allowed",
-                            "action matched active credential lease",
-                            {"action": normalized_action, "payload_keys": sorted(payload.keys())},
-                        )
-                        result = {
-                            "ok": True,
-                            "provider": credential["provider"],
-                            "credential_id": credential["id"],
-                            "action": normalized_action,
-                            "result": "credential lease matched requested action",
-                        }
+                    result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
         if error_detail is not None:
             raise StoreError(error_detail)
         if result is None:
             raise RuntimeError("credential action flow ended without a result")
         return result
+
+    def _credential_action_denial_reason(self, lease: sqlite3.Row, normalized_action: str) -> str | None:
+        if lease["status"] == "pending":
+            return "credential lease is pending approval"
+        if lease["status"] == "denied":
+            return "credential lease request was denied"
+        if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
+            return "credential lease is expired or revoked"
+        if lease["action"] != normalized_action:
+            return "credential lease does not allow this action"
+        return None
+
+    def _insert_unknown_credential_action_denial(
+        self,
+        conn: sqlite3.Connection,
+        normalized_action: str,
+        error_detail: str,
+    ) -> None:
+        self._insert_audit(
+            conn,
+            ACTION_DENIED_EVENT,
+            "unknown",
+            "credential_lease",
+            "denied",
+            error_detail,
+            {"action": normalized_action},
+        )
+
+    def _insert_credential_action_denial(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        error_detail: str,
+    ) -> None:
+        self._insert_audit(
+            conn,
+            ACTION_DENIED_EVENT,
+            lease["agent_id"],
+            lease["credential_id"],
+            "denied",
+            error_detail,
+            {"action": normalized_action},
+        )
+
+    def _consume_credential_action(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
+        if credential is None:
+            error_detail = "credential no longer exists"
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return None, error_detail
+        conn.execute("UPDATE leases SET status = ?, expires_at = ? WHERE id = ?", ("revoked", iso(utcnow()), lease["id"]))
+        self._insert_audit(
+            conn,
+            "credential.action.performed",
+            lease["agent_id"],
+            lease["credential_id"],
+            "allowed",
+            "action matched active credential lease",
+            {"action": normalized_action, "payload_keys": sorted(payload.keys())},
+        )
+        return (
+            {
+                "ok": True,
+                "provider": credential["provider"],
+                "credential_id": credential["id"],
+                "action": normalized_action,
+                "result": "credential lease matched requested action",
+            },
+            None,
+        )
 
     def approve_lease(self, lease_id: str, actor_id: str) -> tuple[str, dict[str, Any]]:
         with self.connect() as conn:
