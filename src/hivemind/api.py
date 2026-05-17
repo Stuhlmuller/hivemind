@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+import logging
 import os
 from importlib.resources import files
 from threading import Event, Thread
-from time import sleep
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -24,6 +26,70 @@ from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFound
 
 SESSION_COOKIE = "hivemind_session"
 OAUTH_FAILED_EVENT = "credential.oauth.failed"
+LOGGER = logging.getLogger(__name__)
+SCHEDULER_INTERVAL_SECONDS = 5
+SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 5
+
+
+def _scheduler_loop(db: HivemindStore, scheduler_stop: Event) -> None:
+    while not scheduler_stop.is_set():
+        try:
+            db.run_due_schedules_once()
+        except Exception as exc:
+            LOGGER.warning("background scheduler pass failed: %s", exc.__class__.__name__)
+        scheduler_stop.wait(SCHEDULER_INTERVAL_SECONDS)
+
+
+def _should_start_background_scheduler(start_scheduler: bool | None) -> bool:
+    should_start = start_scheduler
+    if should_start is None:
+        should_start = os.getenv("HIVEMIND_SCHEDULER", "true").lower() == "true"
+    return should_start
+
+
+def _reuse_or_start_background_scheduler(app: FastAPI, db: HivemindStore, scheduler_stop: Event) -> Thread:
+    existing_thread = getattr(app.state, "scheduler_thread", None)
+    if isinstance(existing_thread, Thread) and existing_thread.is_alive():
+        LOGGER.warning("background scheduler is still stopping; skipping scheduler startup")
+        return existing_thread
+
+    app.state.scheduler_thread = None
+    scheduler_stop.clear()
+    thread = Thread(target=_scheduler_loop, args=(db, scheduler_stop), name="hivemind-scheduler", daemon=True)
+    thread.start()
+    app.state.scheduler_thread = thread
+    return thread
+
+
+def _stop_background_scheduler(app: FastAPI, thread: Thread | None, scheduler_stop: Event) -> None:
+    scheduler_stop.set()
+    if thread is None:
+        return
+
+    thread.join(timeout=SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        LOGGER.error(
+            "background scheduler did not stop within %s seconds",
+            SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        return
+
+    if getattr(app.state, "scheduler_thread", None) is thread:
+        app.state.scheduler_thread = None
+
+
+def _scheduler_lifespan(db: HivemindStore, start_scheduler: bool | None, scheduler_stop: Event):
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        thread: Thread | None = None
+        if _should_start_background_scheduler(start_scheduler):
+            thread = _reuse_or_start_background_scheduler(app, db, scheduler_stop)
+        try:
+            yield
+        finally:
+            _stop_background_scheduler(app, thread, scheduler_stop)
+
+    return lifespan
 
 
 class SetupRequest(BaseModel):
@@ -138,6 +204,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         title="Hivemind",
         version="0.2.0",
         description="Security-focused swarm agent runtime with JIT credential leases.",
+        lifespan=_scheduler_lifespan(db, start_scheduler, scheduler_stop),
     )
     app.state.store = db
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -168,28 +235,6 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def oauth_frontend_redirect(status: str, detail: str) -> RedirectResponse:
         query = urlencode({"oauth": status, "detail": detail})
         return RedirectResponse(url=f"/?{query}", status_code=303)
-
-    def scheduler_loop() -> None:
-        while not scheduler_stop.is_set():
-            try:
-                db.run_due_schedules_once()
-            except Exception:
-                pass
-            sleep(5)
-
-    @app.on_event("startup")
-    def start_background_scheduler() -> None:
-        should_start = start_scheduler
-        if should_start is None:
-            should_start = os.getenv("HIVEMIND_SCHEDULER", "true").lower() == "true"
-        if should_start:
-            thread = Thread(target=scheduler_loop, name="hivemind-scheduler", daemon=True)
-            thread.start()
-            app.state.scheduler_thread = thread
-
-    @app.on_event("shutdown")
-    def stop_background_scheduler() -> None:
-        scheduler_stop.set()
 
     @app.get("/", include_in_schema=False)
     def frontend() -> FileResponse:

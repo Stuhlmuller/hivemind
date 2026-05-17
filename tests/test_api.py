@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import secrets
+import sqlite3
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import secrets
-import sqlite3
 from threading import Barrier, Event
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi.testclient import TestClient
 
+import hivemind.api as api_module
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
 from hivemind.oauth import SecretBox
@@ -142,6 +144,106 @@ def setup(client: TestClient) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def test_create_app_uses_lifespan_without_on_event_deprecation(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        create_app(store, start_scheduler=False)
+
+    require_equal(
+        [warning for warning in caught if "on_event is deprecated" in str(warning.message)],
+        [],
+        "create_app should not register deprecated FastAPI on_event handlers",
+    )
+
+
+def test_scheduler_lifespan_respects_explicit_disable(tmp_path: Path) -> None:
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=False)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.get("/health")
+
+    require_equal(response.status_code, 200, "health check should succeed without scheduler startup")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "explicit disable should not start scheduler")
+
+
+def test_scheduler_lifespan_respects_env_disable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SCHEDULER", "false")
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"))
+
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.get("/health")
+
+    require_equal(response.status_code, 200, "health check should succeed when env disables scheduler")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "env disable should not start scheduler")
+
+
+def test_scheduler_lifespan_starts_and_stops_thread(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_SCHEDULER", raising=False)
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        thread = getattr(app.state, "scheduler_thread", None)
+        require_true(thread is not None, "explicit enable should create scheduler thread")
+        require_true(thread.is_alive(), "scheduler thread should run during app lifespan")
+
+    require_true(not thread.is_alive(), "scheduler thread should stop after app lifespan exits")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "scheduler state should be cleared after shutdown")
+
+
+def test_explicit_scheduler_start_overrides_env_disable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SCHEDULER", "false")
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        thread = getattr(app.state, "scheduler_thread", None)
+        require_true(thread is not None, "explicit enable should override env disable")
+        require_true(thread.is_alive(), "scheduler thread should run during app lifespan")
+
+    require_true(not thread.is_alive(), "scheduler thread should stop after app lifespan exits")
+
+
+def test_scheduler_lifespan_does_not_duplicate_when_previous_thread_is_still_stopping(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(api_module, "SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    store = HivemindStore(tmp_path / "hivemind.db")
+    scheduler_started = Event()
+    release_scheduler = Event()
+    scheduler_calls: list[object] = []
+
+    def blocked_schedule_pass() -> list[dict[str, object]]:
+        scheduler_calls.append(object())
+        scheduler_started.set()
+        release_scheduler.wait(timeout=2)
+        return []
+
+    store.run_due_schedules_once = blocked_schedule_pass  # type: ignore[method-assign]
+    app = create_app(store, start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        first_thread = getattr(app.state, "scheduler_thread", None)
+        require_true(first_thread is not None, "scheduler should start on first lifespan")
+        require_true(scheduler_started.wait(timeout=1), "scheduler pass should begin")
+
+    require_true(first_thread.is_alive(), "blocked scheduler should still be stopping after shutdown timeout")
+
+    with TestClient(app, base_url="https://testserver"):
+        require_equal(
+            getattr(app.state, "scheduler_thread", None),
+            first_thread,
+            "restart should keep the still-stopping scheduler thread instead of creating a duplicate",
+        )
+        require_equal(len(scheduler_calls), 1, "restart should not start another scheduler pass")
+        release_scheduler.set()
+
+    first_thread.join(timeout=1)
+    require_true(not first_thread.is_alive(), "released scheduler should stop")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "stopped scheduler should clear state")
 
 
 def create_provider_credential(
