@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hivemind Idea Issues"
+  short_description: "Turn new Hivemind ideas into a growing queue of concrete issues."
+  default_prompt: "Use $hivemind-idea-issues to inspect the Hivemind repo, keep widening the audit for more grounded non-duplicate ideas, and file the best ones as GitHub issues without starting implementation."

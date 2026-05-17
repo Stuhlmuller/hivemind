@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from hivemind.secret_refs import preview_secret_ref
+
 
 @dataclass(frozen=True)
 class IntentReviewerConfig:
@@ -15,7 +17,7 @@ class IntentReviewerConfig:
         return {
             "provider": self.provider,
             "model": self.model,
-            "credential_ref": self.credential_ref,
+            "credential_ref_preview": preview_secret_ref(self.credential_ref),
         }
 
 
@@ -35,4 +37,3 @@ class HivemindConfig:
 
     def public_view(self) -> dict[str, Any]:
         return {"intent_reviewer": self.intent_reviewer.public_view()}
-

@@ -14,6 +14,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
+from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -60,6 +62,18 @@ def verify_password(password: str, encoded: str) -> bool:
 
 class StoreError(ValueError):
     pass
+
+
+class StoreNotFoundError(StoreError):
+    pass
+
+
+class StoreValidationError(StoreError):
+    pass
+
+
+LEASE_DENIED_EVENT = "credential.lease.denied"
+TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 
 
 @dataclass(frozen=True)
@@ -233,21 +247,22 @@ class HivemindStore:
             return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
     def setup_admin(self, username: str, password: str) -> dict[str, Any]:
-        if self.is_setup_complete():
-            raise StoreError("setup is already complete")
-        if len(password) < 12:
-            raise StoreError("admin password must be at least 12 characters")
         normalized_username = username.strip().lower()
         if len(normalized_username) < 3:
             raise StoreError("username must be at least 3 characters")
-        user = {
-            "id": f"user_{secrets.token_urlsafe(10)}",
-            "username": normalized_username,
-            "password_hash": hash_password(password),
-            "role": "admin",
-            "created_at": iso(),
-        }
+        if len(password) < 12:
+            raise StoreError("admin password must be at least 12 characters")
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
+                raise StoreError("setup is already complete")
+            user = {
+                "id": f"user_{secrets.token_urlsafe(10)}",
+                "username": normalized_username,
+                "password_hash": hash_password(password),
+                "role": "admin",
+                "created_at": iso(),
+            }
             conn.execute(
                 "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (:id, :username, :password_hash, :role, :created_at)",
                 user,
@@ -371,7 +386,7 @@ class HivemindStore:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
-                raise StoreError(f"unknown agent: {agent_id}")
+                raise StoreNotFoundError(f"unknown agent: {agent_id}")
             return dict(row)
 
     def list_credentials(self) -> list[dict[str, Any]]:
@@ -397,8 +412,10 @@ class HivemindStore:
             "created_at": now,
             "updated_at": now,
         }
-        if not row["secret_ref"].startswith(("env://", "file://", "vault://", "oauth://")):
-            raise StoreError("secret_ref must use env://, file://, vault://, or oauth://")
+        try:
+            row["secret_ref"] = validate_secret_ref(row["secret_ref"])
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
         with self.connect() as conn:
             conn.execute(
                 """
@@ -414,7 +431,7 @@ class HivemindStore:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM credentials WHERE id = ?", (credential_id,)).fetchone()
             if row is None:
-                raise StoreError(f"unknown credential: {credential_id}")
+                raise StoreNotFoundError(f"unknown credential: {credential_id}")
             return dict(row)
 
     def public_credential(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -422,7 +439,7 @@ class HivemindStore:
             "id": row["id"],
             "name": row["name"],
             "provider": row["provider"],
-            "secret_ref_preview": self.preview_secret_ref(row["secret_ref"]),
+            "secret_ref_preview": preview_secret_ref(row["secret_ref"]),
             "policy": {
                 "allowed_agents": loads(row["allowed_agents"], []),
                 "allowed_actions": loads(row["allowed_actions"], []),
@@ -434,10 +451,6 @@ class HivemindStore:
             "updated_at": row["updated_at"],
         }
 
-    def preview_secret_ref(self, secret_ref: str) -> str:
-        scheme, _, rest = secret_ref.partition("://")
-        return f"{scheme}://{rest[:3]}..." if rest else f"{scheme}://..."
-
     def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str, dict[str, Any]]:
         self.get_agent(agent_id)
         credential = self.get_credential(credential_id)
@@ -446,13 +459,13 @@ class HivemindStore:
         normalized_action = action.strip().lower()
         reason = "intent and scope satisfy policy"
         if agent_id not in allowed_agents:
-            self.audit("credential.lease.denied", agent_id, credential_id, "denied", "agent is not allowed to use this credential", {"action": normalized_action})
+            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "agent is not allowed to use this credential", {"action": normalized_action})
             raise StoreError("agent is not allowed to use this credential")
         if normalized_action not in allowed_actions:
-            self.audit("credential.lease.denied", agent_id, credential_id, "denied", "action is outside this credential policy", {"action": normalized_action})
+            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "action is outside this credential policy", {"action": normalized_action})
             raise StoreError("action is outside this credential policy")
         if credential["require_intent"] and len(intent.strip()) < 12:
-            self.audit("credential.lease.denied", agent_id, credential_id, "denied", "intent is too short to authorize", {"action": normalized_action})
+            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "intent is too short to authorize", {"action": normalized_action})
             raise StoreError("intent is too short to authorize")
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
         token = f"hvl_{secrets.token_urlsafe(24)}"
@@ -535,6 +548,38 @@ class HivemindStore:
             "token_preview": row["token_preview"],
         }
 
+    def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+        row = conn.execute(TASK_BY_ID_QUERY, (task_id,)).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"unknown task: {task_id}")
+        return row
+
+    def validate_optional_agent_reference(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        value: str | None,
+    ) -> None:
+        if value is None:
+            return
+        row = conn.execute("SELECT 1 FROM agents WHERE id = ?", (value,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"{field_name} references unknown agent: {value}")
+
+    def validate_optional_credential_reference(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        value: str | None,
+    ) -> None:
+        if value is None:
+            return
+        row = conn.execute("SELECT 1 FROM credentials WHERE id = ?", (value,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"{field_name} references unknown credential: {value}")
+
     def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
         now = utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
@@ -554,14 +599,27 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO tasks
-                (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
-                VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
-                """,
-                row,
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="assigned_agent_id",
+                value=row["assigned_agent_id"],
             )
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="credential_id",
+                value=row["credential_id"],
+            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO tasks
+                    (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
+                    VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
+                    """,
+                    row,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreValidationError("task references an unknown agent or credential") from exc
         self.audit("task.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "task created", {"status": row["status"]})
         return row
 
@@ -572,38 +630,42 @@ class HivemindStore:
     def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
         now = iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row is None:
-                raise StoreError(f"unknown task: {task_id}")
+            row = self.get_task_row(conn, task_id)
             conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (status, now, task_id))
         self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row is None:
-                raise StoreError(f"unknown task: {task_id}")
-            return dict(row)
+            return dict(self.get_task_row(conn, task_id))
 
     def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
-        task = self.get_task(task_id)
         now = utcnow()
-        next_heartbeat = None
-        if task["heartbeat_seconds"]:
-            next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
-        event = {
-            "id": f"hb_{secrets.token_urlsafe(10)}",
-            "task_id": task_id,
-            "agent_id": agent_id or task["assigned_agent_id"],
-            "note": note,
-            "created_at": iso(now),
-        }
         with self.connect() as conn:
-            conn.execute(
-                "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
-                event,
+            task = self.get_task_row(conn, task_id)
+            provided_agent_id = agent_id or None
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="agent_id",
+                value=provided_agent_id,
             )
+            next_heartbeat = None
+            if task["heartbeat_seconds"]:
+                next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
+            event = {
+                "id": f"hb_{secrets.token_urlsafe(10)}",
+                "task_id": task_id,
+                "agent_id": provided_agent_id or task["assigned_agent_id"],
+                "note": note,
+                "created_at": iso(now),
+            }
+            try:
+                conn.execute(
+                    "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
+                    event,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreValidationError("agent_id references unknown agent") from exc
             conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
         self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
         return event
@@ -639,14 +701,27 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO schedules
-                (id, name, enabled, interval_seconds, task_title, task_description, priority, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
-                VALUES (:id, :name, :enabled, :interval_seconds, :task_title, :task_description, :priority, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
-                """,
-                row,
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="assigned_agent_id",
+                value=row["assigned_agent_id"],
             )
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="credential_id",
+                value=row["credential_id"],
+            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO schedules
+                    (id, name, enabled, interval_seconds, task_title, task_description, priority, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
+                    VALUES (:id, :name, :enabled, :interval_seconds, :task_title, :task_description, :priority, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
+                    """,
+                    row,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreValidationError("schedule references an unknown agent or credential") from exc
         self.audit("schedule.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "schedule created", {"interval_seconds": interval})
         return self.public_schedule(row)
 

@@ -1,5 +1,6 @@
 const state = {
   setupComplete: false,
+  authMode: null,
   me: null,
   config: null,
   agents: [],
@@ -11,7 +12,13 @@ const state = {
   auditEvents: [],
 };
 
+const ROUTES = {
+  overview: "/",
+  credentials: "/control/credentials",
+};
+
 const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -70,11 +77,49 @@ function optionList(items, labelKey = "name", includeEmpty = false) {
   return empty + items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item[labelKey])}</option>`).join("");
 }
 
+function currentPage() {
+  return window.location.pathname.startsWith(ROUTES.credentials) ? "credentials" : "overview";
+}
+
+function credentialName(credentialId) {
+  const credential = state.credentials.find((item) => item.id === credentialId);
+  return credential ? credential.name : credentialId;
+}
+
+function agentName(agentId) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  return agent ? agent.name : agentId;
+}
+
+function renderNavigation() {
+  const page = currentPage();
+  $("#overview-page").hidden = page !== "overview";
+  $("#credentials-page").hidden = page !== "credentials";
+  $("#surface-line").textContent =
+    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules";
+  for (const link of $$("[data-page-link]")) {
+    const active = link.dataset.pageLink === page;
+    link.classList.toggle("active", active);
+    if (active) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  }
+}
+
 function renderAuth() {
-  const usernameInput = $("#auth-username");
-  const passwordInput = $("#auth-password");
-  const submitButton = $("#auth-submit");
   const setupMode = !state.setupComplete;
+  const authMode = setupMode ? "setup" : "login";
+  const authForm = $("#auth-form");
+  const usernameInput = authForm.elements.username;
+  const passwordInput = authForm.elements.password;
+  const submitButton = $("#auth-submit");
+
+  if (state.authMode !== authMode) {
+    authForm.reset();
+    state.authMode = authMode;
+  }
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
@@ -84,6 +129,7 @@ function renderAuth() {
     ? "Sign in to the local Hivemind control plane."
     : "Create the first local admin account with your own password.";
   usernameInput.placeholder = setupMode ? "choose an admin username" : "username";
+  usernameInput.minLength = setupMode ? 3 : 1;
   passwordInput.autocomplete = setupMode ? "new-password" : "current-password";
   passwordInput.minLength = setupMode ? 12 : 1;
   passwordInput.placeholder = setupMode ? "choose a password (12+ chars)" : "password";
@@ -92,6 +138,7 @@ function renderAuth() {
     passwordInput.value = "";
   }
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
+  renderNavigation();
 }
 
 function renderSelectors() {
@@ -128,14 +175,18 @@ function renderAgents() {
 function renderCredentials() {
   $("#credential-count").textContent = state.credentials.length;
   $("#credentials-list").innerHTML = state.credentials
-    .map((credential) =>
-      item(
+    .map((credential) => {
+      const allowedAgents = credential.policy.allowed_agents.length
+        ? credential.policy.allowed_agents.map((agentId) => agentName(agentId)).join(", ")
+        : "none";
+      return item(
         credential.name,
-        `ID: ${escapeHtml(credential.id)}<br>Provider: ${escapeHtml(credential.provider)}<br>Secret: ${escapeHtml(credential.secret_ref_preview)}`,
-        credential.policy.allowed_actions,
-      ),
-    )
+        `ID: ${escapeHtml(credential.id)}<br>Provider: ${escapeHtml(credential.provider)}<br>Secret ref: ${escapeHtml(credential.secret_ref_preview)}<br>Allowed agents: ${escapeHtml(allowedAgents)}<br>Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s<br>Intent review: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`,
+        [credential.provider, ...credential.policy.allowed_actions],
+      );
+    })
     .join("") || '<p class="meta">No credentials yet.</p>';
+  $("#credential-page-count").textContent = state.credentials.length;
 }
 
 function renderLeases() {
@@ -144,11 +195,13 @@ function renderLeases() {
     .map((lease) =>
       item(
         lease.id,
-        `Agent: ${escapeHtml(lease.agent_id)}<br>Credential: ${escapeHtml(lease.credential_id)}<br>Action: ${escapeHtml(lease.action)}<br>Expires: ${escapeHtml(lease.expires_at)}`,
-        [lease.status, lease.token_preview],
+        `Agent: ${escapeHtml(agentName(lease.agent_id))}<br>Credential: ${escapeHtml(credentialName(lease.credential_id))}<br>Issued: ${escapeHtml(lease.issued_at)}<br>Expires: ${escapeHtml(lease.expires_at)}`,
+        [lease.status, lease.action, lease.token_preview],
       ),
     )
     .join("") || '<p class="meta">No leases yet.</p>';
+  $("#credential-active-lease-count").textContent = state.leases.filter((lease) => lease.status === "active").length;
+  $("#credential-expired-lease-count").textContent = state.leases.filter((lease) => lease.status === "expired").length;
 }
 
 function renderTasks() {
@@ -194,6 +247,18 @@ function renderAudit() {
     .join("") || '<p class="meta">No broker activity yet.</p>';
 }
 
+function renderCredentialAudit() {
+  const events = state.auditEvents.filter((event) => event.type.startsWith("credential."));
+  $("#credential-denied-count").textContent = events.filter((event) => event.decision === "denied").length;
+  $("#credential-audit-list").innerHTML = events
+    .map((event) => {
+      const action = event.metadata?.action ? `<br>Action: ${escapeHtml(event.metadata.action)}` : "";
+      const ttl = Number.isFinite(event.metadata?.ttl_seconds) ? `<br>TTL: ${escapeHtml(event.metadata.ttl_seconds)}s` : "";
+      return `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${action}${ttl}<br>${escapeHtml(event.created_at)}</div></article>`;
+    })
+    .join("") || '<p class="meta">No credential audit events yet.</p>';
+}
+
 function renderConfig() {
   const reviewer = state.config?.intent_reviewer;
   $("#reviewer-config").textContent = reviewer ? `${reviewer.provider} / ${reviewer.model}` : "No reviewer configured";
@@ -210,6 +275,7 @@ function render() {
   renderTasks();
   renderSchedules();
   renderAudit();
+  renderCredentialAudit();
 }
 
 async function loadSetupState() {
@@ -242,10 +308,12 @@ async function refresh() {
 
 $("#auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
+  const form = event.currentTarget;
+  const payload = readForm(form);
   const path = state.setupComplete ? "/auth/login" : "/auth/setup";
   try {
     await api(path, { method: "POST", body: JSON.stringify(payload) });
+    form.reset();
     await refresh();
     toast(state.setupComplete ? "Signed in." : "Admin created.");
   } catch (error) {
@@ -263,6 +331,31 @@ $("#logout-button").addEventListener("click", async () => {
 $("#refresh-button").addEventListener("click", async () => {
   await refresh();
   toast("Runtime refreshed.");
+});
+
+for (const link of $$("[data-page-link]")) {
+  link.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const path = link.getAttribute("href");
+    if (path && path !== window.location.pathname) {
+      window.history.pushState({}, "", path);
+    }
+    renderNavigation();
+  });
+}
+
+window.addEventListener("popstate", () => {
+  renderNavigation();
 });
 
 $("#spawn-form").addEventListener("submit", async (event) => {
@@ -365,4 +458,5 @@ $("#run-due-button").addEventListener("click", async () => {
   toast(`${result.created_tasks.length} due schedule(s) ran.`);
 });
 
+renderNavigation();
 refresh().catch((error) => toast(error.message));

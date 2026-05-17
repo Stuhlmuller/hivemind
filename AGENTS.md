@@ -37,6 +37,16 @@ CLI set for the run, inspect issues with `gh issue list --state all --limit
 state the blocker explicitly if GitHub access is unavailable in the current
 environment.
 
+Publish rule: when explicitly asked to stage, commit, push, and open a PR in
+one flow, use the `yeet` skill instead of improvising an ad hoc git/gh
+sequence. Keep its safety checks around scope confirmation, intentional
+staging, and draft PR creation. Do not treat `yeet` as an automatic merge
+shortcut; merge only after checks pass and the review state is acceptable.
+PR sync rule: use the project-local `hivemind-pr-sync` skill before opening,
+updating, or asking for review on a pull request. Branches must include the
+latest `origin/main`, and conflicts must be resolved locally before PR
+handoff.
+
 Quality rule: before finishing code changes, run Qlty from the repo root against
 the scope you touched. At minimum run `qlty check` on changed files. Use
 `qlty check --all` for broad refactors or release-facing changes, and run
@@ -61,6 +71,24 @@ new ask creates a durable project rule, workflow, taste preference, security
 boundary, or implementation pattern. Prefer small project-local skills so future
 agents can replicate Hivemind work with little context.
 
+Idea rule: use the project-local `hivemind-idea-issues` skill when the user
+asks for new Hivemind ideas, backlog or roadmap suggestions, gap analysis, or
+"what should we build next" without asking to start coding. This workflow must
+create GitHub issues only and must not start implementation, branches, or PRs
+unless the user explicitly changes scope. Default toward backlog growth:
+assume there are usually more grounded issues to find, widen the audit across
+product, security, operations, docs, tests, release readiness, and developer
+experience before concluding, and only stop when further tickets would be
+duplicate or filler.
+
+Git workflow rule: use the project-local `hivemind-git-commits` skill before
+staging, committing, or pushing Hivemind changes so branch scope, commit
+signing, and verification stay consistent.
+Checkpoint rule: use the project-local `hivemind-branch-checkpoints` skill
+during multi-step work on any Hivemind branch. Prefer small signed checkpoint
+commits after each meaningful feature slice, security boundary change,
+verification milestone, or coherent refactor instead of waiting until the end
+of the branch.
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
@@ -70,3 +98,14 @@ Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
 must require working `gh`, run with GitHub-capable network access, move work
 onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
 that branch behavior.
+
+Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
+changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
+`.agents/role-loop.sh`, `.agents/scout-loop.sh`,
+`.agents/worker-loop-a.sh`, `.agents/worker-loop-b.sh`,
+`.agents/pr-shepherd.sh`, `.agents/swarm-launchd.sh`, or the `PROMPT-*.md`
+loop prompts. The GitHub swarm must keep dedicated worktrees per role, split
+development workers across deterministic issue lanes, use bounded subagents
+within each loop when useful, support an endless supervisor mode for
+laptop-open development, and reserve PR merging and cross-branch CI cleanup
+for the PR shepherd loop.

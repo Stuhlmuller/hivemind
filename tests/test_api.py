@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
-from hivemind.store import HivemindStore, hash_password
+from hivemind.store import HivemindStore, StoreError, hash_password
+
+TEST_PASSWORD = "operator-not-secret"
 
 
 def client_for(tmp_path: Path) -> TestClient:
@@ -14,12 +18,57 @@ def client_for(tmp_path: Path) -> TestClient:
     return TestClient(create_app(store, start_scheduler=False))
 
 
+def require_equal(actual: object, expected: object, message: str) -> None:
+    if actual != expected:
+        raise AssertionError(f"{message}: expected {expected!r}, got {actual!r}")
+
+
+def require_true(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 def setup(client: TestClient) -> None:
     response = client.post(
         "/auth/setup",
-        json={"username": "admin", "password": "aaaaaaaaaaaa"},
+        json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> None:
+    db_path = tmp_path / "bootstrap-race.db"
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
+    start = Barrier(3)
+
+    def create_admin(store: HivemindStore, username: str) -> tuple[str, str]:
+        start.wait()
+        try:
+            user = store.setup_admin(username, TEST_PASSWORD)
+            return ("ok", user["username"])
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(create_admin, stores[0], "admin"),
+            executor.submit(create_admin, stores[1], "operator"),
+        ]
+        start.wait()
+        results = [future.result() for future in futures]
+
+    assert sum(1 for status, _ in results if status == "ok") == 1
+    assert [detail for status, detail in results if status == "error"] == ["setup is already complete"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
+        usernames = [row[0] for row in conn.execute("SELECT username FROM users")]
+    finally:
+        conn.close()
+
+    assert admin_count == 1
+    assert len(usernames) == 1
 
 
 def test_frontend_is_served(tmp_path: Path) -> None:
@@ -27,36 +76,92 @@ def test_frontend_is_served(tmp_path: Path) -> None:
 
     response = client.get("/")
 
-    assert response.status_code == 200  # nosec B101
-    assert "Hivemind" in response.text
-    assert "/static/app.js" in response.text
+    require_equal(response.status_code, 200, "frontend should render")
+    require_true("Hivemind" in response.text, "frontend should render the app title")
+    require_true("/static/app.js" in response.text, "frontend should load the app script")
+    for required in ['name="username"', 'name="password"', 'autocomplete="username"', 'autocomplete="new-password"']:
+        if required not in response.text:
+            raise AssertionError(f"missing expected auth form markup: {required}")
+    username_input_start = response.text.index('name="username"')
+    username_input_end = response.text.index("/>", username_input_start)
+    password_input_start = response.text.index('name="password"')
+    password_input_end = response.text.index("/>", password_input_start)
+    username_markup = response.text[username_input_start:username_input_end]
+    password_markup = response.text[password_input_start:password_input_end]
+    if 'value="' in username_markup:
+        raise AssertionError("username input should not ship with a preset value")
+    if 'value="' in password_markup:
+        raise AssertionError("password input should not ship with a preset value")
+    if 'minlength="3"' in username_markup:
+        raise AssertionError("username input should not hard-code a 3-character minimum in the shared auth form")
+    if 'minlength="12"' not in password_markup:
+        raise AssertionError("password input should require a 12-character minimum during bootstrap setup")
 
 
-def test_frontend_auth_form_requires_operator_entered_credentials(tmp_path: Path) -> None:
+def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
-    response = client.get("/")
+    response = client.get("/control/credentials")
 
-    assert response.status_code == 200  # nosec B101
-    assert all(  # nosec B101
-        snippet in response.text
-        for snippet in ('name="username"', 'name="password"', 'autocomplete="new-password"', 'minlength="12"')
+    assert response.status_code == 200
+    assert 'data-page-link="credentials"' in response.text
+    assert "credential broker" in response.text
+
+
+def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    frontend = client.get("/")
+    setup_response = client.post(
+        "/auth/setup",
+        json={"username": "OperatorAdmin", "password": TEST_PASSWORD},
     )
-    assert all(  # nosec B101
-        snippet not in response.text
-        for snippet in ('value="admin"', 'value="aaaaaaaaaaaa"')
+    logout_response = client.post("/auth/logout")
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "OPERATORADMIN", "password": TEST_PASSWORD},
     )
+    me_response = client.get("/me")
+
+    require_equal(frontend.status_code, 200, "frontend should render")
+    require_true('name="username"' in frontend.text, "frontend should render a username field")
+    require_true('name="email"' not in frontend.text, "frontend should not render an email field")
+    require_true("auth: username/password" in frontend.text, "frontend should describe username/password auth")
+
+    require_equal(setup_response.status_code, 201, "setup should create the first admin")
+    require_equal(setup_response.json()["user"]["username"], "operatoradmin", "setup should normalize the username")
+    require_equal(setup_response.json()["user"]["role"], "admin", "first user should become admin")
+    require_true("email" not in setup_response.json()["user"], "setup response should not expose an email field")
+
+    require_equal(logout_response.status_code, 200, "logout should succeed after setup")
+
+    require_equal(login_response.status_code, 200, "login should accept username and password")
+    require_equal(login_response.json()["user"]["username"], "operatoradmin", "login should return the username")
+    require_equal(login_response.json()["user"]["role"], "admin", "login should preserve the admin role")
+    require_true("email" not in login_response.json()["user"], "login response should not expose an email field")
+
+    require_equal(me_response.status_code, 200, "me should return the current session user")
+    require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
+    require_equal(me_response.json()["role"], "admin", "me should expose the role")
+    require_true("email" not in me_response.json(), "me should not expose an email field")
 
 
-def test_config_requires_login_and_exposes_reviewer_after_setup(tmp_path: Path) -> None:
+def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://HIVEMIND_DEMO_GITHUB_TOKEN")
     client = client_for(tmp_path)
 
     assert client.get("/config").status_code == 401
     setup(client)
     response = client.get("/config")
+    reviewer = response.json()["intent_reviewer"]
+    credential = client.get("/credentials").json()[0]
 
     assert response.status_code == 200
-    assert response.json()["intent_reviewer"]["provider"] == "local"
+    assert reviewer["provider"] == "local"
+    assert reviewer["credential_ref_preview"] == "env://HIV..."
+    assert reviewer["credential_ref_preview"] == credential["secret_ref_preview"]
+    assert "credential_ref" not in reviewer
+    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text
 
 
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
@@ -86,6 +191,125 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+
+
+def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    protected_requests = [
+        ("GET", "/me", None),
+        ("GET", "/config", None),
+        ("GET", "/agents", None),
+        (
+            "POST",
+            "/agents",
+            {
+                "name": "forager",
+                "role": "Find the next useful task.",
+                "provider": "local",
+                "model": "deterministic-policy",
+                "system_prompt": "Respond briefly.",
+            },
+        ),
+        ("GET", "/credentials", None),
+        (
+            "POST",
+            "/credentials",
+            {
+                "name": "Repo reader",
+                "provider": "github",
+                "secret_ref": "env://GITHUB_TOKEN",
+                "allowed_agents": [],
+                "allowed_actions": ["read_repo"],
+                "max_ttl_seconds": 60,
+                "require_intent": True,
+                "metadata": {},
+            },
+        ),
+        ("GET", "/credential-leases", None),
+        (
+            "POST",
+            "/credential-leases",
+            {
+                "credential_id": "cred_demo",
+                "agent_id": "agent_demo",
+                "action": "read_repo",
+                "intent": "Read repository metadata for triage.",
+                "ttl_seconds": 30,
+            },
+        ),
+        (
+            "POST",
+            "/credential-actions",
+            {
+                "lease_token": "hvl_demo",
+                "action": "read_repo",
+                "payload": {"repo": "hivemind"},
+            },
+        ),
+        ("GET", "/tasks", None),
+        (
+            "POST",
+            "/tasks",
+            {
+                "title": "Review credential policy",
+                "description": "Check unauthenticated access handling.",
+                "priority": "normal",
+                "assigned_agent_id": None,
+                "credential_id": None,
+                "action": "",
+                "intent": "",
+                "heartbeat_seconds": None,
+            },
+        ),
+        ("PATCH", "/tasks/task_demo/status", {"status": "running"}),
+        ("POST", "/tasks/task_demo/heartbeats", {"note": "still working"}),
+        ("GET", "/heartbeats", None),
+        ("GET", "/schedules", None),
+        (
+            "POST",
+            "/schedules",
+            {
+                "name": "Policy review cadence",
+                "enabled": True,
+                "interval_seconds": 60,
+                "task_title": "Scheduled review",
+                "task_description": "Check auth boundaries.",
+                "priority": "normal",
+                "assigned_agent_id": None,
+                "credential_id": None,
+                "action": "",
+                "intent": "",
+                "next_run_at": None,
+            },
+        ),
+        ("POST", "/schedules/run-due", None),
+        ("GET", "/audit-events", None),
+    ]
+
+    for method, path, payload in protected_requests:
+        response = client.request(method, path, json=payload)
+
+        require_equal(response.status_code, 401, f"{method} {path} should require authentication")
+        require_equal(response.json(), {"detail": "authentication required"}, f"{method} {path} should return a consistent auth error")
+
+
+def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Bad Credential",
+            "provider": "github",
+            "secret_ref": "ghp_raw_secret_value",
+            "allowed_actions": ["read_repo"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
 
 
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
@@ -159,6 +383,70 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
     assert schedule_response.json()["credential_id"] is None
 
 
+def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    credential = client.get("/credentials").json()[0]
+
+    bad_task_agent = client.post(
+        "/tasks",
+        json={
+            "title": "Broken assignment",
+            "assigned_agent_id": "agent_missing",
+        },
+    )
+    assert bad_task_agent.status_code == 400
+    assert bad_task_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+
+    bad_task_credential = client.post(
+        "/tasks",
+        json={
+            "title": "Broken credential binding",
+            "credential_id": "cred_missing",
+        },
+    )
+    assert bad_task_credential.status_code == 400
+    assert bad_task_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+
+    bad_schedule_agent = client.post(
+        "/schedules",
+        json={
+            "name": "Broken schedule assignment",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "assigned_agent_id": "agent_missing",
+        },
+    )
+    assert bad_schedule_agent.status_code == 400
+    assert bad_schedule_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+
+    bad_schedule_credential = client.post(
+        "/schedules",
+        json={
+            "name": "Broken schedule credential",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "credential_id": "cred_missing",
+        },
+    )
+    assert bad_schedule_credential.status_code == 400
+    assert bad_schedule_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat target",
+            "credential_id": credential["id"],
+        },
+    ).json()
+    bad_heartbeat_agent = client.post(
+        f"/tasks/{task['id']}/heartbeats",
+        json={"agent_id": "agent_missing", "note": "still working"},
+    )
+    assert bad_heartbeat_agent.status_code == 400
+    assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
+
+
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
     db_path = tmp_path / "old.db"
     conn = sqlite3.connect(db_path)
@@ -175,13 +463,13 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
     )
     conn.execute(
         "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-        ("user_old", "admin@hivemind.local", hash_password("aaaaaaaaaaaa"), "admin", "2026-01-01T00:00:00+00:00"),
+        ("user_old", "admin@hivemind.local", hash_password(TEST_PASSWORD), "admin", "2026-01-01T00:00:00+00:00"),
     )
     conn.commit()
     conn.close()
 
     client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
-    response = client.post("/auth/login", json={"username": "admin", "password": "aaaaaaaaaaaa"})
+    response = client.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
 
     assert response.status_code == 200
     assert response.json()["user"]["username"] == "admin"

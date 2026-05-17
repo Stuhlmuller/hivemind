@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source_repo_root="$(cd "$script_dir/.." && pwd)"
+
+canonicalize_path() {
+  local target_path="$1"
+  (
+    cd "$target_path"
+    pwd -P
+  )
+}
+
+copy_agent_files() {
+  local repo_root="$1"
+
+  mkdir -p "$repo_root/.agents" "$repo_root/.agents/skills/hivemind-github-swarm-loop/agents"
+
+  cp "$source_repo_root/.agents/loop-common.sh" "$repo_root/.agents/loop-common.sh"
+  cp "$source_repo_root/.agents/role-loop.sh" "$repo_root/.agents/role-loop.sh"
+  cp "$source_repo_root/.agents/scout-loop.sh" "$repo_root/.agents/scout-loop.sh"
+  cp "$source_repo_root/.agents/worker-loop-a.sh" "$repo_root/.agents/worker-loop-a.sh"
+  cp "$source_repo_root/.agents/worker-loop-b.sh" "$repo_root/.agents/worker-loop-b.sh"
+  cp "$source_repo_root/.agents/pr-shepherd.sh" "$repo_root/.agents/pr-shepherd.sh"
+  cp "$source_repo_root/.agents/swarm.sh" "$repo_root/.agents/swarm.sh"
+  cp "$source_repo_root/.agents/swarm-launchd.sh" "$repo_root/.agents/swarm-launchd.sh"
+  cp "$source_repo_root/.agents/PROMPT-subagents.md" "$repo_root/.agents/PROMPT-subagents.md"
+  cp "$source_repo_root/.agents/PROMPT-scout.md" "$repo_root/.agents/PROMPT-scout.md"
+  cp "$source_repo_root/.agents/PROMPT-worker-a.md" "$repo_root/.agents/PROMPT-worker-a.md"
+  cp "$source_repo_root/.agents/PROMPT-worker-b.md" "$repo_root/.agents/PROMPT-worker-b.md"
+  cp "$source_repo_root/.agents/PROMPT-pr-shepherd.md" "$repo_root/.agents/PROMPT-pr-shepherd.md"
+  cp "$source_repo_root/.agents/TOOLS.md" "$repo_root/.agents/TOOLS.md"
+  cp "$source_repo_root/.agents/SWARM.md" "$repo_root/.agents/SWARM.md"
+  cp "$source_repo_root/.agents/skills/hivemind-github-swarm-loop/SKILL.md" "$repo_root/.agents/skills/hivemind-github-swarm-loop/SKILL.md"
+  cp "$source_repo_root/.agents/skills/hivemind-github-swarm-loop/agents/openai.yaml" "$repo_root/.agents/skills/hivemind-github-swarm-loop/agents/openai.yaml"
+  cp "$source_repo_root/flake.nix" "$repo_root/flake.nix"
+
+  chmod +x \
+    "$repo_root/.agents/loop-common.sh" \
+    "$repo_root/.agents/role-loop.sh" \
+    "$repo_root/.agents/scout-loop.sh" \
+    "$repo_root/.agents/worker-loop-a.sh" \
+    "$repo_root/.agents/worker-loop-b.sh" \
+    "$repo_root/.agents/pr-shepherd.sh" \
+    "$repo_root/.agents/swarm.sh" \
+    "$repo_root/.agents/swarm-launchd.sh"
+}
+
+setup_case_repo() {
+  local case_root="$1"
+  local repo_root="$case_root/repo"
+  local remote_root="$case_root/remote.git"
+
+  git init --bare "$remote_root" >/dev/null
+  git clone "$remote_root" "$repo_root" >/dev/null 2>&1
+
+  copy_agent_files "$repo_root"
+
+  (
+    cd "$repo_root"
+    git config user.name "Swarm Test"
+    git config user.email "swarm-test@example.com"
+    git config commit.gpgsign false
+    printf '# test\n' > README.md
+    git add README.md .agents flake.nix
+    git commit -m "init" >/dev/null
+    git branch -M main
+    git push -u origin main >/dev/null
+    git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  )
+
+  printf '%s\n' "$repo_root"
+}
+
+write_stub_gh() {
+  local bin_root="$1"
+
+  cat >"$bin_root/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  auth)
+    if [[ "${2:-}" == "status" ]]; then
+      printf 'github.com\n'
+      exit 0
+    fi
+    ;;
+  issue)
+    if [[ "${2:-}" == "list" ]]; then
+      exit 0
+    fi
+    ;;
+esac
+
+echo "unexpected gh invocation: $*" >&2
+exit 1
+EOF
+
+  chmod +x "$bin_root/gh"
+}
+
+write_stub_codex() {
+  local bin_root="$1"
+
+  cat >"$bin_root/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="${1:-}"
+shift || true
+
+extract_cd() {
+  local arg
+
+  while [[ "$#" -gt 0 ]]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      -C|--cd)
+        printf '%s\n' "$1"
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+  case "$command_name" in
+  exec)
+    run_root="$(extract_cd "$@")"
+    prompt_text="${@: -1}"
+    printf '%s\n' "$run_root" >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.exec"
+    printf '%s\n' "$prompt_text" >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.prompt"
+    exit 0
+    ;;
+  review)
+    pwd >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.review"
+    exit 0
+    ;;
+esac
+
+echo "unexpected codex invocation: $command_name $*" >&2
+exit 1
+EOF
+
+  chmod +x "$bin_root/codex"
+}
+
+wait_for_file() {
+  local file_path="$1"
+  local attempts=0
+
+  while [[ ! -f "$file_path" ]]; do
+    attempts=$((attempts + 1))
+    if [[ "$attempts" -gt 50 ]]; then
+      echo "timed out waiting for $file_path" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
+
+assert_file_equals() {
+  local file_path="$1"
+  local expected_path="$2"
+
+  if [[ "$(canonicalize_path "$(tail -n 1 "$file_path")")" == "$(canonicalize_path "$expected_path")" ]]; then
+    return
+  fi
+
+  echo "unexpected path in $file_path" >&2
+  cat "$file_path" >&2
+  exit 1
+}
+
+wait_for_line_count() {
+  local file_path="$1"
+  local minimum_lines="$2"
+  local attempts=0
+  local line_count=0
+
+  while :; do
+    if [[ -f "$file_path" ]]; then
+      line_count="$(wc -l <"$file_path" | tr -d '[:space:]')"
+      if [[ "$line_count" -ge "$minimum_lines" ]]; then
+        return
+      fi
+    fi
+    attempts=$((attempts + 1))
+    if [[ "$attempts" -gt 80 ]]; then
+      echo "timed out waiting for $file_path to reach $minimum_lines lines" >&2
+      [[ -f "$file_path" ]] && cat "$file_path" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
+
+assert_prompt_includes_subagent_policy() {
+  local file_path="$1"
+
+  if rg -q "## Subagent Delegation" "$file_path"; then
+    return
+  fi
+
+  echo "missing subagent policy in $file_path" >&2
+  cat "$file_path" >&2
+  exit 1
+}
+
+assert_text_includes() {
+  local haystack="$1"
+  local needle="$2"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    return
+  fi
+
+  echo "missing expected text: $needle" >&2
+  echo "$haystack" >&2
+  exit 1
+}
+
+case_root="$(mktemp -d "${TMPDIR:-/tmp}/swarm-check.XXXXXX")"
+bin_root="$case_root/bin"
+capture_root="$case_root/capture"
+runtime_root="$case_root/runtime"
+worktree_root="$case_root/worktrees"
+home_root="$case_root/home"
+
+mkdir -p "$bin_root" "$capture_root" "$home_root"
+write_stub_gh "$bin_root"
+write_stub_codex "$bin_root"
+repo_root="$(setup_case_repo "$case_root")"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_SCOUT_MAX_RUNS=1 \
+HIVEMIND_SCOUT_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_A_MAX_RUNS=1 \
+HIVEMIND_WORKER_A_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_B_MAX_RUNS=1 \
+HIVEMIND_WORKER_B_SLEEP_SECONDS=0 \
+HIVEMIND_PR_SHEPHERD_MAX_RUNS=1 \
+HIVEMIND_PR_SHEPHERD_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/swarm.sh" start >/dev/null
+
+wait_for_file "$capture_root/scout.exec"
+wait_for_file "$capture_root/worker-a.exec"
+wait_for_file "$capture_root/worker-b.exec"
+wait_for_file "$capture_root/pr-shepherd.exec"
+wait_for_file "$capture_root/scout.prompt"
+wait_for_file "$capture_root/worker-a.prompt"
+wait_for_file "$capture_root/worker-b.prompt"
+wait_for_file "$capture_root/pr-shepherd.prompt"
+wait_for_file "$capture_root/worker-a.review"
+wait_for_file "$capture_root/worker-b.review"
+
+assert_file_equals "$capture_root/scout.exec" "$worktree_root/scout"
+assert_file_equals "$capture_root/worker-a.exec" "$worktree_root/worker-a"
+assert_file_equals "$capture_root/worker-b.exec" "$worktree_root/worker-b"
+assert_file_equals "$capture_root/pr-shepherd.exec" "$worktree_root/pr-shepherd"
+assert_file_equals "$capture_root/worker-a.review" "$worktree_root/worker-a"
+assert_file_equals "$capture_root/worker-b.review" "$worktree_root/worker-b"
+assert_prompt_includes_subagent_policy "$capture_root/scout.prompt"
+assert_prompt_includes_subagent_policy "$capture_root/worker-a.prompt"
+assert_prompt_includes_subagent_policy "$capture_root/worker-b.prompt"
+assert_prompt_includes_subagent_policy "$capture_root/pr-shepherd.prompt"
+
+status_output="$(
+  PATH="$bin_root:$PATH" \
+  CODEX_SANDBOX="" \
+  HOME="$home_root" \
+  HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+  HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+  HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+  bash "$repo_root/.agents/swarm.sh" status
+)"
+
+for role in scout worker-a worker-b pr-shepherd; do
+  if [[ "$status_output" != *"$role"* ]]; then
+    echo "status output missing $role" >&2
+    echo "$status_output" >&2
+    exit 1
+  fi
+done
+
+printf 'scout sample line\n' >>"$runtime_root/logs/scout.log"
+printf 'worker-a sample line\n' >>"$runtime_root/logs/worker-a.log"
+
+follow_output="$(
+  PATH="$bin_root:$PATH" \
+  CODEX_SANDBOX="" \
+  HOME="$home_root" \
+  HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+  HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+  HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+  HIVEMIND_SWARM_TAIL_LINES=1 \
+  HIVEMIND_SWARM_FOLLOW_MAX_LINES=2 \
+  HIVEMIND_SWARM_FORCE_COLOR=1 \
+  bash "$repo_root/.agents/swarm.sh" logs --follow scout worker-a
+)"
+
+assert_text_includes "$follow_output" $'\033[36m[scout]\033[0m scout sample line'
+assert_text_includes "$follow_output" $'\033[32m[worker-a]\033[0m worker-a sample line'
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
+rm -f "$capture_root/worker-a.exec" "$capture_root/worker-a.prompt" "$capture_root/worker-a.review"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$case_root/runtime-supervisor" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$case_root/worktrees-supervisor" \
+HIVEMIND_SWARM_SUPERVISOR_SLEEP_SECONDS=1 \
+HIVEMIND_WORKER_A_MAX_RUNS=1 \
+HIVEMIND_WORKER_A_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/swarm.sh" run worker-a >/dev/null 2>&1 &
+supervisor_pid="$!"
+
+wait_for_line_count "$capture_root/worker-a.exec" 2
+wait_for_line_count "$capture_root/worker-a.review" 2
+
+kill "$supervisor_pid" >/dev/null 2>&1 || true
+wait "$supervisor_pid" >/dev/null 2>&1 || true
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  plist_output="$(
+    PATH="$bin_root:$PATH" \
+    CODEX_SANDBOX="" \
+    HOME="$home_root" \
+    bash "$repo_root/.agents/swarm-launchd.sh" print-plist worker-a pr-shepherd
+  )"
+
+  assert_text_includes "$plist_output" "<string>run</string>"
+  assert_text_includes "$plist_output" "<string>worker-a</string>"
+  assert_text_includes "$plist_output" "<string>pr-shepherd</string>"
+  assert_text_includes "$plist_output" "<key>KeepAlive</key>"
+  assert_text_includes "$plist_output" "<key>RunAtLoad</key>"
+
+  plist_file="$case_root/swarm-launchd.plist"
+  printf '%s\n' "$plist_output" >"$plist_file"
+  plutil -lint "$plist_file" >/dev/null
+fi
+
+rm -rf "$case_root"
+echo "[swarm-verify] all swarm checks passed"

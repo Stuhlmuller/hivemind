@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hivemind.config import HivemindConfig
-from hivemind.store import HivemindStore, SessionUser, StoreError
+from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError
 
 
 SESSION_COOKIE = "hivemind_session"
@@ -109,6 +109,9 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     app.state.store = db
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    def serve_frontend() -> FileResponse:
+        return FileResponse(static_dir.joinpath("index.html"))
+
     def require_user(session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> SessionUser:
         user = db.get_session_user(session)
         if user is None:
@@ -150,7 +153,12 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.get("/", include_in_schema=False)
     def frontend() -> FileResponse:
-        return FileResponse(static_dir.joinpath("index.html"))
+        return serve_frontend()
+
+    @app.get("/control", include_in_schema=False)
+    @app.get("/control/{path:path}", include_in_schema=False)
+    def frontend_control(path: str = "") -> FileResponse:
+        return serve_frontend()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -247,7 +255,10 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/tasks", status_code=201)
     def create_task(request: CreateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return db.create_task(request.model_dump())
+        try:
+            return db.create_task(request.model_dump())
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.patch("/tasks/{task_id}/status")
     def update_task_status(task_id: str, request: UpdateTaskStatusRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
@@ -260,7 +271,9 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def record_heartbeat(task_id: str, request: HeartbeatRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
             return db.record_heartbeat(task_id, request.agent_id, request.note)
-        except StoreError as exc:
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/heartbeats")

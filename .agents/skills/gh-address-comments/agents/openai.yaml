@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Follow-up"
+  short_description: "Address actionable PR feedback"
+  default_prompt: "Review unresolved pull request feedback, implement the selected fixes, and summarize what changed."

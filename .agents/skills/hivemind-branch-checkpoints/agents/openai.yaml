@@ -1,0 +1,3 @@
+display_name: Hivemind Branch Checkpoints
+short_description: Commit often on each Hivemind branch.
+default_prompt: Use this skill during multi-step Hivemind branch work so you preserve progress with small signed checkpoint commits after each meaningful milestone.

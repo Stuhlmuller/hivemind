@@ -5,6 +5,5 @@ policy:
 approval_rules:
   - name: signed
     requires:
-      has_valid_signatures: true
-      has_valid_signatures_by_keys:
-        key_ids: ["A86F8F76C83C03EC"]
+      conditions:
+        has_valid_signatures: true

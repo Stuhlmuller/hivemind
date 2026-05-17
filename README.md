@@ -27,14 +27,47 @@ Then open `http://localhost:8000/`.
 
 The API docs are available at `http://localhost:8000/docs`.
 
+## Nix Dev Shell
+
+The repository flake is primarily used to keep Ralph and agent runs aligned on a
+repeatable CLI set:
+
+```bash
+nix flake check
+nix develop
+```
+
+If `nix flake check` passes but `nix develop` fails with `Problem with the SSL
+CA cert (path? access rights?)`, the repo flake is usually fine and the local
+multi-user Nix installation is broken instead. Run:
+
+```bash
+./scripts/diagnose-nix-develop.sh
+```
+
+On macOS, one common failure mode is a broken
+`/etc/ssl/certs/ca-certificates.crt` symlink that still points through
+`/etc/static` to a missing Nix store path. When the diagnosis script reports
+that state and `/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt`
+exists, repair it with:
+
+```bash
+sudo rm /etc/ssl/certs/ca-certificates.crt
+sudo ln -s /nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
+nix develop --command bash -lc "printf 'dev-shell-ok\n'"
+```
+
+If the repair does not hold or `/etc/static` still points at a missing store
+path, repair or reinstall the macOS multi-user Nix daemon installation. This is
+a machine-local problem, not a Hivemind flake problem.
+
 ## Login
 
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
-
-Enter your own local admin username and a password of at least 12 characters.
-Hivemind does not ship with preset bootstrap credentials. After setup
-completes, use the same username and password on the login screen.
+The setup form starts blank. Enter your own local admin username and a password
+of at least 12 characters. After setup completes, use the same username and
+password on the login screen.
 
 Optional intent reviewer configuration:
 
@@ -50,6 +83,10 @@ export HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
 docker build -t hivemind .
 docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
 ```
+
+GitHub Actions also builds this image on pull requests and publishes it to
+GitHub Container Registry from `main` and version tags as
+`ghcr.io/<owner>/hivemind`.
 
 ## Security Model
 
