@@ -479,6 +479,69 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
     )
 
 
+def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "persisted-lease-race.db"
+    setup_store = HivemindStore(db_path)
+    setup_store.setup_admin("admin", TEST_PASSWORD)
+    agent = setup_store.list_agents()[0]
+    credential = setup_store.list_credentials()[0]
+    lease_token, _ = setup_store.request_lease(
+        credential_id=credential["id"],
+        agent_id=agent["id"],
+        action="read_repo",
+        intent="Read repository metadata for safe task triage.",
+        ttl_seconds=30,
+    )
+    if lease_token is None:
+        raise AssertionError("active lease request should issue a token")
+
+    start = Barrier(3)
+    consume = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def _consume_credential_action(self, conn, lease, normalized_action, payload):
+            consume.wait(timeout=5)
+            return super()._consume_credential_action(conn, lease, normalized_action, payload)
+
+    stores = [RacingStore(db_path), RacingStore(db_path)]
+
+    def perform(store: HivemindStore) -> tuple[str, object]:
+        start.wait(timeout=5)
+        try:
+            return (
+                "ok",
+                store.perform_credential_action(
+                    lease_token=lease_token,
+                    action="read_repo",
+                    payload={"repo": "hivemind"},
+                ),
+            )
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(perform, store) for store in stores]
+        start.wait(timeout=5)
+        results = [future.result() for future in futures]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one concurrent action should succeed")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["credential lease is expired or revoked"],
+        "losing concurrent action should fail closed as a replay",
+    )
+    require_equal(setup_store.list_leases()[0]["status"], "revoked", "persisted lease should be consumed")
+
+    action_events = [
+        event for event in setup_store.list_audit_events() if event["type"].startswith("credential.action.")
+    ]
+    require_equal(
+        sorted(event["type"] for event in action_events),
+        ["credential.action.denied", "credential.action.performed"],
+        "race should audit one allowed action and one denial",
+    )
+
+
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

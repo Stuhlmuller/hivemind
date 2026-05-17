@@ -908,7 +908,22 @@ class HivemindStore:
             error_detail = "credential no longer exists"
             self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
             return None, error_detail
-        conn.execute("UPDATE leases SET status = ?, expires_at = ? WHERE id = ?", ("revoked", iso(utcnow()), lease["id"]))
+        consumed_at = utcnow()
+        cursor = conn.execute(
+            """
+            UPDATE leases
+            SET status = ?, expires_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND action = ?
+              AND expires_at > ?
+            """,
+            ("revoked", iso(consumed_at), lease["id"], "active", normalized_action, iso(consumed_at)),
+        )
+        if cursor.rowcount != 1:
+            error_detail = "credential lease is expired or revoked"
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return None, error_detail
         self._insert_audit(
             conn,
             "credential.action.performed",
