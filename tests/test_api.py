@@ -2103,6 +2103,7 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
             "name": "Config sync",
             "enabled": True,
             "interval_seconds": 120,
+            "catch_up_policy": "skip_missed",
             "task_title": "Validate imported config",
             "task_description": "Confirm references and policies still line up.",
             "priority": "high",
@@ -2148,6 +2149,11 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
         exported_credential["policy"]["approval_required_actions"],
         ["open_issue"],
         "exported credential policy should preserve approval gates",
+    )
+    require_equal(
+        exported_schedule["catch_up_policy"],
+        "skip_missed",
+        "exported schedule should preserve catch-up behavior",
     )
     require_true("task_template" in exported_schedule, "schedule export should include nested task template config")
     require_equal(
@@ -2201,6 +2207,11 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
     )
     require_equal(imported_schedule["task_title"], "Validate imported config", "imported schedule should keep task title")
     require_equal(imported_schedule["assigned_agent_id"], agent["id"], "imported schedule should keep agent reference")
+    require_equal(
+        imported_schedule["catch_up_policy"],
+        "skip_missed",
+        "imported schedule should keep catch-up behavior",
+    )
     require_equal(audit_events[0]["type"], "config.imported", "applied import should create an audit event")
     require_true(audit_events[0]["actor_id"].startswith("user_"), "import audit should use the authenticated user")
     require_equal(
@@ -2248,6 +2259,7 @@ def test_declarative_config_normalizes_mixed_case_policy_actions(tmp_path: Path)
                 "name": "Mixed case action",
                 "enabled": True,
                 "interval_seconds": 60,
+                "catch_up_policy": "run_once",
                 "next_run_at": "2030-01-01T00:00:00+00:00",
                 "task_template": {
                     "title": "Read repo with mixed case action",
@@ -2443,6 +2455,7 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
                 "name": "Bad policy schedule",
                 "enabled": True,
                 "interval_seconds": 60,
+                "catch_up_policy": "run_once",
                 "next_run_at": "2030-01-01T00:00:00+00:00",
                 "task_template": {
                     "title": "Use disallowed action",
@@ -2463,6 +2476,48 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         policy_response.json()["detail"],
         "schedules[0].task_template.action is outside credential policy: delete_repo",
         "schedule policy validation should reject actions outside the credential policy",
+    )
+
+    schedule_without_catch_up = dict(bad_schedule_policy["schedules"][0])
+    schedule_without_catch_up.pop("catch_up_policy")
+    missing_catch_up_policy = {**bad_schedule_policy, "schedules": [schedule_without_catch_up]}
+    missing_catch_up_response = client.post(
+        "/declarative-config/validate",
+        json={"config": missing_catch_up_policy},
+    )
+    require_equal(
+        missing_catch_up_response.status_code,
+        400,
+        "schedule catch-up policy should be explicit",
+    )
+    require_equal(
+        missing_catch_up_response.json()["detail"],
+        "schedules[0].catch_up_policy must be a non-empty string",
+        "declarative schedules should require explicit catch-up behavior",
+    )
+
+    bad_catch_up_policy = {
+        **bad_schedule_policy,
+        "schedules": [
+            {
+                **bad_schedule_policy["schedules"][0],
+                "catch_up_policy": "drift_forever",
+            }
+        ],
+    }
+    bad_catch_up_response = client.post(
+        "/declarative-config/validate",
+        json={"config": bad_catch_up_policy},
+    )
+    require_equal(
+        bad_catch_up_response.status_code,
+        400,
+        "invalid schedule catch-up policy should fail",
+    )
+    require_equal(
+        bad_catch_up_response.json()["detail"],
+        "schedules[0].catch_up_policy must be one of: skip_missed, run_once, backfill",
+        "declarative schedules should validate catch-up behavior",
     )
 
     missing_approval_gate = {

@@ -5,7 +5,16 @@ import sqlite3
 from typing import Any
 
 from hivemind.secret_refs import validate_external_credential_metadata, validate_external_secret_ref
-from hivemind.store import HivemindStore, StoreError, dumps, iso, loads, parse_dt, utcnow
+from hivemind.store import (
+    SCHEDULE_CATCH_UP_POLICIES,
+    HivemindStore,
+    StoreError,
+    dumps,
+    iso,
+    loads,
+    parse_dt,
+    utcnow,
+)
 
 
 CONFIG_VERSION = 1
@@ -70,7 +79,8 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
             for row in conn.execute(
                 """
                 SELECT id, name, enabled, interval_seconds, task_title, task_description,
-                       priority, assigned_agent_id, credential_id, action, intent, next_run_at
+                       priority, assigned_agent_id, credential_id, action, intent, next_run_at,
+                       catch_up_policy
                 FROM schedules
                 ORDER BY id
                 """
@@ -164,6 +174,7 @@ def _schedule_config(row: sqlite3.Row) -> dict[str, Any]:
         "name": row["name"],
         "enabled": bool(row["enabled"]),
         "interval_seconds": row["interval_seconds"],
+        "catch_up_policy": row["catch_up_policy"],
         "next_run_at": row["next_run_at"],
         "task_template": {
             "title": row["task_title"],
@@ -286,7 +297,15 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
         schedule = _mapping(item, prefix)
         _reject_unknown_keys(
             schedule,
-            {"id", "name", "enabled", "interval_seconds", "next_run_at", "task_template"},
+            {
+                "id",
+                "name",
+                "enabled",
+                "interval_seconds",
+                "catch_up_policy",
+                "next_run_at",
+                "task_template",
+            },
             prefix,
         )
         schedule_id = _required_str(schedule, "id", prefix)
@@ -319,6 +338,10 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
                 "name": _required_str(schedule, "name", prefix),
                 "enabled": _bool(schedule.get("enabled", True), f"{prefix}.enabled"),
                 "interval_seconds": interval,
+                "catch_up_policy": _catch_up_policy(
+                    schedule.get("catch_up_policy"),
+                    f"{prefix}.catch_up_policy",
+                ),
                 "next_run_at": next_run_at,
                 "task_title": _required_str(task_template, "title", f"{prefix}.task_template"),
                 "task_description": _optional_str(task_template, "description") or "",
@@ -504,6 +527,7 @@ def _upsert_schedule(conn: sqlite3.Connection, schedule: Mapping[str, Any], now:
         schedule["name"],
         1 if schedule["enabled"] else 0,
         schedule["interval_seconds"],
+        schedule["catch_up_policy"],
         schedule["task_title"],
         schedule["task_description"],
         schedule["priority"],
@@ -519,7 +543,7 @@ def _upsert_schedule(conn: sqlite3.Connection, schedule: Mapping[str, Any], now:
         conn.execute(
             """
             UPDATE schedules
-            SET name = ?, enabled = ?, interval_seconds = ?, task_title = ?,
+            SET name = ?, enabled = ?, interval_seconds = ?, catch_up_policy = ?, task_title = ?,
                 task_description = ?, priority = ?, assigned_agent_id = ?,
                 credential_id = ?, action = ?, intent = ?, next_run_at = ?, updated_at = ?
             WHERE id = ?
@@ -530,10 +554,10 @@ def _upsert_schedule(conn: sqlite3.Connection, schedule: Mapping[str, Any], now:
     conn.execute(
         """
         INSERT INTO schedules
-        (name, enabled, interval_seconds, task_title, task_description, priority,
+        (name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority,
          assigned_agent_id, credential_id, action, intent, next_run_at, updated_at,
          id, last_run_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         """,
         (*values, now),
     )
@@ -594,6 +618,16 @@ def _bool(value: Any, name: str) -> bool:
     if not isinstance(value, bool):
         raise DeclarativeConfigError(f"{name} must be true or false")
     return value
+
+
+def _catch_up_policy(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise DeclarativeConfigError(f"{name} must be a non-empty string")
+    normalized = value.strip().lower()
+    if normalized not in SCHEDULE_CATCH_UP_POLICIES:
+        allowed = ", ".join(SCHEDULE_CATCH_UP_POLICIES)
+        raise DeclarativeConfigError(f"{name} must be one of: {allowed}")
+    return normalized
 
 
 def _metadata(value: Any, name: str) -> dict[str, Any]:

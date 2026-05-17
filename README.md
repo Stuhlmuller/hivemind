@@ -183,16 +183,17 @@ curl -sS -b cookies.txt -H "content-type: application/json" \
 ```
 
 The config contains agents, credential policies with explicit approval-gated
-action lists, and schedules with nested task templates. Credential entries
-include secret references such as
+action lists, and schedules with explicit catch-up policies and nested task
+templates. Credential entries include secret references such as
 `env://HIVEMIND_REPO_READER_TOKEN`, not raw tokens or encrypted OAuth payloads.
 Declarative imports accept external secret refs only; broker-generated
 `secret://` refs are not portable config.
-Dry-run import validates references, TTLs, interval bounds, schedule task
-templates, and credential policy compatibility without writing to SQLite. Apply
-with `"dry_run": false` after the operator has provisioned the referenced
-external secrets. Applied imports create or update matching objects; they do not
-delete agents, credentials, or schedules omitted from the config.
+Dry-run import validates references, TTLs, interval bounds, schedule catch-up
+policies and task templates, and credential policy compatibility without
+writing to SQLite. Apply with `"dry_run": false` after the operator has
+provisioned the referenced external secrets. Applied imports create or update
+matching objects; they do not delete agents, credentials, or schedules omitted
+from the config.
 
 See `docs/declarative-config.example.json` for a complete example.
 
