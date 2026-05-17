@@ -23,3 +23,13 @@ go.work.sum
 
 # env file
 .env
+
+# Python/runtime noise
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+
+# Local-only skills that are not part of this repo
+.agents/skills/frontend-design/
