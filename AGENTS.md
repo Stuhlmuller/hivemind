@@ -29,6 +29,9 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
+Commit signing rule: every git commit for this repository must be signed.
+Unsigned commits are not acceptable because policy checks reject them. If commit
+signing fails, stop and fix signing before creating or pushing more commits.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
@@ -36,6 +39,12 @@ CLI set for the run, inspect issues with `gh issue list --state all --limit
 100` before choosing issue-driven work, use one issue per branch and PR, and
 state the blocker explicitly if GitHub access is unavailable in the current
 environment.
+
+Publish rule: when explicitly asked to stage, commit, push, and open a PR in
+one flow, use the `yeet` skill instead of improvising an ad hoc git/gh
+sequence. Keep its safety checks around scope confirmation, intentional
+staging, and draft PR creation. Do not treat `yeet` as an automatic merge
+shortcut; merge only after checks pass and the review state is acceptable.
 
 Quality rule: before finishing code changes, run Qlty from the repo root against
 the scope you touched. At minimum run `qlty check` on changed files. Use
@@ -67,6 +76,10 @@ asks for new Hivemind ideas, backlog or roadmap suggestions, gap analysis, or
 create GitHub issues only and must not start implementation, branches, or PRs
 unless the user explicitly changes scope.
 
+Git workflow rule: use the project-local `hivemind-git-commits` skill before
+staging, committing, or pushing Hivemind changes so branch scope, commit
+signing, and verification stay consistent.
+
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
@@ -74,5 +87,6 @@ software; use username/password local auth, not email-first SaaS account flows.
 Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
 `.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
 must require working `gh`, run with GitHub-capable network access, move work
-onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
-that branch behavior.
+onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
+reuse the primary checkout or repurpose a worktree via local issue-branch
+checkout, and fail when the wrapper cannot verify those rules.
