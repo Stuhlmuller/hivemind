@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hivemind Security Audit"
+  short_description: "Audit Hivemind security after changes."
+  default_prompt: "Use this skill after every Hivemind implementation change to audit security boundaries, architecture, tests, and secret handling before finishing."
