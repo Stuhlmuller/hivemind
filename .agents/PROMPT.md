@@ -44,11 +44,14 @@ Before doing any other work:
 ## Task branch workflow
 
 1. Every issue picked up for implementation must get its own fresh branch.
-2. Create the branch before making code changes.
+2. When starting new issue work from the default branch, create the issue branch in its own fresh git worktree before making code changes. Use `git worktree add -b issue-<number>-<slug> <path> <default-branch>` or equivalent instead of checking out the issue branch in place first.
 3. Use one branch for one issue only.
 4. Name branches from the issue number and task, for example `issue-123-short-slug`.
-5. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
-6. Ralph audits branch behavior. If the run does not switch onto an `issue-<number>-<slug>` branch, the wrapper will fail the run.
+5. Ralph only uses dedicated git worktrees for issue execution. The primary checkout must stay off issue branches.
+6. Do all implementation, validation, commits, and PR work inside that issue worktree.
+7. Never repurpose an existing Ralph worktree by checking out a different issue branch in place. Create a fresh worktree for every new issue.
+8. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
+9. Ralph audits branch naming, checkout activity, and worktree isolation. If a run creates or continues an `issue-<number>-<slug>` branch via local checkout instead of a dedicated worktree, the wrapper will fail the run.
 
 ## PR workflow
 

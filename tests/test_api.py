@@ -9,6 +9,9 @@ from hivemind.api import create_app
 from hivemind.store import HivemindStore, hash_password
 
 
+TEST_PASSWORD = "operator-not-secret"
+
+
 def client_for(tmp_path: Path) -> TestClient:
     store = HivemindStore(tmp_path / "hivemind.db")
     return TestClient(create_app(store, start_scheduler=False))
@@ -17,7 +20,7 @@ def client_for(tmp_path: Path) -> TestClient:
 def setup(client: TestClient) -> None:
     response = client.post(
         "/auth/setup",
-        json={"username": "admin", "password": "hivemind-password"},
+        json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
 
@@ -32,15 +35,22 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert "/static/app.js" in response.text
 
 
-def test_config_requires_login_and_exposes_reviewer_after_setup(tmp_path: Path) -> None:
+def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://HIVEMIND_DEMO_GITHUB_TOKEN")
     client = client_for(tmp_path)
 
     assert client.get("/config").status_code == 401
     setup(client)
     response = client.get("/config")
+    reviewer = response.json()["intent_reviewer"]
+    credential = client.get("/credentials").json()[0]
 
     assert response.status_code == 200
-    assert response.json()["intent_reviewer"]["provider"] == "local"
+    assert reviewer["provider"] == "local"
+    assert reviewer["credential_ref_preview"] == "env://HIV..."
+    assert reviewer["credential_ref_preview"] == credential["secret_ref_preview"]
+    assert "credential_ref" not in reviewer
+    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text
 
 
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
@@ -70,6 +80,24 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+
+
+def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Bad Credential",
+            "provider": "github",
+            "secret_ref": "ghp_raw_secret_value",
+            "allowed_actions": ["read_repo"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
 
 
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
@@ -143,6 +171,70 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
     assert schedule_response.json()["credential_id"] is None
 
 
+def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    credential = client.get("/credentials").json()[0]
+
+    bad_task_agent = client.post(
+        "/tasks",
+        json={
+            "title": "Broken assignment",
+            "assigned_agent_id": "agent_missing",
+        },
+    )
+    assert bad_task_agent.status_code == 400
+    assert bad_task_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+
+    bad_task_credential = client.post(
+        "/tasks",
+        json={
+            "title": "Broken credential binding",
+            "credential_id": "cred_missing",
+        },
+    )
+    assert bad_task_credential.status_code == 400
+    assert bad_task_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+
+    bad_schedule_agent = client.post(
+        "/schedules",
+        json={
+            "name": "Broken schedule assignment",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "assigned_agent_id": "agent_missing",
+        },
+    )
+    assert bad_schedule_agent.status_code == 400
+    assert bad_schedule_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+
+    bad_schedule_credential = client.post(
+        "/schedules",
+        json={
+            "name": "Broken schedule credential",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "credential_id": "cred_missing",
+        },
+    )
+    assert bad_schedule_credential.status_code == 400
+    assert bad_schedule_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat target",
+            "credential_id": credential["id"],
+        },
+    ).json()
+    bad_heartbeat_agent = client.post(
+        f"/tasks/{task['id']}/heartbeats",
+        json={"agent_id": "agent_missing", "note": "still working"},
+    )
+    assert bad_heartbeat_agent.status_code == 400
+    assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
+
+
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
     db_path = tmp_path / "old.db"
     conn = sqlite3.connect(db_path)
@@ -159,13 +251,13 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
     )
     conn.execute(
         "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-        ("user_old", "admin@hivemind.local", hash_password("hivemind-password"), "admin", "2026-01-01T00:00:00+00:00"),
+        ("user_old", "admin@hivemind.local", hash_password(TEST_PASSWORD), "admin", "2026-01-01T00:00:00+00:00"),
     )
     conn.commit()
     conn.close()
 
     client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
-    response = client.post("/auth/login", json={"username": "admin", "password": "hivemind-password"})
+    response = client.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
 
     assert response.status_code == 200
     assert response.json()["user"]["username"] == "admin"

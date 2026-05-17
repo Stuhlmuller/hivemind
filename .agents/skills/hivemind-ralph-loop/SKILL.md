@@ -16,13 +16,16 @@ Keep Ralph opinionated and enforceable. Ralph is not a generic local coding loop
 - Ralph must run Codex with network-capable access so nested `gh` commands can reach GitHub.
 - GitHub failures are blockers. Do not add local-only fallback behavior.
 - Ralph must use issue branches named `issue-<number>-<slug>`.
-- A run that never switches onto an issue branch must fail.
+- Ralph issue execution must happen inside dedicated git worktrees.
+- Ralph must reject runs that check out an issue branch locally in the active checkout before creating a worktree.
+- Ralph must reject repurposing an existing issue worktree by checking out a different issue branch in place.
+- A run that never creates or enters an issue worktree must fail.
 
 ## Wrapper Rules
 
 1. Keep GitHub preflight checks in `.agents/ralph.sh`.
 2. Keep branch enforcement in the wrapper, not only in the prompt.
-3. Allow Ralph to prove branch creation either by ending on an issue branch or by showing issue-branch checkout activity during the run.
+3. Require a fresh worktree for each new issue branch. Do not accept in-place issue checkouts, even if the run later moves work into a worktree.
 4. If the wrapper cannot verify the branch rule, exit non-zero before continuing the loop.
 5. Keep the prompt and wrapper aligned whenever you change either one.
 
@@ -30,7 +33,7 @@ Keep Ralph opinionated and enforceable. Ralph is not a generic local coding loop
 
 - `.agents/PROMPT.md` must explicitly say that GitHub CLI is required.
 - `.agents/PROMPT.md` must explicitly say that Ralph fails when required `gh` commands fail.
-- `.agents/PROMPT.md` must explicitly say that branch creation is audited by the wrapper.
+- `.agents/PROMPT.md` must explicitly say that worktree-only issue execution and local checkout activity are audited by the wrapper.
 
 ## Verification
 
@@ -43,5 +46,6 @@ bash -n .agents/ralph.sh
 Also run at least one stubbed loop check that proves:
 
 - Ralph launches Codex with network-capable access.
-- Ralph fails when no issue branch is opened.
-- Ralph accepts a run that checks out an `issue-<number>-<slug>` branch.
+- Ralph accepts a run that creates an `issue-<number>-<slug>` worktree directly.
+- Ralph fails when a run checks out an `issue-<number>-<slug>` branch locally before creating a worktree.
+- Ralph fails when a run repurposes an existing issue worktree by checking out a different issue branch in place.

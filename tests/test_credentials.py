@@ -63,6 +63,24 @@ class CredentialServiceTests(unittest.TestCase):
                 intent="Delete the repository because the task asked for it",
             )
 
+    def test_vault_rejects_invalid_secret_refs(self) -> None:
+        vault = CredentialVault()
+
+        for secret_ref in ("ghp_raw_secret_value", "https://example.com/token", "env://"):
+            with self.subTest(secret_ref=secret_ref):
+                with self.assertRaisesRegex(CredentialError, "secret_ref must use"):
+                    vault.add(
+                        credential_id=f"cred_{secret_ref.replace(':', '_')}",
+                        name="Bad Ref",
+                        provider="github",
+                        secret_ref=secret_ref,
+                        policy=CredentialPolicy(
+                            allowed_agents=frozenset({"agent.scout"}),
+                            allowed_actions=frozenset({"read_repo"}),
+                            max_ttl_seconds=60,
+                        ),
+                    )
+
     def test_lease_only_allows_matching_action(self) -> None:
         service = make_service()
         lease = service.request_lease(
@@ -93,4 +111,3 @@ class CredentialServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
