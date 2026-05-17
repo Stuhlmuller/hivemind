@@ -1,85 +1,79 @@
 ---
 name: hivemind-security-audit
-description: [TODO: Complete and informative explanation of what the skill does and when to use it. Include WHEN to use this skill - specific scenarios, file types, or tasks that trigger it.]
+description: Run a mandatory Hivemind security and architecture audit after every implementation change. Use after code, frontend, backend, auth, credential, lease, agent, task, schedule, heartbeat, storage, Docker, README, AGENTS.md, or project skill changes to check secret handling, JIT credential boundaries, auth/session safety, persistence, auditability, tests, architecture, and release risk before finishing.
 ---
 
 # Hivemind Security Audit
 
-## Overview
+## Purpose
 
-[TODO: 1-2 sentences explaining what this skill enables]
+Use this skill after every Hivemind implementation change before finalizing, committing, or handing work back. The audit exists to keep Hivemind secure by default, deny-by-default, self-hosted, and well-architected around brokered JIT credentials.
 
-## Structuring This Skill
+## Workflow
 
-[TODO: Choose the structure that best fits this skill's purpose. Common patterns:
+1. Review the exact diff and classify the touched surfaces: auth/session, credentials/JIT leases, agents/tasks/schedules/heartbeats, API, persistence, frontend, Docker/config, docs, or skills.
+2. Run the checklist sections that match the touched surfaces, plus the universal checks.
+3. Treat blocker findings as implementation work, not notes. Fix them before finishing unless the user explicitly accepts the residual risk.
+4. Run focused verification for the changed surface. Use broader tests when a shared boundary changed.
+5. In the final response, state the security audit result, tests run, fixes made, and any remaining risk.
 
-**1. Workflow-Based** (best for sequential processes)
-- Works well when there are clear step-by-step procedures
-- Example: DOCX skill with "Workflow Decision Tree" -> "Reading" -> "Creating" -> "Editing"
-- Structure: ## Overview -> ## Workflow Decision Tree -> ## Step 1 -> ## Step 2...
+## Universal Checks
 
-**2. Task-Based** (best for tool collections)
-- Works well when the skill offers different operations/capabilities
-- Example: PDF skill with "Quick Start" -> "Merge PDFs" -> "Split PDFs" -> "Extract Text"
-- Structure: ## Overview -> ## Quick Start -> ## Task Category 1 -> ## Task Category 2...
+- No raw secret, token, OAuth value, password, session cookie, or credential material is printed, logged, embedded in frontend state, committed to fixtures, or written to audit events.
+- Security-sensitive paths are deny-by-default. Missing policy, missing auth, expired lease, mismatched agent, mismatched credential, or unsupported action must fail closed.
+- Public claims in README, UI copy, skills, and comments match shipped behavior. Do not imply production-grade encryption, provider support, sandboxing, or policy enforcement until implemented.
+- New code follows the existing architecture and keeps trust boundaries narrow. Avoid global mutable secret state and broad helper APIs that bypass the credential service.
+- Errors are useful but do not reveal internal secrets, hashes, database paths, stack traces, or provider credential details.
 
-**3. Reference/Guidelines** (best for standards or specifications)
-- Works well for brand guidelines, coding standards, or requirements
-- Example: Brand styling with "Brand Guidelines" -> "Colors" -> "Typography" -> "Features"
-- Structure: ## Overview -> ## Guidelines -> ## Specifications -> ## Usage...
+## Auth And Session Checks
 
-**4. Capabilities-Based** (best for integrated systems)
-- Works well when the skill provides multiple interrelated features
-- Example: Product Management with "Core Capabilities" -> numbered capability list
-- Structure: ## Overview -> ## Core Capabilities -> ### 1. Feature -> ### 2. Feature...
+- Hivemind uses local username/password auth, not email-first SaaS identity.
+- There is no baked-in default account. Setup is available only when no local users exist.
+- Passwords are hashed with a slow password hash and never stored or displayed in plaintext.
+- Session cookies are HttpOnly, scoped, and invalidated on logout.
+- Operational APIs require an authenticated session and return a clean unauthorized response when unauthenticated.
 
-Patterns can be mixed and matched as needed. Most skills combine patterns (e.g., start with task-based, add workflow for complex operations).
+## Credential And Lease Checks
 
-Delete this entire "Structuring This Skill" section when done - it's just guidance.]
+- Agents never receive raw credentials. They request brokered action through the credential service.
+- Credential records store references, metadata, policy, and redacted displays rather than secret values.
+- JIT leases are scoped to one agent, one credential, one action intent, and a short TTL.
+- Lease issuance validates agent identity, credential policy, requested action, TTL bounds, and intent before granting access.
+- Lease use rejects expired, revoked, mismatched, or overbroad access.
+- Token material is shown only when unavoidable and only once; persisted values are hashed or otherwise non-recoverable.
+- Every credential decision creates an audit record with redacted context.
 
-## [TODO: Replace with the first main section based on chosen structure]
+## Agent, Task, Schedule, And Heartbeat Checks
 
-[TODO: Add content here. See examples in existing skills:
-- Code samples for technical skills
-- Decision trees for complex workflows
-- Concrete examples with realistic user requests
-- References to scripts/templates/references as needed]
+- Agent communication stays concise and actionable; do not add large hidden prompts or vague autonomous behavior.
+- Task assignment, status changes, schedule firing, and heartbeat updates are auditable.
+- Cron and heartbeat execution cannot bypass auth, credential policy, or lease validation.
+- Failed or stale agents are visible without exposing secrets.
+- Scheduler behavior is deterministic across restarts and does not duplicate work unexpectedly.
 
-## Resources (optional)
+## API, Persistence, And Frontend Checks
 
-Create only the resource directories this skill actually needs. Delete this section if no resources are required.
+- Validate inputs at the API boundary and normalize IDs before use.
+- Database schema changes include safe migrations and preserve existing local data.
+- Frontend code does not store secrets in localStorage, render raw HTML from untrusted content, or expose hidden privileged actions.
+- UI remains self-hosted and technical. Avoid SaaS account language, fake enterprise copy, and unimplemented security promises.
+- Docker/config changes preserve the single-container self-hosted deployment path.
 
-### scripts/
-Executable code (Python/Bash/etc.) that can be run directly to perform specific operations.
+## Verification
 
-**Examples from other skills:**
-- PDF skill: `fill_fillable_fields.py`, `extract_form_field_info.py` - utilities for PDF manipulation
-- DOCX skill: `document.py`, `utilities.py` - Python modules for document processing
+- Run focused backend tests for API, auth, store, scheduler, credential, or lease changes.
+- Run frontend build/browser checks for UI changes.
+- Run `quick_validate.py` for skill changes.
+- Run documentation or README-focused tests when docs describe login, setup, security, or deployment behavior.
+- If verification cannot run, say why and identify the residual risk.
 
-**Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
+## Blockers
 
-**Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
+Fix these before finishing:
 
-### references/
-Documentation and reference material intended to be loaded into context to inform Codex's process and thinking.
-
-**Examples from other skills:**
-- Product management: `communication.md`, `context_building.md` - detailed workflow guides
-- BigQuery: API reference documentation and query examples
-- Finance: Schema documentation, company policies
-
-**Appropriate for:** In-depth documentation, API references, database schemas, comprehensive guides, or any detailed information that Codex should reference while working.
-
-### assets/
-Files not intended to be loaded into context, but rather used within the output Codex produces.
-
-**Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
-- Frontend builder: HTML/React boilerplate project directories
-- Typography: Font files (.ttf, .woff2)
-
-**Appropriate for:** Templates, boilerplate code, document templates, images, icons, fonts, or any files meant to be copied or used in the final output.
-
----
-
-**Not every skill requires all three types of resources.**
+- Raw credential exposure to an agent, UI, logs, tests, docs, or audit events.
+- Auth bypass or operational endpoint reachable without a valid session.
+- Unscoped, long-lived, reusable, or policy-free credential lease.
+- User-configured security policy ignored or silently weakened.
+- Failing verification on a changed security boundary.
+- Public documentation or UI claiming a security capability that is not implemented.
