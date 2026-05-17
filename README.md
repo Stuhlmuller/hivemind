@@ -117,9 +117,8 @@ The setup form starts blank and requires an operator-entered password. After
 setup completes, use the same username and password on the login screen.
 
 To start over during local development, stop the dev server and point
-`HIVEMIND_DB_PATH` at a new file before restarting. The dev shell defaults the
-database to `.data/hivemind.db`; the quickstart above uses
-`.data/hivemind-dev.db` so local browser testing is isolated.
+`HIVEMIND_DB_PATH` at a new file before restarting. The dev shell and the
+explicit quickstart both default the database to `.data/hivemind.db`.
 
 Optional intent reviewer configuration:
 

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier, Event
+from time import sleep
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -1316,6 +1317,43 @@ def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Pat
     )
 
 
+def test_task_completion_preserves_manual_agent_status(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    db_path = tmp_path / "manual-agent-status.db"
+    setup_store = HivemindStore(db_path, config=HivemindConfig.from_env())
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run a task while an operator updates status",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    create_provider_credential(setup_store, agent["id"])
+    task = setup_store.create_task(
+        {
+            "title": "Blocked provider execution",
+            "description": "This task pauses long enough for a manual lifecycle update.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    adapter = BlockingAgentProviderAdapter(task["id"])
+    runner = HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter})
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(runner.run_task, task["id"])
+        adapter.started.wait(timeout=5)
+        setup_store.update_agent_status(agent["id"], "blocked", actor_id="operator")
+        adapter.release_slow.set()
+        require_equal(result.result(timeout=5)["task_id"], task["id"], "task should finish after manual status update")
+
+    require_equal(
+        setup_store.get_agent(agent["id"])["status"],
+        "blocked",
+        "task completion should not overwrite a manual non-running lifecycle state",
+    )
+
+
 def test_remote_agent_provider_requires_credential_id_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", raising=False)
     adapter = RecordingAgentProviderAdapter("openrouter")
@@ -1532,16 +1570,16 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
         },
     )
 
-    assert response.status_code == 201
+    require_equal(response.status_code, 201, "GitHub App credential creation should succeed")
     credential = response.json()
-    assert credential["provider"] == "github"
-    assert credential["metadata"]["credential_kind"] == "github_app"
-    assert credential["metadata"]["app_id"] == "123456"
-    assert credential["metadata"]["installation_id"] == "987654321"
-    assert credential["policy"]["allowed_agents"] == [agent["id"]]
-    assert credential["policy"]["approval_required_actions"] == []
-    assert credential["secret_ref_preview"].startswith("file://")
-    assert "github-app.pem" not in response.text
+    require_equal(credential["provider"], "github", "GitHub App credential should use the github provider")
+    require_equal(credential["metadata"]["credential_kind"], "github_app", "credential kind should identify GitHub App")
+    require_equal(credential["metadata"]["app_id"], "123456", "app id metadata should persist")
+    require_equal(credential["metadata"]["installation_id"], "987654321", "installation id metadata should persist")
+    require_equal(credential["policy"]["allowed_agents"], [agent["id"]], "GitHub App policy should preserve agent scope")
+    require_equal(credential["policy"]["approval_required_actions"], [], "GitHub App policy should default to no approvals")
+    require_true(credential["secret_ref_preview"].startswith("file://"), "public view should expose only the ref scheme")
+    require_true("github-app.pem" not in response.text, "public response should redact the private key path")
 
 
 def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path) -> None:
@@ -1558,15 +1596,15 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "system_prompt": "Report only the next concrete action.",
         },
     )
-    assert create_response.status_code == 201
+    require_equal(create_response.status_code, 201, "agent creation should succeed")
     agent = create_response.json()
-    assert agent["status"] == "idle"
-    assert agent["assigned_task_count"] == 0
-    assert agent["assigned_schedule_count"] == 0
-    assert agent["credential_policy_count"] == 0
-    assert agent["assigned_tasks"] == []
-    assert agent["assigned_schedules"] == []
-    assert agent["credential_policies"] == []
+    require_equal(agent["status"], "idle", "new agents should start idle")
+    require_equal(agent["assigned_task_count"], 0, "new agents should have no assigned tasks")
+    require_equal(agent["assigned_schedule_count"], 0, "new agents should have no assigned schedules")
+    require_equal(agent["credential_policy_count"], 0, "new agents should have no credential policies")
+    require_equal(agent["assigned_tasks"], [], "new agents should have no task rollups")
+    require_equal(agent["assigned_schedules"], [], "new agents should have no schedule rollups")
+    require_equal(agent["credential_policies"], [], "new agents should have no credential policy rollups")
 
     credential_response = client.post(
         "/credentials",
@@ -1612,14 +1650,14 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
         f"/agents/{agent['id']}/status",
         json={"status": "running"},
     )
-    assert status_response.status_code == 200
+    require_equal(status_response.status_code, 200, "agent status update should succeed")
     updated = status_response.json()
-    assert updated["status"] == "running"
-    assert updated["assigned_task_count"] == 1
-    assert updated["active_task_count"] == 1
-    assert updated["assigned_schedule_count"] == 1
-    assert updated["credential_policy_count"] == 1
-    assert updated["assigned_tasks"] == [
+    require_equal(updated["status"], "running", "status update should mark the agent running")
+    require_equal(updated["assigned_task_count"], 1, "agent should report one assigned task")
+    require_equal(updated["active_task_count"], 1, "running agent should report one active task")
+    require_equal(updated["assigned_schedule_count"], 1, "agent should report one assigned schedule")
+    require_equal(updated["credential_policy_count"], 1, "agent should report one credential policy")
+    require_equal(updated["assigned_tasks"], [
         {
             "id": task["id"],
             "title": "Inspect repo state",
@@ -1627,8 +1665,8 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "priority": "normal",
             "updated_at": task["updated_at"],
         }
-    ]
-    assert updated["assigned_schedules"] == [
+    ], "agent task rollups should include assigned task details")
+    require_equal(updated["assigned_schedules"], [
         {
             "id": schedule["id"],
             "name": "Hourly repo scan",
@@ -1637,8 +1675,8 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "next_run_at": schedule["next_run_at"],
             "task_title": "Scheduled repo scan",
         }
-    ]
-    assert updated["credential_policies"] == [
+    ], "agent schedule rollups should include assigned schedule details")
+    require_equal(updated["credential_policies"], [
         {
             "id": credential["id"],
             "name": "Scoped Repo Reader",
@@ -1647,11 +1685,11 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "max_ttl_seconds": 60,
             "require_intent": True,
         }
-    ]
+    ], "agent credential rollups should include scoped credential policy details")
 
     listed_agents = {item["id"]: item for item in client.get("/agents").json()}
-    assert listed_agents[agent["id"]]["status"] == "running"
-    assert listed_agents[agent["id"]]["assigned_task_count"] == 1
+    require_equal(listed_agents[agent["id"]]["status"], "running", "agent list should preserve updated status")
+    require_equal(listed_agents[agent["id"]]["assigned_task_count"], 1, "agent list should include task rollup counts")
 
 
 def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
@@ -1660,8 +1698,8 @@ def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
 
     response = client.patch("/agents/agent_missing/status", json={"status": "blocked"})
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "unknown agent: agent_missing"
+    require_equal(response.status_code, 404, "unknown agent status updates should return 404")
+    require_equal(response.json()["detail"], "unknown agent: agent_missing", "unknown agent response should name the missing id")
 
 
 def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None:
@@ -1678,7 +1716,7 @@ def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None
             "system_prompt": "Report only the next concrete action.",
         },
     )
-    assert create_response.status_code == 201
+    require_equal(create_response.status_code, 201, "agent creation should succeed before alias update")
     agent = create_response.json()
 
     response = client.patch(
@@ -1686,8 +1724,8 @@ def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None
         json={"status": "working"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "running"
+    require_equal(response.status_code, 200, "legacy working status alias should be accepted")
+    require_equal(response.json()["status"], "running", "legacy working status should normalize to running")
 
 
 def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
@@ -1704,7 +1742,7 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
             "system_prompt": "Report only the next concrete action.",
         },
     )
-    assert create_response.status_code == 201
+    require_equal(create_response.status_code, 201, "agent creation should succeed before restart")
     agent = create_response.json()
 
     credential_response = client.post(
@@ -1828,8 +1866,12 @@ def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "allowed_agents references unknown agent: agent_missing"
+    require_equal(response.status_code, 400, "unknown credential agent should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "allowed_agents references unknown agent: agent_missing",
+        "credential agent validation should name the missing id",
+    )
 
 
 def test_oauth_credential_rejects_unknown_allowed_agent_on_callback(
@@ -2779,6 +2821,109 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_equal(schedule_run_event["target_id"], schedule["id"], "schedule audit should target the schedule id")
     require_equal(schedule_run_event["decision"], "allowed", "schedule audit should record an allowed decision")
     require_equal(schedule_run_event["reason"], "scheduled task created", "schedule audit should describe the created task")
+
+
+def test_due_schedule_run_is_atomic_across_overlapping_store_instances(tmp_path: Path) -> None:
+    db_path = tmp_path / "scheduler-race.db"
+    creator = HivemindStore(db_path)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
+    schedule = creator.create_schedule(
+        {
+            "name": "Overlapping run_once review",
+            "interval_seconds": 60,
+            "task_title": "One scheduled task",
+            "next_run_at": (base_now - timedelta(seconds=120)).isoformat(),
+        }
+    )
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
+    start = Barrier(3)
+
+    def run_due(store: HivemindStore) -> list[dict[str, object]]:
+        start.wait()
+        return store.run_due_schedules_once()
+
+    lock_conn = sqlite3.connect(db_path)
+    lock_released = False
+    try:
+        lock_conn.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_due, store) for store in stores]
+            start.wait()
+            sleep(0.2)
+            lock_conn.commit()
+            lock_released = True
+            results = [future.result(timeout=5) for future in futures]
+    finally:
+        if not lock_released:
+            lock_conn.rollback()
+        lock_conn.close()
+
+    require_equal(
+        sum(len(result) for result in results),
+        1,
+        "overlapping due schedule runners should create one run_once task",
+    )
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        run_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE type = 'schedule.ran' AND target_id = ?",
+            (schedule["id"],),
+        ).fetchone()[0]
+    require_equal(task_count, 1, "overlapping runners should persist one task")
+    require_equal(run_audit_count, 1, "overlapping runners should persist one schedule.ran audit event")
+
+
+def test_due_schedule_run_rolls_back_partial_task_insert_on_failure(tmp_path: Path) -> None:
+    class FailingScheduleAuditStore(HivemindStore):
+        fail_schedule_audit = True
+
+        def _insert_audit(self, conn, event_type, actor_id, target_id, decision, reason, metadata, *, now=None) -> None:
+            if self.fail_schedule_audit and event_type == "schedule.ran":
+                raise StoreError("forced schedule audit failure")
+            super()._insert_audit(conn, event_type, actor_id, target_id, decision, reason, metadata, now=now)
+
+    db_path = tmp_path / "scheduler-rollback.db"
+    store = FailingScheduleAuditStore(db_path)
+    due_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=120)
+    schedule = store.create_schedule(
+        {
+            "name": "Rollback review",
+            "interval_seconds": 60,
+            "task_title": "Rollback scheduled task",
+            "next_run_at": due_at.isoformat(),
+        }
+    )
+
+    try:
+        store.run_due_schedules_once()
+    except StoreError as exc:
+        require_equal(str(exc), "forced schedule audit failure", "the injected schedule audit failure should surface")
+    else:
+        raise AssertionError("due schedule run should fail before commit")
+
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        task_audit_count = conn.execute("SELECT COUNT(*) FROM audit_events WHERE type = 'task.created'").fetchone()[0]
+        persisted_schedule = conn.execute(
+            "SELECT last_run_at, next_run_at FROM schedules WHERE id = ?",
+            (schedule["id"],),
+        ).fetchone()
+    require_equal(task_count, 0, "failed due schedule transaction should not persist the task")
+    require_equal(task_audit_count, 0, "failed due schedule transaction should not persist task audit")
+    require_true(persisted_schedule[0] is None, "failed due schedule transaction should not set last_run_at")
+    require_equal(
+        persisted_schedule[1],
+        due_at.isoformat(),
+        "failed due schedule transaction should leave next_run_at unchanged",
+    )
+
+    store.fail_schedule_audit = False
+    created = store.run_due_schedules_once()
+
+    require_equal(len(created), 1, "rerunning after rollback should create the scheduled task once")
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    require_equal(task_count, 1, "successful rerun should persist one task")
 
 
 def test_due_schedules_skip_missed_runs_and_preserve_cadence(tmp_path: Path) -> None:

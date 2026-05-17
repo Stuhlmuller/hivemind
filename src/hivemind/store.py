@@ -121,6 +121,7 @@ AGENT_STATUS_UPDATE_SQL = "UPDATE agents SET status = ?, updated_at = ? WHERE id
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
+BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
     INSERT INTO credentials
@@ -764,7 +765,7 @@ class HivemindStore:
 
     def restore_backup_bundle(self, bundle: Mapping[str, Any]) -> dict[str, int]:
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(BEGIN_IMMEDIATE_SQL)
             tables = self.validate_backup_bundle(bundle)
             for statement in BACKUP_DELETE_STATEMENTS:
                 conn.execute(statement)
@@ -785,7 +786,7 @@ class HivemindStore:
         if len(password) < 12:
             raise StoreError("admin password must be at least 12 characters")
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(BEGIN_IMMEDIATE_SQL)
             if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
                 raise StoreError("setup is already complete")
             user = {
@@ -1731,8 +1732,8 @@ class HivemindStore:
                 f"assigned_agent_id is not allowed to use credential {credential_id}: {assigned_agent_id}"
             )
 
-    def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
-        now = utcnow()
+    def _insert_task(self, conn: sqlite3.Connection, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        task_time = now or utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
         row = {
             "id": f"task_{secrets.token_urlsafe(10)}",
@@ -1745,39 +1746,51 @@ class HivemindStore:
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
             "heartbeat_seconds": heartbeat_seconds,
-            "next_heartbeat_at": iso(now + timedelta(seconds=int(heartbeat_seconds))) if heartbeat_seconds else None,
-            "created_at": iso(now),
-            "updated_at": iso(now),
+            "next_heartbeat_at": iso(task_time + timedelta(seconds=int(heartbeat_seconds))) if heartbeat_seconds else None,
+            "created_at": iso(task_time),
+            "updated_at": iso(task_time),
         }
-        with self.connect() as conn:
-            self.validate_optional_agent_reference(
-                conn,
-                field_name="assigned_agent_id",
-                value=row["assigned_agent_id"],
+        self.validate_optional_agent_reference(
+            conn,
+            field_name="assigned_agent_id",
+            value=row["assigned_agent_id"],
+        )
+        self.validate_optional_credential_reference(
+            conn,
+            field_name="credential_id",
+            value=row["credential_id"],
+        )
+        self.validate_agent_credential_binding(
+            conn,
+            assigned_agent_id=row["assigned_agent_id"],
+            credential_id=row["credential_id"],
+        )
+        try:
+            conn.execute(
+                """
+                INSERT INTO tasks
+                (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
+                VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
+                """,
+                row,
             )
-            self.validate_optional_credential_reference(
-                conn,
-                field_name="credential_id",
-                value=row["credential_id"],
-            )
-            self.validate_agent_credential_binding(
-                conn,
-                assigned_agent_id=row["assigned_agent_id"],
-                credential_id=row["credential_id"],
-            )
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO tasks
-                    (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
-                    VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
-                    """,
-                    row,
-                )
-            except sqlite3.IntegrityError as exc:
-                raise StoreValidationError("task references an unknown agent or credential") from exc
-        self.audit("task.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "task created", {"status": row["status"]})
+        except sqlite3.IntegrityError as exc:
+            raise StoreValidationError("task references an unknown agent or credential") from exc
+        self._insert_audit(
+            conn,
+            "task.created",
+            row["assigned_agent_id"] or "user",
+            row["id"],
+            "allowed",
+            "task created",
+            {"status": row["status"]},
+            now=task_time,
+        )
         return row
+
+    def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            return self._insert_task(conn, data)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -2100,7 +2113,10 @@ class HivemindStore:
                 (agent_id, "running", task_id),
             ).fetchone()
             if running_task is None:
-                conn.execute(AGENT_STATUS_UPDATE_SQL, ("idle", now, agent_id))
+                conn.execute(
+                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                    ("idle", now, agent_id, "running"),
+                )
         event_type = "task.execution.completed" if status == "done" else "task.execution.failed"
         self.audit(event_type, agent_id, task_id, decision, reason, metadata)
 
@@ -2238,74 +2254,78 @@ class HivemindStore:
         created: list[dict[str, Any]] = []
         with self._lock:
             with self.connect() as conn:
+                conn.execute(BEGIN_IMMEDIATE_SQL)
                 enabled_rows = list(conn.execute("SELECT * FROM schedules WHERE enabled = 1"))
-            due_rows: list[tuple[datetime, sqlite3.Row]] = []
-            for row in enabled_rows:
-                next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
-                if next_run_at <= now:
-                    due_rows.append((next_run_at, row))
-            due_rows.sort(key=lambda item: item[0])
-            for next_run_at, row in due_rows:
-                interval_seconds = int(row["interval_seconds"])
-                interval = timedelta(seconds=interval_seconds)
-                catch_up_policy = row["catch_up_policy"] or "run_once"
-                if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
-                    raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
-                missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
-                if catch_up_policy == "backfill":
-                    run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
-                    scheduled_runs = [next_run_at + (interval * index) for index in range(run_count)]
-                    next_run = next_run_at + (interval * run_count)
-                    skipped_run_count = 0
-                    remaining_run_count = missed_run_count - run_count
-                elif catch_up_policy == "skip_missed":
-                    scheduled_runs = [next_run_at + (interval * (missed_run_count - 1))]
-                    next_run = next_run_at + (interval * missed_run_count)
-                    skipped_run_count = missed_run_count - 1
-                    remaining_run_count = 0
-                else:
-                    scheduled_runs = [now]
-                    next_run = now + interval
-                    skipped_run_count = missed_run_count - 1
-                    remaining_run_count = 0
+                due_rows: list[tuple[datetime, sqlite3.Row]] = []
+                for row in enabled_rows:
+                    next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
+                    if next_run_at <= now:
+                        due_rows.append((next_run_at, row))
+                due_rows.sort(key=lambda item: item[0])
+                for next_run_at, row in due_rows:
+                    interval_seconds = int(row["interval_seconds"])
+                    interval = timedelta(seconds=interval_seconds)
+                    catch_up_policy = row["catch_up_policy"] or "run_once"
+                    if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
+                        raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+                    missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
+                    if catch_up_policy == "backfill":
+                        run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
+                        scheduled_runs = [next_run_at + (interval * index) for index in range(run_count)]
+                        next_run = next_run_at + (interval * run_count)
+                        skipped_run_count = 0
+                        remaining_run_count = missed_run_count - run_count
+                    elif catch_up_policy == "skip_missed":
+                        scheduled_runs = [next_run_at + (interval * (missed_run_count - 1))]
+                        next_run = next_run_at + (interval * missed_run_count)
+                        skipped_run_count = missed_run_count - 1
+                        remaining_run_count = 0
+                    else:
+                        scheduled_runs = [now]
+                        next_run = now + interval
+                        skipped_run_count = missed_run_count - 1
+                        remaining_run_count = 0
 
-                task_ids: list[str] = []
-                for _ in scheduled_runs:
-                    task = self.create_task(
-                        {
-                            "title": row["task_title"],
-                            "description": row["task_description"],
-                            "priority": row["priority"],
-                            "assigned_agent_id": row["assigned_agent_id"],
-                            "credential_id": row["credential_id"],
-                            "action": row["action"],
-                            "intent": row["intent"],
-                            "heartbeat_seconds": None,
-                        }
-                    )
-                    created.append(task)
-                    task_ids.append(task["id"])
-                with self.connect() as conn:
+                    task_ids: list[str] = []
+                    for _ in scheduled_runs:
+                        task = self._insert_task(
+                            conn,
+                            {
+                                "title": row["task_title"],
+                                "description": row["task_description"],
+                                "priority": row["priority"],
+                                "assigned_agent_id": row["assigned_agent_id"],
+                                "credential_id": row["credential_id"],
+                                "action": row["action"],
+                                "intent": row["intent"],
+                                "heartbeat_seconds": None,
+                            },
+                            now=now,
+                        )
+                        created.append(task)
+                        task_ids.append(task["id"])
                     conn.execute(
                         "UPDATE schedules SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
                         (iso(now), iso(next_run), iso(now), row["id"]),
                     )
-                self.audit(
-                    "schedule.ran",
-                    row["assigned_agent_id"] or "scheduler",
-                    row["id"],
-                    "allowed",
-                    "scheduled task created",
-                    {
-                        "catch_up_policy": catch_up_policy,
-                        "created_task_count": len(task_ids),
-                        "missed_run_count": missed_run_count,
-                        "remaining_run_count": remaining_run_count,
-                        "scheduled_for": [iso(scheduled_for) for scheduled_for in scheduled_runs],
-                        "skipped_run_count": skipped_run_count,
-                        "task_ids": task_ids,
-                    },
-                )
+                    self._insert_audit(
+                        conn,
+                        "schedule.ran",
+                        row["assigned_agent_id"] or "scheduler",
+                        row["id"],
+                        "allowed",
+                        "scheduled task created",
+                        {
+                            "catch_up_policy": catch_up_policy,
+                            "created_task_count": len(task_ids),
+                            "missed_run_count": missed_run_count,
+                            "remaining_run_count": remaining_run_count,
+                            "scheduled_for": [iso(scheduled_for) for scheduled_for in scheduled_runs],
+                            "skipped_run_count": skipped_run_count,
+                            "task_ids": task_ids,
+                        },
+                        now=now,
+                    )
         return created
 
     def get_schedule(self, schedule_id: str) -> dict[str, Any]:
@@ -2337,7 +2357,10 @@ class HivemindStore:
         decision: str,
         reason: str,
         metadata: dict[str, Any],
+        *,
+        now: datetime | None = None,
     ) -> None:
+        audit_time = now or utcnow()
         conn.execute(
             "INSERT INTO audit_events (id, type, actor_id, target_id, decision, reason, metadata, created_at) VALUES (:id, :type, :actor_id, :target_id, :decision, :reason, :metadata, :created_at)",
             {
@@ -2348,6 +2371,6 @@ class HivemindStore:
                 "decision": decision,
                 "reason": reason,
                 "metadata": dumps(metadata),
-                "created_at": iso(),
+                "created_at": iso(audit_time),
             },
         )
