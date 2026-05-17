@@ -156,6 +156,11 @@ def normalize_sensitive_provider_key(key: Any) -> str:
     return "".join(char for char in str(key).lower() if char.isalnum())
 
 
+def is_sensitive_provider_key(key: Any) -> bool:
+    normalized = normalize_sensitive_provider_key(key)
+    return any(sensitive_key in normalized for sensitive_key in SENSITIVE_PROVIDER_RESULT_KEYS)
+
+
 def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
     redactions = provider_redaction_values(credential_ref)
     if isinstance(value, str):
@@ -168,7 +173,7 @@ def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
     if isinstance(value, dict):
         return {
             key: REDACTED_VALUE
-            if normalize_sensitive_provider_key(key) in SENSITIVE_PROVIDER_RESULT_KEYS
+            if is_sensitive_provider_key(key)
             else redact_provider_public_value(item, credential_ref)
             for key, item in value.items()
         }
@@ -186,7 +191,7 @@ def redact_public_metadata_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: REDACTED_VALUE
-            if normalize_sensitive_provider_key(key) in SENSITIVE_PROVIDER_RESULT_KEYS
+            if is_sensitive_provider_key(key)
             else redact_public_metadata_value(item)
             for key, item in value.items()
         }
@@ -1432,7 +1437,22 @@ class HivemindStore:
         now = iso()
         with self.connect() as conn:
             conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
-            conn.execute("UPDATE agents SET status = ?, updated_at = ? WHERE id = ?", ("idle", now, agent_id))
+            running_task = conn.execute(
+                """
+                SELECT 1
+                FROM tasks
+                WHERE assigned_agent_id = ?
+                  AND status = ?
+                  AND id != ?
+                LIMIT 1
+                """,
+                (agent_id, "running", task_id),
+            ).fetchone()
+            if running_task is None:
+                conn.execute(
+                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?",
+                    ("idle", now, agent_id),
+                )
         event_type = "task.execution.completed" if status == "done" else "task.execution.failed"
         self.audit(event_type, agent_id, task_id, decision, reason, metadata)
 

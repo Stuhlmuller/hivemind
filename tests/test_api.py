@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets
 import sqlite3
-from threading import Barrier
+from threading import Barrier, Event
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -56,6 +56,26 @@ class RecordingAgentProviderAdapter:
         )
 
 
+class BlockingAgentProviderAdapter:
+    def __init__(self, slow_task_id: str) -> None:
+        self.slow_task_id = slow_task_id
+        self.started = Barrier(2)
+        self.release_slow = Event()
+
+    def provider_id(self) -> str:
+        return "openrouter"
+
+    def run(self, request: ProviderRunRequest) -> ProviderRunResult:
+        self.started.wait(timeout=5)
+        if request.metadata["task_id"] == self.slow_task_id:
+            self.release_slow.wait(timeout=5)
+        return ProviderRunResult(
+            provider=request.provider,
+            model=request.model,
+            output_text=f"adapter response for {request.prompt}",
+        )
+
+
 class LeakingAgentProviderAdapter:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
@@ -79,6 +99,9 @@ class LeakingAgentProviderAdapter:
                         "accessToken": "LEAKME_TOKEN",
                         "apiKey": "raw-api-key",
                         "clientSecret": "LEAKME_SECRET",
+                        "x-api-key": "test prefixed api key",
+                        "authorization_header": "test authorization header",
+                        "bearer_token": "test bearer token",
                     },
                 ),
             ),
@@ -842,6 +865,72 @@ def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path,
     require_equal(setup_store.get_task(task["id"])["status"], "done", "claimed task should finish successfully")
 
 
+def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    db_path = tmp_path / "same-agent-running-tasks.db"
+    setup_store = HivemindStore(db_path, config=HivemindConfig.from_env())
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run multiple queued tasks",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    fast_task = setup_store.create_task(
+        {
+            "title": "Fast provider execution",
+            "description": "This task finishes while another task is still running.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    slow_task = setup_store.create_task(
+        {
+            "title": "Slow provider execution",
+            "description": "This task remains running until the first task completes.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    adapter = BlockingAgentProviderAdapter(slow_task["id"])
+    stores = [
+        HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+        HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        fast_result = executor.submit(stores[0].run_task, fast_task["id"])
+        slow_result = executor.submit(stores[1].run_task, slow_task["id"])
+        try:
+            require_equal(
+                fast_result.result(timeout=5)["task_id"],
+                fast_task["id"],
+                "fast task should finish first",
+            )
+            require_equal(
+                setup_store.get_task(slow_task["id"])["status"],
+                "running",
+                "slow task should remain running",
+            )
+            require_equal(
+                setup_store.get_agent(agent["id"])["status"],
+                "working",
+                "agent should stay working while another assigned task is running",
+            )
+        finally:
+            adapter.release_slow.set()
+        require_equal(
+            slow_result.result(timeout=5)["task_id"],
+            slow_task["id"],
+            "slow task should finish after release",
+        )
+
+    require_equal(
+        setup_store.get_agent(agent["id"])["status"],
+        "idle",
+        "agent should become idle after all runs finish",
+    )
+
+
 def test_remote_agent_provider_requires_credential_ref_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", raising=False)
     adapter = RecordingAgentProviderAdapter("openrouter")
@@ -957,6 +1046,21 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
     require_equal(result["tool_requests"][0]["arguments"]["accessToken"], "[redacted]", "camelCase token fields should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["apiKey"], "[redacted]", "camelCase key fields should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["clientSecret"], "[redacted]", "camelCase secret fields should be redacted")
+    require_equal(
+        result["tool_requests"][0]["arguments"]["x-api-key"],
+        "[redacted]",
+        "prefixed API key fields should be redacted",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["authorization_header"],
+        "[redacted]",
+        "authorization header fields should be redacted",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["bearer_token"],
+        "[redacted]",
+        "bearer token fields should be redacted",
+    )
 
 
 def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audit(tmp_path: Path, monkeypatch) -> None:
