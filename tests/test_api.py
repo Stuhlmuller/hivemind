@@ -837,6 +837,72 @@ def test_credential_lease_rate_limit_runs_before_provider_intent_review(tmp_path
     require_equal(second.json()["detail"], "agent lease request rate limit exceeded", "denial should name agent limit")
 
 
+def test_credential_lease_rate_limit_counts_provider_review_denials(tmp_path: Path) -> None:
+    reviewer = RecordingProviderReviewer(allowed=False, reason="provider reviewer denied the request")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": reviewer},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Denied Limited Credential",
+            "provider": "github",
+            "secret_ref": "env://PROVIDER_DENIED_LIMIT_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "agent_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for provider-backed triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for repeated provider-backed triage.",
+        },
+    )
+
+    require_equal(first.status_code, 403, "first lease should be denied by provider review")
+    require_equal(
+        first.json()["detail"],
+        "openrouter intent reviewer denied the request",
+        "first denial should expose the provider decision reason",
+    )
+    require_equal(second.status_code, 403, "second lease should be denied by rate limit")
+    require_equal(
+        second.json()["detail"],
+        "agent lease request rate limit exceeded",
+        "second denial should avoid another provider review",
+    )
+    require_equal(len(reviewer.requests), 1, "provider-reviewed denials should count toward request limits")
+    latest_audit = client.get("/audit-events").json()[0]
+    require_equal(latest_audit["metadata"]["rate_limit"], "agent_lease_limit", "audit should name agent limit")
+    require_true("PROVIDER_DENIED_LIMIT_TOKEN" not in str(latest_audit), "audit must not expose secret refs")
+
+
 def test_credential_action_limit_denies_before_consuming_second_lease(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

@@ -47,7 +47,13 @@ from hivemind.secret_refs import (
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
-LEASE_REQUEST_RATE_LIMIT_EVENTS = ("credential.lease.issued", "credential.lease.pending")
+LEASE_DENIED_EVENT = "credential.lease.denied"
+LEASE_REQUEST_COUNTED_METADATA_KEY = "lease_request_counted"
+LEASE_REQUEST_RATE_LIMIT_EVENTS = (
+    "credential.lease.issued",
+    "credential.lease.pending",
+    LEASE_DENIED_EVENT,
+)
 ACTION_RATE_LIMIT_EVENTS = ("credential.action.performed",)
 CREDENTIAL_BY_ID_QUERY = "SELECT * FROM credentials WHERE id = ?"
 
@@ -119,7 +125,6 @@ class StoreValidationError(StoreError):
     pass
 
 
-LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
 AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
@@ -1403,18 +1408,28 @@ class HivemindStore:
         window_seconds: int,
     ) -> int:
         since = iso(utcnow() - timedelta(seconds=window_seconds))
-        if len(event_types) == 1:
-            query = "SELECT COUNT(*) FROM audit_events WHERE target_id = ? AND type = ? AND created_at >= ?"
-            params: list[Any] = [target_id, event_types[0], since]
-        elif len(event_types) == 2:
-            query = "SELECT COUNT(*) FROM audit_events WHERE target_id = ? AND type IN (?, ?) AND created_at >= ?"
-            params = [target_id, event_types[0], event_types[1], since]
-        else:
+        if not event_types:
             raise StoreError("unsupported audit event count shape")
+        query = "SELECT type, metadata FROM audit_events WHERE target_id = ? AND created_at >= ?"
+        params: list[Any] = [target_id, since]
         if actor_id is not None:
             query += " AND actor_id = ?"
             params.append(actor_id)
-        return int(conn.execute(query, params).fetchone()[0])
+        return sum(
+            1
+            for row in conn.execute(query, params)
+            if row["type"] in event_types
+            if self.audit_event_counts_toward_rate_limit(row["type"], row["metadata"])
+        )
+
+    def audit_event_counts_toward_rate_limit(self, event_type: str, metadata: str | None) -> bool:
+        if event_type != LEASE_DENIED_EVENT:
+            return True
+        try:
+            parsed_metadata = loads(metadata, {})
+        except (TypeError, ValueError):
+            return True
+        return isinstance(parsed_metadata, dict) and parsed_metadata.get(LEASE_REQUEST_COUNTED_METADATA_KEY) is True
 
     def lease_request_rate_limit_denial(
         self,
@@ -1634,7 +1649,11 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 review.reason,
-                {"action": normalized_action, **base_audit_metadata},
+                {
+                    "action": normalized_action,
+                    LEASE_REQUEST_COUNTED_METADATA_KEY: True,
+                    **base_audit_metadata,
+                },
             )
             raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
