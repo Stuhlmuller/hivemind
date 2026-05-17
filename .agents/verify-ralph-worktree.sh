@@ -19,11 +19,23 @@ canonicalize_path() {
 
 setup_case_repo() {
   local case_root="$1"
+  local layout="${2:-standard}"
   local repo_root="$case_root/repo"
   local remote_root="$case_root/remote.git"
 
   git init --bare "$remote_root" >/dev/null
-  git clone "$remote_root" "$repo_root" >/dev/null 2>&1
+  case "$layout" in
+    standard)
+      git clone "$remote_root" "$repo_root" >/dev/null 2>&1
+      ;;
+    separate-git-dir)
+      git clone --separate-git-dir "$case_root/repo.gitdir" "$remote_root" "$repo_root" >/dev/null 2>&1
+      ;;
+    *)
+      echo "unsupported layout: $layout" >&2
+      exit 1
+      ;;
+  esac
 
   mkdir -p "$repo_root/.agents"
   cp "$source_ralph" "$repo_root/.agents/ralph.sh"
@@ -149,6 +161,7 @@ run_case() {
   local worktree_path
   local output
   local status
+  local setup_layout="standard"
 
   case_root="$(mktemp -d "${TMPDIR:-/tmp}/ralph-worktree-check.XXXXXX")"
   bin_root="$case_root/bin"
@@ -156,13 +169,23 @@ run_case() {
 
   write_stub_gh "$bin_root"
   write_stub_codex "$bin_root"
-  repo_root="$(setup_case_repo "$case_root")"
+  case "$scenario" in
+    existing-primary-issue-branch-separate-git-dir)
+      setup_layout="separate-git-dir"
+      ;;
+  esac
+
+  repo_root="$(setup_case_repo "$case_root" "$setup_layout")"
   run_root="$repo_root"
   review_cwd_file="$case_root/review-cwd.txt"
   worktree_path="$case_root/issue-99-test-branch"
 
   case "$scenario" in
     existing-primary-issue-branch)
+      git -C "$repo_root" switch -c issue-99-test-branch >/dev/null 2>&1
+      scenario="no-op"
+      ;;
+    existing-primary-issue-branch-separate-git-dir)
       git -C "$repo_root" switch -c issue-99-test-branch >/dev/null 2>&1
       scenario="no-op"
       ;;
@@ -222,6 +245,7 @@ run_case() {
 run_case "no-issue-branch" "failure" "did not create a dedicated issue worktree or continue inside an existing issue worktree" "no"
 run_case "in-place-issue-branch" "failure" "issue work must run from a dedicated git worktree" "no"
 run_case "existing-primary-issue-branch" "failure" "issue work must run from a dedicated git worktree" "no"
+run_case "existing-primary-issue-branch-separate-git-dir" "failure" "issue work must run from a dedicated git worktree" "no"
 run_case "dedicated-issue-worktree" "success" "" "yes"
 run_case "existing-issue-worktree" "success" "" "yes"
 

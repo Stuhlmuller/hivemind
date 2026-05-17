@@ -137,10 +137,24 @@ is_issue_branch_name() {
   [[ "$branch" =~ ^issue-[0-9]+-[a-z0-9][a-z0-9-]*$ ]]
 }
 
+git_absolute_path() {
+  local repo_root="$1"
+  local rev_parse_flag="$2"
+  local git_path
+
+  git_path="$(git -C "$repo_root" rev-parse --path-format=absolute "$rev_parse_flag")"
+  canonicalize_path "$git_path"
+}
+
 is_primary_checkout_root() {
   local repo_root="$1"
+  local git_dir
+  local git_common_dir
 
-  [[ -d "$repo_root/.git" ]]
+  git_dir="$(git_absolute_path "$repo_root" --git-dir)"
+  git_common_dir="$(git_absolute_path "$repo_root" --git-common-dir)"
+
+  [[ "$git_dir" == "$git_common_dir" ]]
 }
 
 canonicalize_path() {
