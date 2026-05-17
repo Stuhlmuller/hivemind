@@ -4,15 +4,16 @@ Hivemind is a security-focused, bee-themed agent runtime for coordinating many
 action-capable subagents without giving those agents direct access to
 credentials.
 
-The first implementation includes:
+The current implementation includes:
 
 - A swarm agent registry.
-- A same-container frontend playground served from `/`.
+- A same-container frontend served from `/`.
+- Local username/password setup and login.
 - Environment-based intent reviewer configuration.
-- A credential vault that stores secret references instead of secret values.
-- A credential service that issues short-lived, scoped leases after policy and
-  intent validation.
-- An audit trail for lease decisions and brokered credential actions.
+- SQLite persistence.
+- A credential broker that stores secret references instead of secret values.
+- Short-lived, scoped leases after policy and intent validation.
+- Tasks, schedules, heartbeats, and an audit trail.
 - A FastAPI HTTP surface that runs as a single container.
 
 ## Run Locally
@@ -22,9 +23,25 @@ pip install -e ".[dev]"
 uvicorn hivemind.api:create_app --factory --reload
 ```
 
-Then open `http://localhost:8000/docs`.
+Then open `http://localhost:8000/`.
 
-The frontend playground is available at `http://localhost:8000/`.
+The API docs are available at `http://localhost:8000/docs`.
+
+## Login
+
+There is no baked-in default account. On first run, Hivemind shows a setup
+screen. The first username/password you submit becomes the local admin account.
+
+For local development, the setup form is prefilled with:
+
+```text
+username: admin
+password: hivemind-password
+```
+
+Those values are only UI defaults for a fresh local database. Change them during
+setup for any real self-hosted install. After setup completes, use the same
+username and password on the login screen.
 
 Optional intent reviewer configuration:
 
@@ -38,7 +55,7 @@ export HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
 
 ```bash
 docker build -t hivemind .
-docker run --rm -p 8000:8000 hivemind
+docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
 ```
 
 ## Security Model
