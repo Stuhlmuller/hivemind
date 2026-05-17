@@ -333,6 +333,14 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "heartbeat_seconds": None,
             },
         ),
+        (
+            "PATCH",
+            "/tasks/task_demo",
+            {
+                "title": "Retitle task",
+                "description": "Unauthorized edit attempt.",
+            },
+        ),
         ("PATCH", "/tasks/task_demo/status", {"status": "running"}),
         ("POST", "/tasks/task_demo/heartbeats", {"note": "still working"}),
         ("GET", "/heartbeats", None),
