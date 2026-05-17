@@ -65,17 +65,8 @@ a machine-local problem, not a Hivemind flake problem.
 
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
-
-For local development, the setup form is prefilled with:
-
-```text
-username: admin
-password: hivemind-password
-```
-
-Those values are only UI defaults for a fresh local database. Change them during
-setup for any real self-hosted install. After setup completes, use the same
-username and password on the login screen.
+The setup form starts blank and requires an operator-entered password. After
+setup completes, use the same username and password on the login screen.
 
 Optional intent reviewer configuration:
 

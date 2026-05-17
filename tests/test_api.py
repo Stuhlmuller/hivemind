@@ -33,6 +33,12 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
+    for required in ['name="username"', 'name="password"', 'autocomplete="new-password"']:
+        if required not in response.text:
+            raise AssertionError(f"missing expected auth form markup: {required}")
+    for unexpected in ['value="admin"', 'value="hivemind-password"']:
+        if unexpected in response.text:
+            raise AssertionError(f"unexpected hardcoded auth form markup: {unexpected}")
 
 
 def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
