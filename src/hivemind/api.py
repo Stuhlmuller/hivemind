@@ -353,14 +353,22 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         available, reason = provider.availability(has_secret_store=True)
         if not available:
             raise HTTPException(status_code=400, detail=reason or f"oauth provider unavailable: {provider.id}")
-        if not any(action.strip() for action in request.allowed_actions):
-            raise HTTPException(status_code=400, detail="credential must allow at least one action")
+        credential_payload = request.model_dump(exclude={"provider"})
+        try:
+            allowed_actions, approval_required_actions = db.normalize_credential_action_policy(
+                request.allowed_actions,
+                request.approval_required_actions,
+            )
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        credential_payload["allowed_actions"] = allowed_actions
+        credential_payload["approval_required_actions"] = approval_required_actions
         verifier, challenge = build_pkce_pair()
         state = db.create_oauth_state(
             user_id=user.id,
             provider=provider.id,
             pkce_verifier=verifier,
-            credential_payload=request.model_dump(exclude={"provider"}),
+            credential_payload=credential_payload,
         )
         redirect_uri = str(http_request.url_for("oauth_callback", provider=provider.id))
         try:

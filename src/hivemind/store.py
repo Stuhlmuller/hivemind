@@ -111,7 +111,7 @@ class StoreValidationError(StoreError):
 LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
-AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
+AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider_"
 REDACTED_VALUE = "[redacted]"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
@@ -971,11 +971,11 @@ class HivemindStore:
         allow_managed_secret_metadata: bool = False,
     ) -> dict[str, Any]:
         now = iso()
-        actions = sorted(set(self.normalize_action_name(action) for action in data["allowed_actions"] if action.strip()))
-        agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
-        approval_required_actions = sorted(
-            set(self.normalize_action_name(action) for action in (data.get("approval_required_actions") or []) if action.strip())
+        actions, approval_required_actions = self.normalize_credential_action_policy(
+            data["allowed_actions"],
+            data.get("approval_required_actions") or [],
         )
+        agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
         provider = str(data["provider"]).strip().lower()
         name = str(data["name"]).strip()
         secret_ref = str(data.get("secret_ref") or "").strip()
@@ -985,10 +985,6 @@ class HivemindStore:
                 validate_external_credential_metadata(metadata)
             except ValueError as exc:
                 raise StoreError(str(exc)) from exc
-        if not actions:
-            raise StoreError("credential must allow at least one action")
-        if not set(approval_required_actions).issubset(actions):
-            raise StoreError("approval_required_actions must be a subset of allowed_actions")
         if not name:
             raise StoreError("credential name is required")
         if not provider:
@@ -1022,6 +1018,21 @@ class HivemindStore:
         if len(normalized) > 64 or SAFE_ACTION_NAME.fullmatch(normalized) is None:
             raise StoreError("actions must use lowercase snake_case names")
         return normalized
+
+    def normalize_credential_action_policy(
+        self,
+        allowed_actions: Sequence[str],
+        approval_required_actions: Sequence[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        actions = sorted(set(self.normalize_action_name(action) for action in allowed_actions if action.strip()))
+        approvals = sorted(
+            set(self.normalize_action_name(action) for action in (approval_required_actions or []) if action.strip())
+        )
+        if not actions:
+            raise StoreError("credential must allow at least one action")
+        if not set(approvals).issubset(actions):
+            raise StoreError("approval_required_actions must be a subset of allowed_actions")
+        return actions, approvals
 
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)

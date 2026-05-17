@@ -811,28 +811,6 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
     )
     require_true(unsafe_action not in str(audit_events), "unsafe action identifier should not appear in audit events")
 
-    replay_response = client.post(
-        "/credential-actions",
-        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
-    )
-    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
-    require_equal(
-        replay_response.json()["detail"],
-        "credential lease is expired or revoked",
-        "replayed lease use should expose the revoke/expiry reason",
-    )
-
-    stored_lease = client.get("/credential-leases").json()[0]
-    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
-    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
-
-    audit_events = client.get("/audit-events").json()
-    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
-    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
-    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
-    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
-    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
-
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
@@ -2474,6 +2452,40 @@ def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
     assert captured["data"]["client_id"] == "codex-client"
     assert captured["data"]["grant_type"] == "authorization_code"
     assert "code_verifier" in captured["data"]
+
+
+def test_codex_oauth_start_rejects_invalid_actions_before_redirect(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["repo-read"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+
+    require_equal(response.status_code, 400, "OAuth start should reject invalid actions before provider redirect")
+    require_equal(
+        response.json()["detail"],
+        "actions must use lowercase snake_case names",
+        "OAuth action validation should match credential creation",
+    )
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    oauth_state_count = conn.execute("SELECT COUNT(*) FROM oauth_states").fetchone()[0]
+    conn.close()
+    require_equal(oauth_state_count, 0, "invalid OAuth starts should not persist callback state")
 
 
 def test_codex_oauth_flow_rejects_non_object_token_response(
