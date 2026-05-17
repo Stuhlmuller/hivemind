@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
-from hivemind.store import HivemindStore, hash_password
+from hivemind.store import HivemindStore, StoreError, hash_password
 
 
 TEST_PASSWORD = "operator-not-secret"
@@ -23,6 +25,41 @@ def setup(client: TestClient) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> None:
+    db_path = tmp_path / "bootstrap-race.db"
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
+    start = Barrier(3)
+
+    def create_admin(store: HivemindStore, username: str) -> tuple[str, str]:
+        start.wait()
+        try:
+            user = store.setup_admin(username, TEST_PASSWORD)
+            return ("ok", user["username"])
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(create_admin, stores[0], "admin"),
+            executor.submit(create_admin, stores[1], "operator"),
+        ]
+        start.wait()
+        results = [future.result() for future in futures]
+
+    assert sum(1 for status, _ in results if status == "ok") == 1
+    assert [detail for status, detail in results if status == "error"] == ["setup is already complete"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
+        usernames = [row[0] for row in conn.execute("SELECT username FROM users")]
+    finally:
+        conn.close()
+
+    assert admin_count == 1
+    assert len(usernames) == 1
 
 
 def test_frontend_is_served(tmp_path: Path) -> None:
