@@ -21,6 +21,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
           pythonEnv = pkgs.python312.withPackages (ps: with ps; [
+            cryptography
             fastapi
             httpx
             pytest

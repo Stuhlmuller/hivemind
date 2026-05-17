@@ -204,6 +204,34 @@ agents: brokered capabilities</pre>
               <section class="workspace credentials-workspace">
                 <div class="panel">
                   <div class="panel-heading">
+                    <h2>codex subscription</h2>
+                    <p>oauth-backed broker credential</p>
+                  </div>
+                  <section class="subpanel stack">
+                    <div class="inline-heading">
+                      <div>
+                        <h3>oauth bootstrap</h3>
+                        <p>brokered refs: env, file, vault, oauth</p>
+                      </div>
+                      <span id="oauth-provider-state" class="status-chip">loading</span>
+                    </div>
+                    <p id="oauth-provider-detail" class="meta">Checking broker OAuth configuration.</p>
+                    <form id="codex-oauth-form" class="stack">
+                      <label>name<input name="name" value="codex subscription" autocomplete="off" /></label>
+                      <label>allowed agents<select name="allowed_agents" multiple></select></label>
+                      <div class="two-col">
+                        <label>allowed actions<input name="allowed_actions" value="delegate_code,review_code" autocomplete="off" /></label>
+                        <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" value="900" /></label>
+                      </div>
+                      <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
+                      <button id="codex-oauth-button" type="submit">connect via oauth</button>
+                    </form>
+                    <p class="meta oauth-note">Creates an <code>oauth://codex/...</code> reference after the callback. Token material stays in broker storage.</p>
+                  </section>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
                     <h2>create policy</h2>
                     <p>guided refs + broker policy</p>
                   </div>

@@ -76,6 +76,24 @@ export HIVEMIND_INTENT_REVIEWER_MODEL=anthropic/claude-sonnet-4
 export HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
 ```
 
+Optional Codex subscription OAuth configuration:
+
+```bash
+export HIVEMIND_SECRETS_KEY="<set-a-long-random-secret-key>"
+export HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL="https://your-oauth-provider.example/oauth/authorize"
+export HIVEMIND_OAUTH_CODEX_TOKEN_URL="https://your-oauth-provider.example/oauth/token"
+export HIVEMIND_OAUTH_CODEX_CLIENT_ID="your-client-id"
+# Optional for confidential clients:
+export HIVEMIND_OAUTH_CODEX_CLIENT_SECRET="<set-client-secret-if-needed>"
+# Optional override; defaults to: openid profile email offline_access
+export HIVEMIND_OAUTH_CODEX_SCOPES="openid profile email offline_access"
+```
+
+With those variables set, the credentials console exposes a dedicated Codex
+subscription OAuth flow. The browser callback stores the token bundle in
+broker-owned encrypted storage and creates an `oauth://codex/...` credential
+reference, while public API responses continue to expose only redacted refs.
+
 ## Container
 
 ```bash

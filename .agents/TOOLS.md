@@ -13,6 +13,9 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `launchctl` / `plutil` | `external` | Install, inspect, and lint the optional macOS LaunchAgent that keeps the swarm running across laptop sessions |
 | `nix` | `external` | Evaluate `flake.nix` and verify whether the repo dev shell is usable in the local environment |
 | `python` / `python3` / `python3.12` | `python312` | Run the application test suite, skill validation, and repo-local verification commands |
+| `.venv/bin/pip` | `external` | Install the repo's Python dependencies into a local virtualenv when the shell lacks the declared dev environment |
+| `.venv/bin/python` / `.venv/bin/python3` | `external` | Execute the repo test suite inside the local virtualenv when the base shell lacks the declared Python environment |
+| `.venv/bin/pytest` | `external` | Run focused regression tests from the repo-local virtualenv |
 | `pytest` | `python312Packages.pytest` | Execute focused regression coverage for the changed API and store paths |
 | `uvicorn` | `python312Packages.uvicorn` | Start the local FastAPI dev server from the repo checkout |
 | `qlty` | `external` | Run the required code-quality checks before finishing repository changes |

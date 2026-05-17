@@ -350,6 +350,14 @@ main {
   text-transform: lowercase;
 }
 
+.panel h3 {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-transform: lowercase;
+}
+
 .panel-heading p {
   margin: 0;
   color: var(--dim);
@@ -392,6 +400,34 @@ main {
 
 .policy-shell {
   gap: 10px;
+}
+
+.subpanel {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0a0f16;
+}
+
+.inline-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inline-heading p {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.divider {
+  height: 1px;
+  margin: 14px 0;
+  background: var(--line);
 }
 
 .two-col {
@@ -503,6 +539,37 @@ select[multiple] {
 
 .audit {
   margin-top: 16px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(138, 180, 248, 0.08);
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.status-chip[data-state="ready"] {
+  border-color: rgba(104, 211, 145, 0.4);
+  background: rgba(104, 211, 145, 0.12);
+  color: var(--green);
+}
+
+.status-chip[data-state="error"] {
+  border-color: rgba(251, 113, 133, 0.35);
+  background: rgba(251, 113, 133, 0.1);
+  color: var(--red);
+}
+
+.oauth-note {
+  margin: 0;
 }
 
 .result {

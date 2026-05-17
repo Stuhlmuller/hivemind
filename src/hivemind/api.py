@@ -5,17 +5,26 @@ from importlib.resources import files
 from threading import Event, Thread
 from time import sleep
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+import httpx
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hivemind.config import HivemindConfig
+from hivemind.oauth import (
+    OAuthConfigurationError,
+    SecretBox,
+    build_pkce_pair,
+    load_oauth_providers_from_env,
+)
 from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError
 
 
 SESSION_COOKIE = "hivemind_session"
+OAUTH_FAILED_EVENT = "credential.oauth.failed"
 
 
 class SetupRequest(BaseModel):
@@ -40,6 +49,16 @@ class CreateCredentialRequest(BaseModel):
     name: str = Field(min_length=1)
     provider: str = Field(min_length=1)
     secret_ref: str = Field(min_length=6)
+    allowed_agents: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
+    require_intent: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StartOAuthCredentialRequest(BaseModel):
+    provider: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     allowed_agents: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
     max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
@@ -98,6 +117,8 @@ class CreateScheduleRequest(BaseModel):
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
     config = HivemindConfig.from_env()
     db = store or HivemindStore.from_env()
+    oauth_providers = load_oauth_providers_from_env()
+    secret_box = SecretBox.from_env()
     static_dir = files("hivemind").joinpath("static")
     scheduler_stop = Event()
 
@@ -128,6 +149,10 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             max_age=12 * 60 * 60,
             path="/",
         )
+
+    def oauth_frontend_redirect(status: str, detail: str) -> RedirectResponse:
+        query = urlencode({"oauth": status, "detail": detail})
+        return RedirectResponse(url=f"/?{query}", status_code=303)
 
     def scheduler_loop() -> None:
         while not scheduler_stop.is_set():
@@ -213,12 +238,135 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def list_credentials(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
         return db.list_credentials()
 
+    @app.get("/oauth/providers")
+    def list_oauth_providers(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
+        return [provider.public_view(has_secret_store=secret_box is not None) for provider in oauth_providers.values()]
+
+    @app.post("/oauth/credentials/start", status_code=201)
+    def start_oauth_credential(
+        request: StartOAuthCredentialRequest,
+        http_request: Request,
+        user: SessionUser = Depends(require_user),
+    ) -> dict[str, str]:
+        provider = oauth_providers.get(request.provider)
+        if provider is None:
+            raise HTTPException(status_code=404, detail=f"unknown oauth provider: {request.provider}")
+        if secret_box is None:
+            raise HTTPException(status_code=400, detail="Set HIVEMIND_SECRETS_KEY to enable broker-side OAuth token storage.")
+        available, reason = provider.availability(has_secret_store=True)
+        if not available:
+            raise HTTPException(status_code=400, detail=reason or f"oauth provider unavailable: {provider.id}")
+        if not any(action.strip() for action in request.allowed_actions):
+            raise HTTPException(status_code=400, detail="credential must allow at least one action")
+        verifier, challenge = build_pkce_pair()
+        state = db.create_oauth_state(
+            user_id=user.id,
+            provider=provider.id,
+            pkce_verifier=verifier,
+            credential_payload=request.model_dump(exclude={"provider"}),
+        )
+        redirect_uri = str(http_request.url_for("oauth_callback", provider=provider.id))
+        try:
+            authorize_url = provider.build_authorize_url(
+                redirect_uri=redirect_uri,
+                state=state,
+                code_challenge=challenge,
+            )
+        except OAuthConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"authorize_url": authorize_url}
+
     @app.post("/credentials", status_code=201)
     def create_credential(request: CreateCredentialRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
             return db.create_credential(request.model_dump())
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/oauth/callback/{provider}", name="oauth_callback")
+    def oauth_callback(
+        provider: str,
+        http_request: Request,
+        state: str | None = None,
+        code: str | None = None,
+        error: str | None = None,
+        error_description: str | None = None,
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    ) -> RedirectResponse:
+        user = db.get_session_user(session)
+        if user is None:
+            return oauth_frontend_redirect("error", "Sign in again to finish OAuth.")
+        provider_config = oauth_providers.get(provider)
+        if provider_config is None:
+            return oauth_frontend_redirect("error", f"Unknown OAuth provider: {provider}.")
+        if secret_box is None:
+            return oauth_frontend_redirect("error", "Broker-side OAuth token storage is not configured.")
+        if not state:
+            return oauth_frontend_redirect("error", "Missing OAuth state.")
+        try:
+            oauth_state = db.consume_oauth_state(state_id=state, provider=provider, user_id=user.id)
+        except StoreError as exc:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                str(exc),
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", str(exc))
+        if error:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                error_description or error,
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", error_description or error)
+        if not code:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                "Missing OAuth authorization code.",
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", "Missing OAuth authorization code.")
+        redirect_uri = str(http_request.url_for("oauth_callback", provider=provider))
+        try:
+            response = httpx.post(
+                provider_config.token_url,
+                data=provider_config.build_token_payload(
+                    code=code,
+                    redirect_uri=redirect_uri,
+                    code_verifier=oauth_state["pkce_verifier"],
+                ),
+                headers={"Accept": "application/json"},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            token_payload = response.json()
+            credential = db.create_oauth_credential(
+                provider=provider_config.credential_provider,
+                token_payload=token_payload,
+                requested_credential=oauth_state["credential_payload"],
+                secret_box=secret_box,
+                actor_id=user.id,
+            )
+        except (OAuthConfigurationError, StoreError, ValueError, httpx.HTTPError) as exc:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                str(exc),
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", str(exc))
+        return oauth_frontend_redirect("connected", f"{credential['name']} connected.")
 
     @app.post("/credential-leases", status_code=201)
     def create_credential_lease(request: CreateLeaseRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:

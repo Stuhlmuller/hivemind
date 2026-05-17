@@ -4,7 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
 from threading import Barrier
+from urllib.parse import parse_qs, urlparse
 
+import httpx
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
@@ -190,7 +192,6 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
 
-
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -373,6 +374,241 @@ def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
     )
     assert app_response.status_code == 400
     assert app_response.json()["detail"] == "github_app metadata requires app_id"
+
+
+def test_oauth_provider_status_reports_missing_broker_secret_store(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.get("/oauth/providers")
+
+    assert response.status_code == 200
+    provider = response.json()[0]
+    assert provider["id"] == "codex"
+    assert provider["available"] is False
+    assert "HIVEMIND_SECRETS_KEY" in provider["reason"]
+
+
+def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    captured: dict[str, object] = {}
+
+    class FakeTokenResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_token": "access-secret-token",
+                "refresh_token": "refresh-secret-token",
+                "scope": "openid offline_access",
+                "expires_in": 1800,
+                "token_type": "Bearer",
+            }
+
+    def fake_post(url: str, *, data: dict[str, str], headers: dict[str, str], timeout: float) -> FakeTokenResponse:
+        captured["url"] = url
+        captured["data"] = data
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return FakeTokenResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["delegate_code", "review_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+
+    assert start_response.status_code == 201
+    authorize_url = start_response.json()["authorize_url"]
+    parsed = urlparse(authorize_url)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "auth.example.test"
+    assert query["client_id"] == ["codex-client"]
+    assert query["scope"] == ["openid profile email offline_access"]
+    assert "state" in query
+    assert "code_challenge" in query
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}&code=broker-code",
+        follow_redirects=False,
+    )
+
+    assert callback_response.status_code == 303
+    assert callback_response.headers["location"].startswith("/?oauth=connected")
+
+    credentials = client.get("/credentials").json()
+    codex_credential = next(item for item in credentials if item["provider"] == "codex")
+    assert codex_credential["name"] == "codex subscription"
+    assert codex_credential["secret_ref_preview"] == "oauth://cod..."
+    assert codex_credential["metadata"]["auth_type"] == "oauth"
+    assert codex_credential["metadata"]["oauth_refreshable"] is True
+    assert "access-secret-token" not in start_response.text
+    assert "access-secret-token" not in callback_response.text
+    assert "refresh-secret-token" not in callback_response.text
+
+    audit_events = client.get("/audit-events").json()
+    assert audit_events[0]["type"] == "credential.oauth.connected"
+
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    token_row = conn.execute("SELECT token_ciphertext FROM oauth_connections").fetchone()
+    conn.close()
+    assert token_row is not None
+    assert "access-secret-token" not in token_row[0]
+    assert "refresh-secret-token" not in token_row[0]
+    assert captured["url"] == "https://auth.example.test/oauth/token"
+    assert captured["data"]["code"] == "broker-code"
+    assert captured["data"]["client_id"] == "codex-client"
+    assert captured["data"]["grant_type"] == "authorization_code"
+    assert "code_verifier" in captured["data"]
+
+
+def test_codex_oauth_flow_rejects_non_object_token_response(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    class FakeTokenResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[str]:
+            return ["not", "an", "object"]
+
+    def fake_post(url: str, *, data: dict[str, str], headers: dict[str, str], timeout: float) -> FakeTokenResponse:
+        return FakeTokenResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["delegate_code", "review_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+    assert start_response.status_code == 201
+    authorize_url = start_response.json()["authorize_url"]
+    query = parse_qs(urlparse(authorize_url).query)
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}&code=broker-code",
+        follow_redirects=False,
+    )
+
+    assert callback_response.status_code == 303
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    assert redirect_params["oauth"] == ["error"]
+    assert redirect_params["detail"] == ["oauth token response must be a JSON object"]
+    audit_events = client.get("/audit-events").json()
+    assert audit_events[0]["type"] == "credential.oauth.failed"
+    assert audit_events[0]["reason"] == "oauth token response must be a JSON object"
+    credentials = client.get("/credentials").json()
+    assert all(item["provider"] != "codex" for item in credentials)
+
+
+def test_codex_oauth_flow_audits_unknown_state_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    client = client_for(tmp_path)
+    setup(client)
+
+    callback_response = client.get(
+        "/oauth/callback/codex?state=oauth_state_missing&code=broker-code",
+        follow_redirects=False,
+    )
+
+    assert callback_response.status_code == 303
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    assert redirect_params["oauth"] == ["error"]
+    assert redirect_params["detail"] == ["unknown oauth state"]
+    audit_events = client.get("/audit-events").json()
+    assert audit_events[0]["type"] == "credential.oauth.failed"
+    assert audit_events[0]["reason"] == "unknown oauth state"
+    assert audit_events[0]["target_id"] == "codex"
+
+
+def test_codex_oauth_flow_audits_missing_code_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["delegate_code", "review_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+    assert start_response.status_code == 201
+    authorize_url = start_response.json()["authorize_url"]
+    query = parse_qs(urlparse(authorize_url).query)
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}",
+        follow_redirects=False,
+    )
+
+    assert callback_response.status_code == 303
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    assert redirect_params["oauth"] == ["error"]
+    assert redirect_params["detail"] == ["Missing OAuth authorization code."]
+    audit_events = client.get("/audit-events").json()
+    assert audit_events[0]["type"] == "credential.oauth.failed"
+    assert audit_events[0]["reason"] == "Missing OAuth authorization code."
+    assert audit_events[0]["target_id"] == "codex"
+    credentials = client.get("/credentials").json()
+    assert all(item["provider"] != "codex" for item in credentials)
 
 
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
