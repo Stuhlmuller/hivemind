@@ -121,17 +121,19 @@ Optional agent provider configuration:
 
 ```bash
 export HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL=anthropic/claude-sonnet-4
-export HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
+export HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID=cred_provider_openrouter
 ```
 
-`/config` exposes a redacted provider catalog for the deterministic local
-provider plus OpenAI, Codex, Claude, Gemini, OpenRouter, Bedrock, Hugging Face,
-and Ollama. Agents select a provider and model on their agent record. Task
-execution goes through the provider adapter registry, which currently ships
-only the deterministic local adapter; remote providers fail closed until an
-adapter is registered in code.
-Provider credentials are configured as secret references, not raw keys, and
-public responses do not include the full reference.
+`/config` exposes a provider catalog for the deterministic local provider plus
+OpenAI, Codex, Claude, Gemini, OpenRouter, Bedrock, Hugging Face, and Ollama.
+Agents select a provider and model on their agent record. Task execution goes
+through the provider adapter registry, which currently ships only the
+deterministic local adapter; remote providers fail closed until an adapter is
+registered in code.
+Provider credentials must be credential records managed by the broker. The
+provider config points at a credential ID; the underlying secret reference stays
+on the credential record, is redacted in public views, and is authorized through
+a short-lived broker lease before adapter handoff.
 
 Optional broker secret storage and Codex subscription OAuth configuration:
 

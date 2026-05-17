@@ -16,9 +16,16 @@ from hivemind.config import HivemindConfig, IntentReviewerConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
 from hivemind.providers import AgentProviderError, ProviderRunRequest, ProviderRunResult, ProviderToolRequest
-from hivemind.store import HivemindStore, SCHEDULE_BACKFILL_BATCH_LIMIT, StoreError, hash_password
+from hivemind.store import (
+    AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
+    HivemindStore,
+    SCHEDULE_BACKFILL_BATCH_LIMIT,
+    StoreError,
+    hash_password,
+)
 
 TEST_PASSWORD = "operator-not-secret"
+PROVIDER_CREDENTIAL_ID = "cred_provider_openrouter"
 
 
 class RecordingProviderReviewer:
@@ -89,12 +96,12 @@ class LeakingAgentProviderAdapter:
         return ProviderRunResult(
             provider=request.provider,
             model=request.model,
-            output_text=f"provider used {request.credential_ref} with fallback env://SECONDARY_PROVIDER_SECRET",
+            output_text=f"provider used {request.credential_id} with fallback env://SECONDARY_PROVIDER_SECRET",
             tool_requests=(
                 ProviderToolRequest(
                     name="debug",
                     arguments={
-                        "credential_ref": request.credential_ref,
+                        "credential_id": request.credential_id,
                         "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
                         "notes": ["secondary ref env://SECONDARY_PROVIDER_SECRET"],
                         "token": "placeholder",
@@ -131,6 +138,25 @@ def setup(client: TestClient) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def create_provider_credential(
+    store: HivemindStore,
+    agent_id: str,
+    *,
+    credential_id: str = PROVIDER_CREDENTIAL_ID,
+) -> dict[str, object]:
+    return store.create_credential(
+        {
+            "id": credential_id,
+            "name": "OpenRouter Provider Credential",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_agents": [agent_id],
+            "allowed_actions": [f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter"],
+            "metadata": {"credential_kind": "generic_reference", "purpose": "agent_provider"},
+        }
+    )
 
 
 def latest_schedule_run_event(client: TestClient, schedule_id: str) -> dict[str, object]:
@@ -425,7 +451,7 @@ def test_config_rejects_invalid_reviewer_credential_ref(monkeypatch) -> None:
 
 def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     client = client_for(tmp_path)
 
     setup(client)
@@ -436,9 +462,21 @@ def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeyp
     require_equal(response.status_code, 200, "config should return after setup")
     require_true(expected_providers.issubset(providers), "config should list the supported remote agent providers")
     require_equal(providers["openrouter"]["model"], "anthropic/claude-sonnet-4", "provider config should expose the configured model")
-    require_equal(providers["openrouter"]["credential_ref_preview"], "env://OPE...", "provider config should redact credential refs")
+    require_equal(providers["openrouter"]["credential_id"], PROVIDER_CREDENTIAL_ID, "provider config should expose credential IDs")
     require_true("credential_ref" not in providers["openrouter"], "provider config should not expose raw credential refs")
+    require_true("credential_ref_preview" not in providers["openrouter"], "provider config should not expose secret ref previews")
     require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose raw provider credential refs")
+
+
+def test_config_rejects_agent_provider_secret_ref_env(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+
+    try:
+        HivemindConfig.from_env()
+    except ValueError as exc:
+        require_true("CREDENTIAL_ID" in str(exc), "agent provider config should direct operators to credential IDs")
+    else:
+        raise AssertionError("agent provider credential_ref env var was accepted")
 
 
 def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: Path, monkeypatch) -> None:
@@ -748,9 +786,9 @@ def test_local_agent_task_execution_uses_deterministic_adapter_without_network(t
     )
 
 
-def test_registered_agent_provider_adapter_receives_model_and_secret_ref_reference(tmp_path: Path, monkeypatch) -> None:
+def test_registered_agent_provider_adapter_receives_model_and_brokered_credentials(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     adapter = RecordingAgentProviderAdapter("openrouter")
     store = HivemindStore(
         tmp_path / "hivemind.db",
@@ -769,6 +807,7 @@ def test_registered_agent_provider_adapter_receives_model_and_secret_ref_referen
             "system_prompt": "Keep output short.",
         },
     ).json()
+    create_provider_credential(store, agent["id"])
     credential = client.post(
         "/credentials",
         json={
@@ -792,6 +831,7 @@ def test_registered_agent_provider_adapter_receives_model_and_secret_ref_referen
     ).json()
 
     response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
 
     require_equal(response.status_code, 201, "registered provider adapter should execute the task")
     require_true(bool(adapter.requests), "registered adapter should receive a provider run request")
@@ -799,19 +839,109 @@ def test_registered_agent_provider_adapter_receives_model_and_secret_ref_referen
     require_equal(provider_request.provider, "openrouter", "adapter request should use the agent provider")
     require_equal(provider_request.model, "anthropic/claude-sonnet-4", "adapter request should use the agent model")
     require_equal(provider_request.system_prompt, "Keep output short.", "adapter request should include the agent system prompt")
-    require_equal(provider_request.credential_ref, "env://OPENROUTER_API_KEY", "adapter should receive only the provider credential reference")
+    require_equal(provider_request.credential_id, PROVIDER_CREDENTIAL_ID, "adapter should receive the provider credential id")
+    require_equal(
+        provider_request.credential_action["credential_id"],
+        PROVIDER_CREDENTIAL_ID,
+        "adapter should receive a brokered provider credential action",
+    )
+    require_true(
+        "lease_token" not in provider_request.credential_action,
+        "adapter should not receive raw provider credential lease tokens",
+    )
     require_equal(provider_request.tool_requests[0].name, "read_repo", "adapter should receive task tool requests")
     require_equal(
         provider_request.tool_requests[0].arguments["credential_id"],
         credential["id"],
         "tool request should reference credentials by id",
     )
+    require_equal(
+        provider_request.tool_requests[0].arguments["credential_action"]["credential_id"],
+        credential["id"],
+        "tool request should include a brokered credential action",
+    )
+    require_true(
+        "lease_token" not in provider_request.tool_requests[0].arguments["credential_action"],
+        "adapter should not receive raw tool credential lease tokens",
+    )
+    require_true(
+        any(event["type"] == "task.execution.started" and event["target_id"] == task["id"] for event in audit_events),
+        "task execution start should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "credential.action.performed"
+            and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            for event in audit_events
+        ),
+        "provider credential use should consume a brokered credential action",
+    )
+    require_true(
+        any(
+            event["type"] == "credential.action.performed"
+            and event["target_id"] == credential["id"]
+            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            for event in audit_events
+        ),
+        "task tool credential use should consume a brokered credential action",
+    )
     require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
 
 
+def test_agent_provider_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    allowed_agent = client.get("/agents").json()[0]
+    denied_agent = client.post(
+        "/agents",
+        json={
+            "name": "Provider credential denied runner",
+            "role": "should not receive provider credentials",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, allowed_agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Denied provider credential use",
+            "description": "The agent is outside the provider credential policy.",
+            "assigned_agent_id": denied_agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "provider credential policy denial should fail closed")
+    require_equal(response.json()["detail"], "agent is not allowed to use this credential", "denial reason should match policy")
+    require_equal(adapter.requests, [], "provider adapter should not receive policy-denied provider credential requests")
+    require_equal(updated_task["status"], "failed", "policy-denied provider credential tasks should be marked failed")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            and event["metadata"]["task_id"] == task["id"]
+            and event["metadata"]["capability"] == "agent_provider"
+            for event in audit_events
+        ),
+        "policy-denied provider credential requests should be audited",
+    )
+
+
 def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     adapter = RecordingAgentProviderAdapter("openrouter")
     store = HivemindStore(
         tmp_path / "hivemind.db",
@@ -830,6 +960,7 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
             "model": "anthropic/claude-sonnet-4",
         },
     ).json()
+    create_provider_credential(store, denied_agent["id"])
     credential = client.post(
         "/credentials",
         json={
@@ -872,7 +1003,7 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
 
 
 def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     adapter = RecordingAgentProviderAdapter("openrouter")
     store = HivemindStore(
         tmp_path / "hivemind.db",
@@ -890,6 +1021,7 @@ def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_p
             "model": "anthropic/claude-sonnet-4",
         },
     ).json()
+    create_provider_credential(store, agent["id"])
     credential = client.post(
         "/credentials",
         json={
@@ -927,7 +1059,7 @@ def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_p
 
 
 def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     db_path = tmp_path / "task-run-race.db"
     adapter = RecordingAgentProviderAdapter("openrouter")
     setup_store = HivemindStore(
@@ -943,6 +1075,7 @@ def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path,
             "model": "anthropic/claude-sonnet-4",
         }
     )
+    create_provider_credential(setup_store, agent["id"])
     task = setup_store.create_task(
         {
             "title": "Race provider execution",
@@ -984,7 +1117,7 @@ def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path,
 
 
 def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     db_path = tmp_path / "same-agent-running-tasks.db"
     setup_store = HivemindStore(db_path, config=HivemindConfig.from_env())
     agent = setup_store.create_agent(
@@ -995,6 +1128,7 @@ def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Pat
             "model": "anthropic/claude-sonnet-4",
         }
     )
+    create_provider_credential(setup_store, agent["id"])
     fast_task = setup_store.create_task(
         {
             "title": "Fast provider execution",
@@ -1049,8 +1183,8 @@ def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Pat
     )
 
 
-def test_remote_agent_provider_requires_credential_ref_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", raising=False)
+def test_remote_agent_provider_requires_credential_id_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", raising=False)
     adapter = RecordingAgentProviderAdapter("openrouter")
     store = HivemindStore(
         tmp_path / "hivemind.db",
@@ -1080,17 +1214,17 @@ def test_remote_agent_provider_requires_credential_ref_before_adapter_execution(
     response = client.post(f"/tasks/{task['id']}/run", json={})
     updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
 
-    require_equal(response.status_code, 403, "remote providers without credential refs should fail closed")
+    require_equal(response.status_code, 403, "remote providers without credential ids should fail closed")
     require_true(
-        "agent provider credential_ref is not configured" in response.json()["detail"],
+        "agent provider credential_id is not configured" in response.json()["detail"],
         "failure should explain that provider credentials are missing",
     )
-    require_equal(adapter.requests, [], "provider adapter should not run without a configured credential ref")
+    require_equal(adapter.requests, [], "provider adapter should not run without a configured credential id")
     require_equal(updated_task["status"], "failed", "credential configuration failures should mark the task failed")
 
 
 def test_unregistered_agent_provider_fails_closed_without_leaking_secret_ref(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     store = HivemindStore(tmp_path / "hivemind.db", config=HivemindConfig.from_env())
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
@@ -1127,7 +1261,7 @@ def test_unregistered_agent_provider_fails_closed_without_leaking_secret_ref(tmp
 
 
 def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     store = HivemindStore(
         tmp_path / "hivemind.db",
         config=HivemindConfig.from_env(),
@@ -1144,6 +1278,7 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
             "model": "anthropic/claude-sonnet-4",
         },
     ).json()
+    create_provider_credential(store, agent["id"])
     task = client.post(
         "/tasks",
         json={
@@ -1161,7 +1296,11 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
     require_true("env://OPENROUTER_API_KEY" not in response.text, "provider result should not expose full credential refs")
     require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "provider result should not expose other secret ref targets")
     require_true("env://SEC..." in response.text, "provider result should preview other secret refs")
-    require_equal(result["tool_requests"][0]["arguments"]["credential_ref"], "[redacted]", "credential_ref arguments should be redacted")
+    require_equal(
+        result["tool_requests"][0]["arguments"]["credential_id"],
+        PROVIDER_CREDENTIAL_ID,
+        "credential ids can be returned without exposing secret refs",
+    )
     require_equal(
         result["tool_requests"][0]["arguments"]["fallback_ref"],
         "env://SEC...",
@@ -1194,7 +1333,7 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
 
 
 def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audit(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     store = HivemindStore(
         tmp_path / "hivemind.db",
         config=HivemindConfig.from_env(),
@@ -1211,6 +1350,7 @@ def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audi
             "model": "anthropic/claude-sonnet-4",
         },
     ).json()
+    create_provider_credential(store, agent["id"])
     task = client.post(
         "/tasks",
         json={

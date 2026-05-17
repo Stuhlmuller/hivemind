@@ -75,11 +75,7 @@ class IntentReviewerConfig:
 class AgentProviderConfig:
     provider: str
     model: str
-    credential_ref: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.credential_ref:
-            validate_secret_ref(self.credential_ref)
+    credential_id: str | None = None
 
     def provider_id(self) -> str:
         return normalize_agent_provider_id(self.provider)
@@ -88,7 +84,7 @@ class AgentProviderConfig:
         return {
             "provider": self.provider_id(),
             "model": self.model,
-            "credential_ref_preview": preview_secret_ref(self.credential_ref),
+            "credential_id": self.credential_id,
         }
 
 
@@ -97,11 +93,16 @@ def load_agent_provider_configs_from_env() -> dict[str, AgentProviderConfig]:
     for provider_id, default_model in AGENT_PROVIDER_DEFAULT_MODELS.items():
         env_name = AGENT_PROVIDER_ENV_NAMES[provider_id]
         model = os.getenv(f"HIVEMIND_AGENT_PROVIDER_{env_name}_MODEL") or default_model
-        credential_ref = os.getenv(f"HIVEMIND_AGENT_PROVIDER_{env_name}_CREDENTIAL_REF") or None
+        if os.getenv(f"HIVEMIND_AGENT_PROVIDER_{env_name}_CREDENTIAL_REF"):
+            raise ValueError(
+                f"HIVEMIND_AGENT_PROVIDER_{env_name}_CREDENTIAL_REF is not supported; "
+                f"configure HIVEMIND_AGENT_PROVIDER_{env_name}_CREDENTIAL_ID"
+            )
+        credential_id = os.getenv(f"HIVEMIND_AGENT_PROVIDER_{env_name}_CREDENTIAL_ID") or None
         configs[provider_id] = AgentProviderConfig(
             provider=provider_id,
             model=model,
-            credential_ref=credential_ref,
+            credential_id=credential_id,
         )
     return configs
 

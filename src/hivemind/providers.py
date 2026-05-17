@@ -44,7 +44,8 @@ class ProviderRunRequest:
     system_prompt: str = ""
     messages: Sequence[ProviderMessage] = field(default_factory=tuple)
     tool_requests: Sequence[ProviderToolRequest] = field(default_factory=tuple)
-    credential_ref: str | None = None
+    credential_id: str | None = None
+    credential_action: Mapping[str, Any] | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -115,3 +116,6 @@ class AgentProviderRegistry:
         if adapter is None:
             raise MissingAgentProviderAdapterError(provider_id)
         return adapter.run(request)
+
+    def has_adapter(self, provider: str) -> bool:
+        return normalize_agent_provider_id(provider) in self._adapters
