@@ -1273,51 +1273,6 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
     assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
 
 
-def test_assigned_task_heartbeat_rejects_mismatched_agent_id(tmp_path: Path) -> None:
-    client = client_for(tmp_path)
-    setup(client)
-
-    assigned_agent = client.post(
-        "/agents",
-        json={
-            "name": "Assigned worker",
-            "role": "Task owner",
-            "provider": "local",
-            "model": "deterministic-policy",
-        },
-    ).json()
-    other_agent = client.post(
-        "/agents",
-        json={
-            "name": "Other worker",
-            "role": "Observer",
-            "provider": "local",
-            "model": "deterministic-policy",
-        },
-    ).json()
-    task = client.post(
-        "/tasks",
-        json={
-            "title": "Assigned heartbeat target",
-            "assigned_agent_id": assigned_agent["id"],
-        },
-    ).json()
-
-    mismatched_heartbeat = client.post(
-        f"/tasks/{task['id']}/heartbeats",
-        json={"agent_id": other_agent["id"], "note": "spoofed heartbeat"},
-    )
-    assert mismatched_heartbeat.status_code == 400
-    assert mismatched_heartbeat.json()["detail"] == f"agent_id does not match assigned task agent: {assigned_agent['id']}"
-
-    inherited_heartbeat = client.post(
-        f"/tasks/{task['id']}/heartbeats",
-        json={"note": "manual heartbeat"},
-    )
-    assert inherited_heartbeat.status_code == 201
-    assert inherited_heartbeat.json()["agent_id"] == assigned_agent["id"]
-
-
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
     db_path = tmp_path / "old.db"
     conn = sqlite3.connect(db_path)

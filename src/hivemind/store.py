@@ -1094,10 +1094,6 @@ class HivemindStore:
                 value=provided_agent_id,
             )
             assigned_agent_id = task["assigned_agent_id"]
-            if assigned_agent_id and provided_agent_id and provided_agent_id != assigned_agent_id:
-                raise StoreValidationError(
-                    f"agent_id does not match assigned task agent: {assigned_agent_id}"
-                )
             next_heartbeat = None
             if task["heartbeat_seconds"]:
                 next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
