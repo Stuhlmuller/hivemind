@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sqlite3
 
@@ -243,10 +244,19 @@ def test_cli_backup_and_restore_commands_use_hivemind_db_path(tmp_path: Path, mo
 
     backup_path = tmp_path / "backup.json"
     monkeypatch.setenv("HIVEMIND_DB_PATH", str(source_db))
-    require_equal(main(["backup", str(backup_path)]), 0, "backup command should exit cleanly")
+    old_umask = os.umask(0)
+    try:
+        require_equal(main(["backup", str(backup_path)]), 0, "backup command should exit cleanly")
+    finally:
+        os.umask(old_umask)
 
     backup_bundle = json.loads(backup_path.read_text())
     require_equal(backup_bundle["format"], BACKUP_FORMAT, "cli backup should emit the logical backup format")
+    require_equal(
+        backup_path.stat().st_mode & 0o777,
+        0o600,
+        "cli backup file should be readable only by the operator account",
+    )
 
     target_db = tmp_path / "cli-target.db"
     target = HivemindStore(target_db)
