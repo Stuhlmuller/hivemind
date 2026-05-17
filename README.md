@@ -19,7 +19,8 @@ The current implementation includes:
 Schedules expose three operator-visible catch-up policies: `run_once` executes
 one immediate recovery task and resets cadence from now, `skip_missed` drops
 older missed slots while keeping the original cadence, and `backfill` creates
-one task per overdue slot before resuming the next scheduled run.
+one task per overdue slot before resuming the next scheduled run. Long backfill
+windows are processed in bounded batches so restarts remain responsive.
 
 ## Run Locally
 

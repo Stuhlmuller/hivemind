@@ -20,6 +20,7 @@ from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
 from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
+SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
 
 
@@ -35,6 +36,15 @@ def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value)
+
+
+def require_aware_utc(value: str, *, field_name: str) -> datetime:
+    parsed = parse_dt(value)
+    if parsed is None:
+        raise StoreError(f"schedule {field_name} is required")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise StoreError(f"schedule {field_name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def dumps(value: Any) -> str:
@@ -1084,6 +1094,11 @@ class HivemindStore:
         catch_up_policy = data.get("catch_up_policy") or "run_once"
         if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
             raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+        next_run_at = (
+            require_aware_utc(data["next_run_at"], field_name="next_run_at")
+            if data.get("next_run_at")
+            else now + timedelta(seconds=interval)
+        )
         row = {
             "id": f"sched_{secrets.token_urlsafe(10)}",
             "name": data["name"],
@@ -1097,7 +1112,7 @@ class HivemindStore:
             "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
-            "next_run_at": data.get("next_run_at") or iso(now + timedelta(seconds=interval)),
+            "next_run_at": iso(next_run_at),
             "last_run_at": None,
             "created_at": iso(now),
             "updated_at": iso(now),
@@ -1168,23 +1183,26 @@ class HivemindStore:
                 catch_up_policy = row["catch_up_policy"] or "run_once"
                 if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
                     raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
-                next_run_at = parse_dt(row["next_run_at"])
-                if next_run_at is None:
-                    raise StoreError(f"schedule has invalid next_run_at: {row['id']}")
-                due_slots: list[datetime] = []
-                current_slot = next_run_at
-                while current_slot <= now:
-                    due_slots.append(current_slot)
-                    current_slot += interval
+                next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
+                if next_run_at > now:
+                    continue
+                missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
                 if catch_up_policy == "backfill":
-                    scheduled_runs = due_slots
-                    next_run = current_slot
+                    run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
+                    scheduled_runs = [next_run_at + (interval * index) for index in range(run_count)]
+                    next_run = next_run_at + (interval * run_count)
+                    skipped_run_count = 0
+                    remaining_run_count = missed_run_count - run_count
                 elif catch_up_policy == "skip_missed":
-                    scheduled_runs = [due_slots[-1]]
-                    next_run = current_slot
+                    scheduled_runs = [next_run_at + (interval * (missed_run_count - 1))]
+                    next_run = next_run_at + (interval * missed_run_count)
+                    skipped_run_count = missed_run_count - 1
+                    remaining_run_count = 0
                 else:
                     scheduled_runs = [now]
                     next_run = now + interval
+                    skipped_run_count = missed_run_count - 1
+                    remaining_run_count = 0
 
                 task_ids: list[str] = []
                 for _ in scheduled_runs:
@@ -1216,9 +1234,10 @@ class HivemindStore:
                     {
                         "catch_up_policy": catch_up_policy,
                         "created_task_count": len(task_ids),
-                        "missed_run_count": len(due_slots),
+                        "missed_run_count": missed_run_count,
+                        "remaining_run_count": remaining_run_count,
                         "scheduled_for": [iso(scheduled_for) for scheduled_for in scheduled_runs],
-                        "skipped_run_count": len(due_slots) - len(scheduled_runs),
+                        "skipped_run_count": skipped_run_count,
                         "task_ids": task_ids,
                     },
                 )

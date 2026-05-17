@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
 from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
-from hivemind.store import HivemindStore, StoreError, hash_password
+from hivemind.store import HivemindStore, SCHEDULE_BACKFILL_BATCH_LIMIT, StoreError, hash_password
 
 TEST_PASSWORD = "operator-not-secret"
 
@@ -1234,6 +1234,80 @@ def test_due_schedules_backfill_every_missed_run(tmp_path: Path) -> None:
     require_equal(len(metadata["scheduled_for"]), 4, "backfill should audit each scheduled slot it replayed")
 
 
+def test_due_schedules_run_once_counts_long_downtime_without_expanding_slots(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Long downtime review",
+            "interval_seconds": 60,
+            "catch_up_policy": "run_once",
+            "task_title": "Long downtime scheduled review",
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "long-overdue run_once schedules should not hang")
+    require_equal(len(run_response.json()["created_tasks"]), 1, "run_once should still create exactly one task")
+
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_true(metadata["missed_run_count"] > 1_000_000, "long downtime should be counted arithmetically")
+    require_equal(metadata["created_task_count"], 1, "run_once should not create one task per missed slot")
+    require_equal(
+        metadata["skipped_run_count"],
+        metadata["missed_run_count"] - 1,
+        "run_once should report skipped downtime slots without materializing tasks",
+    )
+    require_equal(metadata["remaining_run_count"], 0, "run_once should not leave catch-up work queued")
+    require_equal(len(metadata["scheduled_for"]), 1, "run_once should audit only the immediate recovery run")
+
+
+def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Batched backfill review",
+            "interval_seconds": 60,
+            "catch_up_policy": "backfill",
+            "task_title": "Batched backfill scheduled review",
+            "next_run_at": (base_now - timedelta(seconds=60 * (SCHEDULE_BACKFILL_BATCH_LIMIT + 10))).isoformat(),
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "long-overdue backfill schedules should not hang")
+    require_equal(
+        len(run_response.json()["created_tasks"]),
+        SCHEDULE_BACKFILL_BATCH_LIMIT,
+        "backfill should create only a bounded batch in one scheduler pass",
+    )
+
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    require_true(
+        datetime.fromisoformat(updated_schedule["next_run_at"]) <= datetime.now(timezone.utc),
+        "partial backfill should leave the next unprocessed slot due for a later scheduler pass",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(
+        metadata["created_task_count"],
+        SCHEDULE_BACKFILL_BATCH_LIMIT,
+        "backfill audit should record the bounded batch size",
+    )
+    require_true(metadata["remaining_run_count"] > 0, "backfill audit should report unprocessed missed slots")
+    require_equal(metadata["skipped_run_count"], 0, "backfill should defer rather than skip excess missed slots")
+
+
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -1281,6 +1355,27 @@ def test_schedule_creation_rejects_invalid_catch_up_policy(tmp_path: Path) -> No
         },
     )
     require_equal(response.status_code, 422, "invalid catch-up policies should fail request validation")
+
+
+def test_schedule_creation_rejects_naive_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Naive schedule timestamp",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "2000-01-01T00:00:00",
+        },
+    )
+    require_equal(response.status_code, 400, "schedule creation should reject timezone-naive next_run_at")
+    require_equal(
+        response.json()["detail"],
+        "schedule next_run_at must include a timezone",
+        "schedule timestamp errors should explain the missing timezone",
+    )
 
 
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
