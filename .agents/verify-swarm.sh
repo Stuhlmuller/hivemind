@@ -161,6 +161,7 @@ case "$command_name" in
     ;;
   review)
     pwd >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.review"
+    printf '%s\n' "${1:-}" >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.review_prompt"
     exit 0
     ;;
 esac
@@ -207,6 +208,31 @@ wait_for_line_count() {
     fi
     sleep 0.1
   done
+}
+
+wait_for_process_exit() {
+  local pid="$1"
+  local watchdog_pid
+
+  (
+    sleep 5
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "timed out waiting for process $pid to exit" >&2
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  ) &
+  watchdog_pid="$!"
+
+  if wait "$pid"; then
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" >/dev/null 2>&1 || true
+    return
+  fi
+
+  kill "$watchdog_pid" >/dev/null 2>&1 || true
+  wait "$watchdog_pid" >/dev/null 2>&1 || true
+  echo "process $pid exited unexpectedly" >&2
+  exit 1
 }
 
 assert_file_equals() {
@@ -364,7 +390,57 @@ done
 
 swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
 
-rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review"
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_WORKER_A_MAX_RUNS=1 \
+HIVEMIND_WORKER_A_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_A_REVIEW_PROMPT="Legacy worker A review prompt" \
+bash "$repo_root/.agents/worker-loop-a.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+worker_a_pid="$!"
+
+wait_for_file "$capture_root/worker.review_prompt"
+wait_for_process_exit "$worker_a_pid"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy worker A review prompt"
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_WORKER_B_MAX_RUNS=1 \
+HIVEMIND_WORKER_B_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_B_REVIEW_PROMPT="Legacy worker B review prompt" \
+bash "$repo_root/.agents/worker-loop-b.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+worker_b_pid="$!"
+
+wait_for_file "$capture_root/worker.review_prompt"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy worker B review prompt"
+wait_for_process_exit "$worker_b_pid"
+
+rm -f "$capture_root/beekeeper.exec" "$capture_root/beekeeper.prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_PR_SHEPHERD_MAX_RUNS=1 \
+HIVEMIND_PR_SHEPHERD_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/pr-shepherd.sh" "$worktree_root/beekeeper" >/dev/null 2>&1 &
+pr_shepherd_pid="$!"
+
+wait_for_file "$capture_root/beekeeper.exec"
+wait_for_process_exit "$pr_shepherd_pid"
 
 PATH="$bin_root:$PATH" \
 CODEX_SANDBOX="" \
