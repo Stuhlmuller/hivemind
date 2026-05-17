@@ -20,6 +20,19 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          pythonEnv = pkgs.python312.withPackages (ps: with ps; [
+            fastapi
+            httpx
+            pytest
+            uvicorn
+            watchfiles
+          ]);
+          python3Compat = pkgs.writeShellScriptBin "python3" ''
+            exec ${pythonEnv}/bin/python "$@"
+          '';
+          python312Compat = pkgs.writeShellScriptBin "python3.12" ''
+            exec ${pythonEnv}/bin/python "$@"
+          '';
         in
         {
           default = pkgs.mkShell {
@@ -30,8 +43,17 @@
               gh
               git
               gnused
+              pythonEnv
+              python3Compat
+              python312Compat
               ripgrep
             ];
+
+            shellHook = ''
+              export PATH="${python312Compat}/bin:${python3Compat}/bin:${pythonEnv}/bin:$PATH"
+              export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
+              export HIVEMIND_DB_PATH="''${HIVEMIND_DB_PATH:-$PWD/.data/hivemind.db}"
+            '';
           };
         });
     };
