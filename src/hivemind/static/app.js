@@ -400,6 +400,7 @@ function renderAuth() {
 
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
+  $("#workspace-nav").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
   usernameInput.placeholder = state.setupComplete ? "username" : "local-admin";
