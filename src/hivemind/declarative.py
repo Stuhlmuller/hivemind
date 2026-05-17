@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 import sqlite3
 from typing import Any
 
-from hivemind.secret_refs import validate_secret_ref
+from hivemind.secret_refs import validate_external_credential_metadata, validate_external_secret_ref
 from hivemind.store import HivemindStore, StoreError, dumps, iso, loads, parse_dt, utcnow
 
 
@@ -238,7 +238,7 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
         seen.add(credential_id)
         secret_ref = _required_str(credential, "secret_ref", prefix)
         try:
-            validate_secret_ref(secret_ref)
+            validate_external_secret_ref(secret_ref)
         except ValueError as exc:
             raise DeclarativeConfigError(f"{prefix}.secret_ref {exc}") from exc
         policy = _mapping(credential.get("policy"), f"{prefix}.policy")
@@ -254,6 +254,10 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
             f"{prefix}.policy",
         )
         metadata = _metadata(credential.get("metadata", {}), f"{prefix}.metadata")
+        try:
+            validate_external_credential_metadata(metadata)
+        except ValueError as exc:
+            raise DeclarativeConfigError(f"{prefix}.metadata {exc}") from exc
         credentials.append(
             {
                 "id": credential_id,

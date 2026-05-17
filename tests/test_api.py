@@ -2320,12 +2320,32 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
     require_equal(response.status_code, 400, "raw secret-shaped config import should fail")
     require_equal(
         response.json()["detail"],
-        "credentials[0].secret_ref secret_ref must use env://, file://, vault://, or oauth://",
+        "credentials[0].secret_ref secret_ref must use env://, file://, vault://, oauth://, or secret://",
         "raw secret-shaped config import should explain the rejected secret ref",
     )
     require_true(
         all(item["id"] != "cred_bad" for item in client.get("/credentials").json()),
         "failed config import should not create credentials",
+    )
+
+    broker_secret_ref = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "secret://cred_bad",
+            }
+        ],
+    }
+    broker_response = client.post(
+        "/declarative-config/validate",
+        json={"config": broker_secret_ref},
+    )
+    require_equal(broker_response.status_code, 400, "client-supplied broker secret ref should fail")
+    require_equal(
+        broker_response.json()["detail"],
+        "credentials[0].secret_ref secret:// refs are broker-generated; provide secret_value for broker-managed storage",
+        "declarative config should preserve broker-managed secret ref invariant",
     )
 
     bad_metadata = {
@@ -2387,6 +2407,26 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         camel_response.json()["detail"],
         "credentials[0].metadata.safe.accessToken cannot contain secret material",
         "camelCase secret metadata validation should name the rejected key path",
+    )
+
+    managed_metadata = {
+        **bad_metadata,
+        "credentials": [
+            {
+                **bad_metadata["credentials"][0],
+                "metadata": {"credential_kind": "managed_secret"},
+            }
+        ],
+    }
+    managed_response = client.post(
+        "/declarative-config/validate",
+        json={"config": managed_metadata},
+    )
+    require_equal(managed_response.status_code, 400, "managed secret metadata validation should fail")
+    require_equal(
+        managed_response.json()["detail"],
+        "credentials[0].metadata managed_secret metadata is broker-generated; provide secret_value for broker-managed storage",
+        "declarative config should reject forged managed secret metadata",
     )
 
     bad_schedule_policy = {
