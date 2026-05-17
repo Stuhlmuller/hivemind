@@ -1508,6 +1508,7 @@ class HivemindStore:
         base_audit_metadata: Mapping[str, Any],
     ) -> str | None:
         with self.connect() as conn:
+            conn.execute(BEGIN_IMMEDIATE_SQL)
             denial = self.lease_request_rate_limit_denial(conn, credential=credential, agent_id=agent_id)
             if denial is not None:
                 self._insert_audit(
@@ -1538,6 +1539,31 @@ class HivemindStore:
             )
         return None
 
+    def record_lease_rate_limit_denial_if_limited(
+        self,
+        *,
+        credential: dict[str, Any],
+        agent_id: str,
+        credential_id: str,
+        normalized_action: str,
+        base_audit_metadata: Mapping[str, Any],
+    ) -> str | None:
+        with self.connect() as conn:
+            conn.execute(BEGIN_IMMEDIATE_SQL)
+            denial = self.lease_request_rate_limit_denial(conn, credential=credential, agent_id=agent_id)
+            if denial is None:
+                return None
+            self._insert_audit(
+                conn,
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                denial.reason,
+                {"action": normalized_action, **denial.metadata, **base_audit_metadata},
+            )
+            return denial.reason
+
     def resolve_broker_secret(self, credential_id: str, secret_box: SecretBox) -> str:
         credential = self.get_credential(credential_id)
         scheme, _, target = str(credential["secret_ref"]).partition("://")
@@ -1566,19 +1592,40 @@ class HivemindStore:
         credential = self.get_credential(credential_id)
         base_audit_metadata = dict(audit_metadata or {})
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
-        review = self._policy_engine.review_request(
-            PolicyReviewInput(
-                credential_id=credential_id,
-                credential_provider=credential["provider"],
-                allowed_agents=frozenset(loads(credential["allowed_agents"], [])),
-                allowed_actions=frozenset(loads(credential["allowed_actions"], [])),
-                require_intent=bool(credential["require_intent"]),
-                agent_id=agent_id,
-                action=action,
-                intent=intent,
-                credential_metadata=loads(credential["metadata"], {}),
-            )
+        review_input = PolicyReviewInput(
+            credential_id=credential_id,
+            credential_provider=credential["provider"],
+            allowed_agents=frozenset(loads(credential["allowed_agents"], [])),
+            allowed_actions=frozenset(loads(credential["allowed_actions"], [])),
+            require_intent=bool(credential["require_intent"]),
+            agent_id=agent_id,
+            action=action,
+            intent=intent,
+            credential_metadata=loads(credential["metadata"], {}),
         )
+        deterministic_review = self._policy_engine.review_deterministic_request(review_input)
+        normalized_action = deterministic_review.normalized_action
+        if not deterministic_review.allowed:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                deterministic_review.reason,
+                {"action": normalized_action, **base_audit_metadata},
+            )
+            raise StoreError(deterministic_review.reason)
+        error_detail = self.record_lease_rate_limit_denial_if_limited(
+            credential=credential,
+            agent_id=agent_id,
+            credential_id=credential_id,
+            normalized_action=normalized_action,
+            base_audit_metadata=base_audit_metadata,
+        )
+        if error_detail is not None:
+            raise StoreError(error_detail)
+
+        review = self._policy_engine.review_request(review_input)
         normalized_action = review.normalized_action
         if not review.allowed:
             self.audit(
@@ -1632,6 +1679,7 @@ class HivemindStore:
         error_detail: str | None = None
         result: dict[str, Any] | None = None
         with self.connect() as conn:
+            conn.execute(BEGIN_IMMEDIATE_SQL)
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
             if lease is None:
                 error_detail = "unknown credential lease token"

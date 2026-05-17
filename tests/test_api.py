@@ -783,6 +783,60 @@ def test_credential_lease_limit_applies_across_agents(tmp_path: Path) -> None:
     require_equal(second.json()["detail"], "credential lease request rate limit exceeded", "denial should name credential limit")
 
 
+def test_credential_lease_rate_limit_runs_before_provider_intent_review(tmp_path: Path) -> None:
+    reviewer = RecordingProviderReviewer()
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": reviewer},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Reviewed Limited Credential",
+            "provider": "github",
+            "secret_ref": "env://PROVIDER_REVIEW_LIMIT_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "agent_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe provider-backed triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for repeated provider-backed triage.",
+        },
+    )
+
+    require_equal(first.status_code, 201, "first lease should pass provider-backed review")
+    require_equal(second.status_code, 403, "second lease should be denied by rate limit")
+    require_equal(len(reviewer.requests), 1, "rate-limited requests should not spend provider review calls")
+    require_equal(second.json()["detail"], "agent lease request rate limit exceeded", "denial should name agent limit")
+
+
 def test_credential_action_limit_denies_before_consuming_second_lease(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -998,14 +1052,7 @@ def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None
         raise AssertionError("active lease request should issue a token")
 
     start = Barrier(3)
-    consume = Barrier(2)
-
-    class RacingStore(HivemindStore):
-        def _consume_credential_action(self, conn, lease, normalized_action, payload):
-            consume.wait(timeout=5)
-            return super()._consume_credential_action(conn, lease, normalized_action, payload)
-
-    stores = [RacingStore(db_path), RacingStore(db_path)]
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
 
     def perform(store: HivemindStore) -> tuple[str, object]:
         start.wait(timeout=5)

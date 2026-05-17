@@ -97,6 +97,33 @@ class CredentialService:
         ttl_seconds: int | None = None,
     ) -> CredentialLease:
         credential = self._vault.get(credential_id)
+        deterministic_review = self._policy_engine.review_deterministic_intent(
+            credential=credential,
+            agent_id=agent_id,
+            action=action,
+            intent=intent,
+        )
+        if not deterministic_review.allowed:
+            self._record_audit(
+                AuditEvent(
+                    type=LEASE_DENIED_EVENT,
+                    actor_id=agent_id,
+                    target_id=credential_id,
+                    decision="denied",
+                    reason=deterministic_review.reason,
+                    metadata={"action": deterministic_review.normalized_action},
+                )
+            )
+            raise CredentialError(deterministic_review.reason)
+
+        denial_reason = self._record_lease_request_rate_limit_denial_if_limited(
+            credential=credential,
+            agent_id=agent_id,
+            action=deterministic_review.normalized_action,
+        )
+        if denial_reason is not None:
+            raise CredentialError(denial_reason)
+
         review = self._policy_engine.review_intent(
             credential=credential,
             agent_id=agent_id,
@@ -112,27 +139,10 @@ class CredentialService:
                     target_id=credential_id,
                     decision="denied",
                     reason=review.reason,
-                    metadata={"action": action},
+                    metadata={"action": review.normalized_action},
                 )
             )
             raise CredentialError(review.reason)
-
-        denial_reason, denial_metadata = self._lease_request_rate_limit_denial(
-            credential=credential,
-            agent_id=agent_id,
-        )
-        if denial_reason is not None:
-            self._record_audit(
-                AuditEvent(
-                    type=LEASE_DENIED_EVENT,
-                    actor_id=agent_id,
-                    target_id=credential_id,
-                    decision="denied",
-                    reason=denial_reason,
-                    metadata={"action": review.normalized_action, **denial_metadata},
-                )
-            )
-            raise CredentialError(denial_reason)
 
         requested_ttl = ttl_seconds or credential.policy.max_ttl_seconds
         ttl = min(requested_ttl, credential.policy.max_ttl_seconds)
@@ -156,18 +166,33 @@ class CredentialService:
         )
 
         with self._lock:
-            self._leases[lease.id] = lease
-
-        self._record_audit(
-            AuditEvent(
-                type="credential.lease.pending" if requires_approval else "credential.lease.issued",
-                actor_id=agent_id,
-                target_id=credential_id,
-                decision="pending" if requires_approval else "allowed",
-                reason="action requires operator approval" if requires_approval else review.reason,
-                metadata={"action": lease.action, "ttl_seconds": ttl, "lease_id": lease.id},
+            denial_reason, denial_metadata = self._lease_request_rate_limit_denial(
+                credential=credential,
+                agent_id=agent_id,
             )
-        )
+            if denial_reason is not None:
+                self._audit_events.append(
+                    AuditEvent(
+                        type=LEASE_DENIED_EVENT,
+                        actor_id=agent_id,
+                        target_id=credential_id,
+                        decision="denied",
+                        reason=denial_reason,
+                        metadata={"action": review.normalized_action, **denial_metadata},
+                    )
+                )
+                raise CredentialError(denial_reason)
+            self._leases[lease.id] = lease
+            self._audit_events.append(
+                AuditEvent(
+                    type="credential.lease.pending" if requires_approval else "credential.lease.issued",
+                    actor_id=agent_id,
+                    target_id=credential_id,
+                    decision="pending" if requires_approval else "allowed",
+                    reason="action requires operator approval" if requires_approval else review.reason,
+                    metadata={"action": lease.action, "ttl_seconds": ttl, "lease_id": lease.id},
+                )
+            )
         return lease
 
     def perform_action(self, *, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -418,6 +443,32 @@ class CredentialService:
                 and event.created_at >= window_start
                 and (actor_id is None or event.actor_id == actor_id)
             )
+
+    def _record_lease_request_rate_limit_denial_if_limited(
+        self,
+        *,
+        credential: CredentialRecord,
+        agent_id: str,
+        action: str,
+    ) -> str | None:
+        with self._lock:
+            denial_reason, denial_metadata = self._lease_request_rate_limit_denial(
+                credential=credential,
+                agent_id=agent_id,
+            )
+            if denial_reason is None:
+                return None
+            self._audit_events.append(
+                AuditEvent(
+                    type=LEASE_DENIED_EVENT,
+                    actor_id=agent_id,
+                    target_id=credential.id,
+                    decision="denied",
+                    reason=denial_reason,
+                    metadata={"action": action, **denial_metadata},
+                )
+            )
+            return denial_reason
 
     def _consume_active_lease(self, *, lease: CredentialLease, action: str) -> CredentialLease | None:
         with self._lock:

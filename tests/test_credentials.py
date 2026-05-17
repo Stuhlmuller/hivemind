@@ -4,8 +4,10 @@ from datetime import datetime, timedelta, timezone
 from threading import Barrier, Thread
 import unittest
 
+from hivemind.config import IntentReviewerConfig
 from hivemind.credentials import CredentialError, CredentialService, CredentialVault
 from hivemind.models import CredentialPolicy, LeaseStatus
+from hivemind.policy import PolicyEngine, ProviderIntentReviewDecision, ProviderIntentReviewRequest
 
 
 def make_service(service_class: type[CredentialService] = CredentialService) -> CredentialService:
@@ -22,6 +24,15 @@ def make_service(service_class: type[CredentialService] = CredentialService) -> 
         ),
     )
     return service_class(vault)
+
+
+class RecordingProviderReviewer:
+    def __init__(self) -> None:
+        self.requests: list[ProviderIntentReviewRequest] = []
+
+    def review(self, request: ProviderIntentReviewRequest) -> ProviderIntentReviewDecision:
+        self.requests.append(request)
+        return ProviderIntentReviewDecision(allowed=True, reason="provider reviewer approved the request")
 
 
 class CredentialServiceTests(unittest.TestCase):
@@ -199,6 +210,50 @@ class CredentialServiceTests(unittest.TestCase):
         self.assertEqual(event.type, "credential.lease.denied")
         self.assertEqual(event.metadata["rate_limit"], "agent_lease_limit")
         self.assertNotIn("GITHUB_TOKEN", str(event.public_view()))
+
+    def test_agent_lease_request_limit_runs_before_provider_intent_review(self) -> None:
+        vault = CredentialVault()
+        vault.add(
+            credential_id="github.provider-limited",
+            name="GitHub Provider Limited",
+            provider="github",
+            secret_ref="env://GITHUB_TOKEN",  # nosec B106
+            policy=CredentialPolicy(
+                allowed_agents=frozenset({"agent.scout"}),
+                allowed_actions=frozenset({"read_repo"}),
+                agent_lease_limit=1,
+                rate_limit_window_seconds=60,
+            ),
+        )
+        reviewer = RecordingProviderReviewer()
+        service = CredentialService(
+            vault,
+            PolicyEngine(
+                IntentReviewerConfig(
+                    provider="openrouter",
+                    model="anthropic/claude-sonnet-4",
+                    credential_ref="env://OPENROUTER_API_KEY",
+                ),
+                provider_reviewers={"openrouter": reviewer},
+            ),
+        )
+
+        service.request_lease(
+            credential_id="github.provider-limited",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for provider-backed issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "agent lease request rate limit exceeded"):
+            service.request_lease(
+                credential_id="github.provider-limited",
+                agent_id="agent.scout",
+                action="read_repo",
+                intent="Read repository metadata for repeated provider-backed triage",
+            )
+
+        self.assertEqual(len(reviewer.requests), 1)
 
     def test_credential_action_limit_denies_before_second_action(self) -> None:
         vault = CredentialVault()
