@@ -263,9 +263,17 @@ function item(title, meta, pills = [], actions = "") {
   return `<article class="item"><strong>${escapeHtml(title)}</strong><div class="meta">${meta}</div>${pillMarkup}${actions}</article>`;
 }
 
-function optionList(items, labelKey = "name", includeEmpty = false) {
+function optionList(items, labelKey = "name", includeEmpty = false, includeId = false) {
   const empty = includeEmpty ? '<option value="">None</option>' : "";
-  return empty + items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item[labelKey])}</option>`).join("");
+  return (
+    empty +
+    items
+      .map((item) => {
+        const label = includeId ? `${item[labelKey]} (${item.id})` : item[labelKey];
+        return `<option value="${escapeHtml(item.id)}">${escapeHtml(label)}</option>`;
+      })
+      .join("")
+  );
 }
 
 function currentPage() {
@@ -350,13 +358,13 @@ function renderSelectors() {
     '#credential-form select[name="allowed_agents"]',
     '#codex-oauth-form select[name="allowed_agents"]',
   ]) {
-    $(selector).innerHTML = optionList(state.agents);
+    $(selector).innerHTML = optionList(state.agents, "name", false, true);
   }
   for (const selector of [
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
   ]) {
-    $(selector).innerHTML = optionList(state.agents, "name", true);
+    $(selector).innerHTML = optionList(state.agents, "name", true, true);
   }
   for (const selector of [
     '#lease-form select[name="credential_id"]',

@@ -247,6 +247,8 @@ class HivemindStore:
                 );
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_agent_id ON tasks(assigned_agent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_schedules_assigned_agent_id ON schedules(assigned_agent_id)")
             self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
             self._migrate_legacy_agent_statuses(conn)
@@ -421,7 +423,8 @@ class HivemindStore:
 
     def list_agents(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [self.public_agent(conn, row) for row in conn.execute("SELECT * FROM agents ORDER BY created_at DESC")]
+            rows = conn.execute("SELECT * FROM agents ORDER BY created_at DESC").fetchall()
+            return self.public_agents(conn, rows)
 
     def create_agent(self, data: dict[str, Any], *, actor_id: str = "user") -> dict[str, Any]:
         now = iso()
@@ -469,49 +472,66 @@ class HivemindStore:
         self.audit("agent.status.updated", actor_id, agent_id, "allowed", f"agent marked {normalized_status}", {"status": normalized_status})
         return self.get_agent(agent_id)
 
-    def public_agent(self, conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-        agent = dict(row)
-        agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
-        agent_id = agent["id"]
-        assigned_tasks = [
-            {
-                "id": task_row["id"],
-                "title": task_row["title"],
-                "status": task_row["status"],
-                "priority": task_row["priority"],
-                "updated_at": task_row["updated_at"],
-            }
-            for task_row in conn.execute(
-                """
-                SELECT id, title, status, priority, updated_at
-                FROM tasks
-                WHERE assigned_agent_id = ?
-                ORDER BY updated_at DESC, created_at DESC
-                """,
-                (agent_id,),
+    def public_agents(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[sqlite3.Row] | list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        agents = [dict(row) for row in rows]
+        if not agents:
+            return []
+        agent_ids = [str(agent["id"]) for agent in agents]
+        agent_ids_json = dumps(agent_ids)
+        assigned_tasks_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for task_row in conn.execute(
+            """
+            SELECT tasks.assigned_agent_id, tasks.id, tasks.title, tasks.status, tasks.priority, tasks.updated_at
+            FROM tasks
+            JOIN json_each(?) AS requested_agents
+              ON tasks.assigned_agent_id = requested_agents.value
+            ORDER BY tasks.updated_at DESC, tasks.created_at DESC
+            """,
+            (agent_ids_json,),
+        ):
+            assigned_tasks_by_agent[str(task_row["assigned_agent_id"])].append(
+                {
+                    "id": task_row["id"],
+                    "title": task_row["title"],
+                    "status": task_row["status"],
+                    "priority": task_row["priority"],
+                    "updated_at": task_row["updated_at"],
+                }
             )
-        ]
-        assigned_schedules = [
-            {
-                "id": schedule_row["id"],
-                "name": schedule_row["name"],
-                "enabled": bool(schedule_row["enabled"]),
-                "interval_seconds": schedule_row["interval_seconds"],
-                "next_run_at": schedule_row["next_run_at"],
-                "task_title": schedule_row["task_title"],
-            }
-            for schedule_row in conn.execute(
-                """
-                SELECT id, name, enabled, interval_seconds, next_run_at, task_title
-                FROM schedules
-                WHERE assigned_agent_id = ?
-                ORDER BY updated_at DESC, created_at DESC
-                """,
-                (agent_id,),
+        assigned_schedules_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for schedule_row in conn.execute(
+            """
+            SELECT schedules.assigned_agent_id, schedules.id, schedules.name, schedules.enabled, schedules.interval_seconds, schedules.next_run_at, schedules.task_title
+            FROM schedules
+            JOIN json_each(?) AS requested_agents
+              ON schedules.assigned_agent_id = requested_agents.value
+            ORDER BY schedules.updated_at DESC, schedules.created_at DESC
+            """,
+            (agent_ids_json,),
+        ):
+            assigned_schedules_by_agent[str(schedule_row["assigned_agent_id"])].append(
+                {
+                    "id": schedule_row["id"],
+                    "name": schedule_row["name"],
+                    "enabled": bool(schedule_row["enabled"]),
+                    "interval_seconds": schedule_row["interval_seconds"],
+                    "next_run_at": schedule_row["next_run_at"],
+                    "task_title": schedule_row["task_title"],
+                }
             )
-        ]
-        credential_policies = [
-            {
+        credential_policies_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for credential_row in conn.execute(
+            """
+            SELECT id, name, provider, allowed_agents, allowed_actions, max_ttl_seconds, require_intent
+            FROM credentials
+            ORDER BY created_at DESC
+            """
+        ):
+            policy = {
                 "id": credential_row["id"],
                 "name": credential_row["name"],
                 "provider": credential_row["provider"],
@@ -519,15 +539,32 @@ class HivemindStore:
                 "max_ttl_seconds": credential_row["max_ttl_seconds"],
                 "require_intent": bool(credential_row["require_intent"]),
             }
-            for credential_row in conn.execute(
-                """
-                SELECT id, name, provider, allowed_agents, allowed_actions, max_ttl_seconds, require_intent
-                FROM credentials
-                ORDER BY created_at DESC
-                """
+            for allowed_agent_id in loads(credential_row["allowed_agents"], []):
+                if allowed_agent_id in credential_policies_by_agent:
+                    credential_policies_by_agent[allowed_agent_id].append(policy)
+        return [
+            self._build_public_agent(
+                row=agent,
+                assigned_tasks=assigned_tasks_by_agent[agent["id"]],
+                assigned_schedules=assigned_schedules_by_agent[agent["id"]],
+                credential_policies=credential_policies_by_agent[agent["id"]],
             )
-            if agent_id in loads(credential_row["allowed_agents"], [])
+            for agent in agents
         ]
+
+    def public_agent(self, conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return self.public_agents(conn, [row])[0]
+
+    def _build_public_agent(
+        self,
+        *,
+        row: sqlite3.Row | dict[str, Any],
+        assigned_tasks: list[dict[str, Any]],
+        assigned_schedules: list[dict[str, Any]],
+        credential_policies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        agent = dict(row)
+        agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
         agent["assigned_task_count"] = len(assigned_tasks)
         agent["active_task_count"] = sum(1 for task in assigned_tasks if task["status"] not in FINAL_TASK_STATUSES)
         agent["assigned_schedule_count"] = len(assigned_schedules)

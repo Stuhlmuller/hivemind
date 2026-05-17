@@ -213,6 +213,27 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
 
+
+def test_unknown_lease_agent_is_rejected(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": "agent_missing",
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 403, "unknown lease agent should be rejected")
+    require_equal(response.json()["detail"], "unknown agent: agent_missing", "lease rejection should explain the missing agent")
+
+
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
