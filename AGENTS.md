@@ -88,7 +88,9 @@ unless the user explicitly changes scope. Default toward backlog conservation:
 prefer refining, de-duplicating, or ranking existing issues when the backlog
 already has actionable work. File at most one new issue for a broad idea run
 unless the user explicitly asks for more, and file none when the candidate
-would be duplicate, speculative, or lower value than existing open work.
+would be duplicate, speculative, or lower value than existing open work. New or
+refined issues must carry an appropriate classification label such as
+`security`, `bug`, `enhancement`, or a more specific existing repository label.
 
 Git workflow rule: use the project-local `hivemind-git-commits` skill before
 staging, committing, or pushing Hivemind changes so branch scope, commit
