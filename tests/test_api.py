@@ -102,6 +102,8 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert 'data-page-link="credentials"' in response.text
     assert "credential broker" in response.text
+    assert 'id="credential-template-picker"' in response.text
+    assert 'id="credential-template-fields"' in response.text
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
@@ -187,6 +189,40 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+
+
+def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "GitHub App Install",
+            "provider": "github",
+            "secret_ref": "file:///var/lib/hivemind/github-app.pem",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["issue_installation_token", "read_repo"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {
+                "credential_kind": "github_app",
+                "app_id": "123456",
+                "installation_id": "987654321",
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    credential = response.json()
+    assert credential["provider"] == "github"
+    assert credential["metadata"]["credential_kind"] == "github_app"
+    assert credential["metadata"]["app_id"] == "123456"
+    assert credential["metadata"]["installation_id"] == "987654321"
+    assert credential["policy"]["allowed_agents"] == [agent["id"]]
+    assert credential["secret_ref_preview"].startswith("file://")
+    assert "github-app.pem" not in response.text
 
 
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
@@ -306,6 +342,37 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
+
+
+def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    oauth_response = client.post(
+        "/credentials",
+        json={
+            "name": "Broken OAuth App",
+            "provider": "github",
+            "secret_ref": "file:///var/lib/hivemind/github-oauth-app.ref",
+            "allowed_actions": ["exchange_oauth_code"],
+            "metadata": {"credential_kind": "github_oauth_app"},
+        },
+    )
+    assert oauth_response.status_code == 400
+    assert oauth_response.json()["detail"] == "github_oauth_app metadata requires client_id"
+
+    app_response = client.post(
+        "/credentials",
+        json={
+            "name": "Broken GitHub App",
+            "provider": "github",
+            "secret_ref": "file:///var/lib/hivemind/github-app.pem",
+            "allowed_actions": ["issue_installation_token"],
+            "metadata": {"credential_kind": "github_app", "installation_id": "987654321"},
+        },
+    )
+    assert app_response.status_code == 400
+    assert app_response.json()["detail"] == "github_app metadata requires app_id"
 
 
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:

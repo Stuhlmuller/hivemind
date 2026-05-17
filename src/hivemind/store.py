@@ -393,22 +393,77 @@ class HivemindStore:
         with self.connect() as conn:
             return [self.public_credential(row) for row in conn.execute("SELECT * FROM credentials ORDER BY created_at DESC")]
 
+    def require_guided_credential_fields(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        metadata: dict[str, Any],
+        fields: tuple[str, ...],
+    ) -> None:
+        if provider != "github":
+            raise StoreError(f"{kind} credentials must use provider github")
+        for field in fields:
+            if not metadata.get(field):
+                raise StoreError(f"{kind} metadata requires {field}")
+
+    def normalize_credential_metadata(self, provider: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in (metadata or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    continue
+            normalized[key] = value
+        kind = normalized.get("credential_kind")
+        if kind is None:
+            return normalized
+        kind = str(kind).strip().lower()
+        normalized["credential_kind"] = kind
+        if kind not in {"generic_reference", "github_oauth_app", "github_app"}:
+            raise StoreError(f"unsupported credential_kind: {kind}")
+        if kind == "github_oauth_app":
+            self.require_guided_credential_fields(
+                kind=kind,
+                provider=provider,
+                metadata=normalized,
+                fields=("client_id",),
+            )
+        elif kind == "github_app":
+            self.require_guided_credential_fields(
+                kind=kind,
+                provider=provider,
+                metadata=normalized,
+                fields=("app_id", "installation_id"),
+            )
+        return normalized
+
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         now = iso()
         actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
-        agents = sorted(set(data.get("allowed_agents") or []))
+        agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
+        provider = str(data["provider"]).strip().lower()
+        name = str(data["name"]).strip()
+        secret_ref = str(data["secret_ref"]).strip()
+        metadata = self.normalize_credential_metadata(provider, data.get("metadata"))
         if not actions:
             raise StoreError("credential must allow at least one action")
+        if not name:
+            raise StoreError("credential name is required")
+        if not provider:
+            raise StoreError("provider is required")
         row = {
             "id": data.get("id") or f"cred_{secrets.token_urlsafe(8)}",
-            "name": data["name"],
-            "provider": data["provider"],
-            "secret_ref": data["secret_ref"],
+            "name": name,
+            "provider": provider,
+            "secret_ref": secret_ref,
             "allowed_agents": dumps(agents),
             "allowed_actions": dumps(actions),
             "max_ttl_seconds": int(data.get("max_ttl_seconds") or 300),
             "require_intent": 1 if data.get("require_intent", True) else 0,
-            "metadata": dumps(data.get("metadata") or {}),
+            "metadata": dumps(metadata),
             "created_at": now,
             "updated_at": now,
         }

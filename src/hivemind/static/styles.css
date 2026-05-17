@@ -363,6 +363,37 @@ main {
   gap: 10px;
 }
 
+.callout,
+.policy-shell {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(17, 23, 34, 0.88);
+  padding: 12px;
+}
+
+.callout p,
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.callout code,
+.field-hint code {
+  color: var(--cyan);
+  font-family: var(--mono);
+}
+
+.field-hint {
+  margin-top: -4px;
+  font-family: var(--sans);
+}
+
+.policy-shell {
+  gap: 10px;
+}
+
 .two-col {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -482,6 +513,42 @@ select[multiple] {
   color: var(--green);
 }
 
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.template-card {
+  display: grid;
+  gap: 6px;
+  min-height: 104px;
+  align-content: start;
+  text-align: left;
+  border-color: var(--line);
+  color: var(--text);
+  background: #080c12;
+  padding: 12px;
+}
+
+.template-card strong {
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.template-card span {
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.template-card.active {
+  border-color: var(--cyan);
+  background: rgba(103, 232, 249, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.2);
+}
+
 #toast {
   position: fixed;
   right: 16px;
@@ -532,6 +599,10 @@ select[multiple] {
 
   .metrics {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
+
+  .template-grid {
+    grid-template-columns: 1fr;
   }
 }
 

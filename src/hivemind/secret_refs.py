@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 ALLOWED_SECRET_REF_SCHEMES = ("env", "file", "vault", "oauth")
-SECRET_REF_ERROR = "secret_ref must use env://, file://, vault://, or oauth://"
+SECRET_REF_ERROR = "secret_ref must use env://, file://, vault://, or oauth://"  # nosec B105
 
 
 def validate_secret_ref(secret_ref: str) -> str:
