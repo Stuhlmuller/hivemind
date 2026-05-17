@@ -19,7 +19,7 @@ Before doing any other work:
 
 1. Start with `gh issue list --state all --limit 100`.
 2. Prefer existing issues and work exactly one issue at a time.
-3. If the repository has no issues, create exactly 8 improvement issues and 2 feature-request issues with concrete problem, why, expected outcome, and codebase evidence.
+3. If the repository has no issues, create exactly 3 improvement issues and 1 feature-request issue with concrete problem, why, expected outcome, and codebase evidence.
 
 ## Task branch workflow
 
@@ -41,7 +41,7 @@ Before doing any other work:
 
 1. After selecting one issue and moving into its dedicated worktree, delegate aggressively if available.
 2. Use as many concurrent bounded subagents as safe for concrete disjoint tasks on that issue.
-3. Keep reviewer coverage at least even with worker coverage, and keep future-feature-request drafting lanes ahead of worker coverage while real backlog gaps remain. QA tester and issue-finder lanes can be opportunistic.
+3. Keep reviewer coverage at least even with worker coverage. Run future-feature-request drafting only when the current backlog lacks actionable feature work. QA tester and issue-finder lanes can be opportunistic.
 4. Prefer explorer subagents for reconnaissance, risk review, test gaps, and feature-request drafting. Prefer worker subagents only for explicit disjoint write scopes.
 5. The top-level run owns issue selection, worktree and branch state, final validation, commits, pushes, PR actions, merge decisions, and final decisions about any drafted backlog issues.
 6. No subagent may create another implementation branch or PR or start coding a second issue. Backlog drafting is allowed; implementation stays on the current issue branch.
@@ -60,6 +60,7 @@ Before doing any other work:
 ## Quality bar
 
 - Be critical, not cosmetic.
+- Prefer refining, de-duplicating, ranking, or closing existing issues over opening new ones when the backlog is already actionable.
 - Prefer issues grounded in reliability, testing, security, error handling, release safety, observability, performance, onboarding, documentation, or UX gaps.
 - Do not file vague tickets.
 - Keep `flake.nix` and `.agents/TOOLS.md` aligned for the run.
