@@ -373,10 +373,8 @@ main {
 
 .callout,
 .policy-shell {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(17, 23, 34, 0.88);
-  padding: 12px;
+  border-left: 2px solid var(--line-strong);
+  padding: 2px 0 2px 12px;
 }
 
 .callout p,
@@ -404,10 +402,8 @@ main {
 
 .subpanel {
   margin-bottom: 14px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #0a0f16;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--line-strong);
 }
 
 .inline-heading {

@@ -35,12 +35,11 @@
             <span></span><span></span><span></span>
             <strong>bootstrap</strong>
           </div>
-          <pre>hivemind init
-runtime: local
+          <pre>runtime: local
 db: sqlite
 auth: username/password
 secrets: references only
-agents: brokered capabilities</pre>
+leases: scoped + ttl</pre>
         </div>
         <form id="auth-form" class="panel stack">
           <div class="panel-heading">
@@ -81,7 +80,7 @@ agents: brokered capabilities</pre>
               <code id="surface-line">runtime overview / agents, tasks, schedules</code>
             </div>
             <div class="side-section">
-              <p>intent reviewer</p>
+              <p>policy checks</p>
               <code id="reviewer-config">loading</code>
             </div>
             <div class="side-section">
@@ -97,7 +96,7 @@ agents: brokered capabilities</pre>
                   <p class="eyebrow">overview</p>
                   <h2>runtime surface</h2>
                 </div>
-                <p>agents, tasks, schedules, and the live audit stream stay in the main control surface.</p>
+                <p>agents, tasks, schedules, and audit events share the main runtime surface.</p>
               </div>
 
               <section class="metrics" aria-label="Runtime summary">
@@ -161,6 +160,17 @@ agents: brokered capabilities</pre>
                       <label>interval seconds<input name="interval_seconds" type="number" min="60" value="3600" /></label>
                       <label>agent<select name="assigned_agent_id"></select></label>
                     </div>
+                    <div class="two-col">
+                      <label>
+                        catch-up policy
+                        <select name="catch_up_policy">
+                          <option value="run_once">run once / reset cadence</option>
+                          <option value="skip_missed">skip missed / keep cadence</option>
+                          <option value="backfill">backfill every missed run</option>
+                        </select>
+                      </label>
+                      <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
+                    </div>
                     <label>task title<input name="task_title" value="scheduled policy review" autocomplete="off" /></label>
                     <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
                     <div class="two-col">
@@ -168,7 +178,6 @@ agents: brokered capabilities</pre>
                       <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
-                    <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
                     <button type="submit">create schedule</button>
                   </form>
                   <button id="run-due-button" type="button">run due</button>
@@ -191,7 +200,7 @@ agents: brokered capabilities</pre>
                   <p class="eyebrow">credentials</p>
                   <h2>credential broker</h2>
                 </div>
-                <p>policy creation, JIT lease issuance, brokered actions, and credential-only audit live on their own surface.</p>
+                <p>credential policy, JIT lease requests, lease action checks, and credential audit events are grouped here.</p>
               </div>
 
               <section class="metrics credential-metrics" aria-label="Credential summary">
@@ -236,7 +245,7 @@ agents: brokered capabilities</pre>
                 <div class="panel">
                   <div class="panel-heading">
                     <h2>create policy</h2>
-                    <p>guided refs + broker policy</p>
+                    <p>secret refs + policy</p>
                   </div>
                   <section class="callout">
                     <p class="eyebrow">broker boundary</p>
@@ -313,16 +322,16 @@ agents: brokered capabilities</pre>
 
                 <div class="panel panel-span-2">
                   <div class="panel-heading">
-                    <h2>broker action</h2>
-                    <p>lease token required</p>
+                    <h2>lease action check</h2>
+                    <p>token + action match</p>
                   </div>
                   <form id="action-form" class="stack">
                     <label>lease token<input name="lease_token" placeholder="hvl_..." autocomplete="off" /></label>
                     <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
                     <label>payload<textarea name="payload" rows="5">{"repo":"hivemind"}</textarea></label>
-                    <button type="submit">execute</button>
+                    <button type="submit">check lease</button>
                   </form>
-                  <pre id="action-result" class="result">no action</pre>
+                  <pre id="action-result" class="result">no check</pre>
                 </div>
 
                 <section class="panel panel-span-2">
