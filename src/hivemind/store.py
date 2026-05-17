@@ -874,7 +874,8 @@ class HivemindStore:
         }
 
     def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str | None, dict[str, Any]]:
-        self.get_agent(agent_id)
+        with self.connect() as conn:
+            self.get_agent_row(conn, agent_id)
         credential = self.get_credential(credential_id)
         allowed_agents = set(loads(credential["allowed_agents"], []))
         allowed_actions = set(loads(credential["allowed_actions"], []))
