@@ -1308,6 +1308,35 @@ def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
     require_equal(metadata["skipped_run_count"], 0, "backfill should defer rather than skip excess missed slots")
 
 
+def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Malformed persisted schedule",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    with sqlite3.connect(tmp_path / "hivemind.db") as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", ("0-not-a-date", schedule["id"]))
+
+    run_response = client.post("/schedules/run-due")
+
+    require_equal(run_response.status_code, 400, "malformed persisted schedule timestamps should return a clean 4xx")
+    require_equal(
+        run_response.json()["detail"],
+        "schedule next_run_at must be a valid ISO datetime",
+        "malformed schedule timestamps should not leak parser internals",
+    )
+
+
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -1375,6 +1404,27 @@ def test_schedule_creation_rejects_naive_next_run_at(tmp_path: Path) -> None:
         response.json()["detail"],
         "schedule next_run_at must include a timezone",
         "schedule timestamp errors should explain the missing timezone",
+    )
+
+
+def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Malformed schedule timestamp",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "not-a-date",
+        },
+    )
+    require_equal(response.status_code, 400, "schedule creation should reject malformed next_run_at")
+    require_equal(
+        response.json()["detail"],
+        "schedule next_run_at must be a valid ISO datetime",
+        "schedule timestamp errors should not leak parser internals",
     )
 
 

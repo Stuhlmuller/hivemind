@@ -39,7 +39,10 @@ def parse_dt(value: str | None) -> datetime | None:
 
 
 def require_aware_utc(value: str, *, field_name: str) -> datetime:
-    parsed = parse_dt(value)
+    try:
+        parsed = parse_dt(value)
+    except (TypeError, ValueError) as exc:
+        raise StoreError(f"schedule {field_name} must be a valid ISO datetime") from exc
     if parsed is None:
         raise StoreError(f"schedule {field_name} is required")
     if parsed.tzinfo is None or parsed.utcoffset() is None:

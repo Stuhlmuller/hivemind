@@ -371,6 +371,16 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
                 secret_box=secret_box,
                 actor_id=user.id,
             )
+        except (OAuthConfigurationError, StoreError) as exc:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                str(exc),
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", str(exc))
         except (ValueError, httpx.HTTPError) as exc:
             db.audit(
                 OAUTH_FAILED_EVENT,
@@ -484,7 +494,10 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/schedules/run-due")
     def run_due_schedules(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return {"created_tasks": db.run_due_schedules_once()}
+        try:
+            return {"created_tasks": db.run_due_schedules_once()}
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/audit-events")
     def list_audit_events(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
