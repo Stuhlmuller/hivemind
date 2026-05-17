@@ -33,6 +33,14 @@ Before doing any other work:
 7. Open at most 2 new issues per run unless the backlog is empty.
 8. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
 
+## Subagent Workflow
+
+1. For every real scout run, spawn at least two bounded subagents if delegation is available:
+   - one to audit code, tests, and security or reliability gaps
+   - one to audit docs, automation, CI, and backlog duplication
+2. Synthesize the findings yourself before opening or editing issues.
+3. Subagents may gather evidence or draft issue candidates, but the top-level scout loop decides what to file and posts the final issue bodies.
+
 ## Non-goals
 
 - Do not start an implementation branch.

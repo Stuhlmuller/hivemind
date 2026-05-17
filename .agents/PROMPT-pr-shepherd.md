@@ -33,6 +33,14 @@ Before doing any other work:
 6. Run focused verification and `qlty check` on changed files before pushing CI fixes.
 7. Prefer unblocking the queue over doing new feature work.
 
+## Subagent Workflow
+
+1. For each PR you actively triage, spawn at least one bounded subagent if delegation is available.
+2. Prefer an explorer-style subagent to inspect failing checks, log output, and regression risk before you touch the branch.
+3. If the review worktree owns the branch and the fix is isolated, you may spawn one worker-style subagent for a disjoint patch while the top-level loop handles GitHub state.
+4. Keep merge decisions, PR comments or updates, and final branch pushes in the top-level PR shepherd loop.
+5. Do not spawn subagents onto a branch that is already being actively owned by a worker worktree.
+
 ## Non-goals
 
 - Do not open new feature branches from scratch.

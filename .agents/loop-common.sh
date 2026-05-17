@@ -179,11 +179,22 @@ pid_is_running() {
 run_codex_exec() {
   local run_root="$1"
   local prompt_file="$2"
-  shift 2
+  local shared_prompt_file=""
   local prompt_text
   local -a cmd
 
-  prompt_text="$(<"$prompt_file")"
+  if [[ "$#" -ge 3 ]]; then
+    shared_prompt_file="$3"
+    shift 3
+  else
+    shift 2
+  fi
+
+  if [[ -n "$shared_prompt_file" ]]; then
+    prompt_text="$(<"$shared_prompt_file")"$'\n\n'"$(<"$prompt_file")"
+  else
+    prompt_text="$(<"$prompt_file")"
+  fi
   cmd=(codex exec -C "$run_root" -s danger-full-access)
 
   if [[ "$#" -gt 0 ]]; then

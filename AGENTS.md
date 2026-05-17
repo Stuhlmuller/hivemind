@@ -29,10 +29,6 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
-Commit signing rule: every git commit for this repository must be signed.
-Unsigned commits are not acceptable because policy checks reject them. If
-signing fails, stop and fix signing before creating, amending, or pushing more
-commits.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
@@ -40,12 +36,6 @@ CLI set for the run, inspect issues with `gh issue list --state all --limit
 100` before choosing issue-driven work, use one issue per branch and PR, and
 state the blocker explicitly if GitHub access is unavailable in the current
 environment.
-
-Publish rule: when explicitly asked to stage, commit, push, and open a PR in
-one flow, use the `yeet` skill instead of improvising an ad hoc git/gh
-sequence. Keep its safety checks around scope confirmation, intentional
-staging, and draft PR creation. Do not treat `yeet` as an automatic merge
-shortcut; merge only after checks pass and the review state is acceptable.
 
 Quality rule: before finishing code changes, run Qlty from the repo root against
 the scope you touched. At minimum run `qlty check` on changed files. Use
@@ -89,7 +79,6 @@ during multi-step work on any Hivemind branch. Prefer small signed checkpoint
 commits after each meaningful feature slice, security boundary change,
 verification milestone, or coherent refactor instead of waiting until the end
 of the branch.
-
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
@@ -97,15 +86,16 @@ software; use username/password local auth, not email-first SaaS account flows.
 Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
 `.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
 must require working `gh`, run with GitHub-capable network access, move work
-onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
-reuse the primary checkout or repurpose a worktree via local issue-branch
-checkout, and fail when the wrapper cannot verify those rules.
+onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
+that branch behavior.
 
 Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
 changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
 `.agents/role-loop.sh`, `.agents/scout-loop.sh`,
 `.agents/worker-loop-a.sh`, `.agents/worker-loop-b.sh`,
-`.agents/pr-shepherd.sh`, or the `PROMPT-*.md` loop prompts. The GitHub swarm
-must keep dedicated worktrees per role, split development workers across
-deterministic issue lanes, and reserve PR merging and cross-branch CI cleanup
+`.agents/pr-shepherd.sh`, `.agents/swarm-launchd.sh`, or the `PROMPT-*.md`
+loop prompts. The GitHub swarm must keep dedicated worktrees per role, split
+development workers across deterministic issue lanes, use bounded subagents
+within each loop when useful, support an endless supervisor mode for
+laptop-open development, and reserve PR merging and cross-branch CI cleanup
 for the PR shepherd loop.
