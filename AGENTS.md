@@ -46,6 +46,10 @@ one flow, use the `yeet` skill instead of improvising an ad hoc git/gh
 sequence. Keep its safety checks around scope confirmation, intentional
 staging, and draft PR creation. Do not treat `yeet` as an automatic merge
 shortcut; merge only after checks pass and the review state is acceptable.
+PR sync rule: use the project-local `hivemind-pr-sync` skill before opening,
+updating, or asking for review on a pull request. Branches must include the
+latest `origin/main`, and conflicts must be resolved locally before PR
+handoff.
 
 Quality rule: before finishing code changes, run Qlty from the repo root against
 the scope you touched. At minimum run `qlty check` on changed files. Use
