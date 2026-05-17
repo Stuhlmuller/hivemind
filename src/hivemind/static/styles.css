@@ -352,6 +352,10 @@ main {
   grid-column: span 2;
 }
 
+.panel-span-3 {
+  grid-column: 1 / -1;
+}
+
 .panel {
   padding: 14px;
 }
@@ -599,6 +603,48 @@ select[multiple] {
   color: var(--red);
 }
 
+.status-chip[data-state="warning"] {
+  border-color: rgba(234, 179, 8, 0.35);
+  background: rgba(234, 179, 8, 0.12);
+  color: var(--yellow);
+}
+
+.health-status {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-line span:first-child {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.runtime-metrics {
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  margin-bottom: 14px;
+}
+
+.health-lists {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .oauth-note {
   margin: 0;
 }
@@ -695,8 +741,16 @@ select[multiple] {
     grid-column: auto;
   }
 
+  .panel-span-3 {
+    grid-column: auto;
+  }
+
   .metrics {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
+
+  .health-lists {
+    grid-template-columns: 1fr;
   }
 
   .template-grid {
@@ -720,6 +774,7 @@ select[multiple] {
   }
 
   .metrics,
+  .runtime-metrics,
   .two-col {
     grid-template-columns: 1fr;
   }

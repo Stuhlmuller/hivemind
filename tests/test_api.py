@@ -5,6 +5,8 @@ import sqlite3
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
+import logging
 from pathlib import Path
 from threading import Barrier, Event
 from time import sleep
@@ -374,6 +376,17 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert 'id="credential-template-fields"' in response.text
     assert 'name="approval_required_actions"' in response.text
     assert 'id="pending-approvals-list"' in response.text
+
+
+def test_overview_surface_includes_runtime_health_panel(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="runtime-health-panel"' in response.text
+    assert 'id="runtime-stale-heartbeats-count"' in response.text
+    assert 'id="runtime-due-schedules-count"' in response.text
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
@@ -2731,6 +2744,136 @@ def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) ->
         "schedule next_run_at must be a valid ISO datetime",
         "malformed schedule timestamps should not leak parser internals",
     )
+
+
+def test_health_reports_db_and_scheduler_state(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["db"]["status"] == "ok"
+    assert response.json()["scheduler"]["status"] == "disabled"
+
+
+def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    store = HivemindStore(tmp_path / "health.db")
+    app = create_app(store, start_scheduler=False)
+
+    def broken_ping() -> None:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(store, "ping", broken_ping)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "error"
+    assert response.json()["db"]["status"] == "error"
+    assert response.json()["db"]["detail"] == "unable to open database file"
+
+
+def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_and_failed_tasks(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "runtime.db")
+    client = TestClient(create_app(store, start_scheduler=False))
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Inspect repository state for runtime health reporting.",
+            "ttl_seconds": 300,
+        },
+    )
+    assert lease_response.status_code == 201
+
+    running_task = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat-bound task",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    client.patch(f"/tasks/{running_task['id']}/status", json={"status": "running"})
+    failed_task = client.post(
+        "/tasks",
+        json={
+            "title": "Failed task",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+    client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Overdue review",
+            "interval_seconds": 60,
+            "task_title": "Scheduled review",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    assert schedule_response.status_code == 201
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", running_task["id"]),
+        )
+
+    response = client.get("/runtime/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["counts"] == {
+        "active_leases": 1,
+        "due_schedules": 1,
+        "stale_heartbeats": 1,
+        "failed_tasks": 1,
+    }
+    assert payload["scheduler"]["status"] == "disabled"
+    assert payload["due_schedules"][0]["name"] == "Overdue review"
+    assert payload["due_schedules"][0]["overdue_seconds"] > 0
+    assert payload["stale_heartbeats"][0]["id"] == running_task["id"]
+    assert payload["stale_heartbeats"][0]["overdue_seconds"] > 0
+    assert payload["failed_tasks"][0]["id"] == failed_task["id"]
+
+
+def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, caplog) -> None:
+    store = HivemindStore(tmp_path / "audit.db")
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
+
+    store.audit(
+        "credential.lease.issued",
+        "agent_demo",
+        "cred_demo",
+        "allowed",
+        "lease granted",
+        {
+            "action": "read_repo",
+            "lease_token": "hvl_secret_token",
+            "secret_ref": "env://demo-ref",
+        },
+    )
+
+    records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
+
+    assert records[-1]["event"] == "audit.decision"
+    assert records[-1]["type"] == "credential.lease.issued"
+    assert records[-1]["metadata"]["action"] == "read_repo"
+    assert records[-1]["metadata"]["lease_token"] == "[redacted]"
+    assert records[-1]["metadata"]["secret_ref"] == "[redacted]"
+    assert "hvl_secret_token" not in caplog.text
+    assert "demo-ref" not in caplog.text
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:

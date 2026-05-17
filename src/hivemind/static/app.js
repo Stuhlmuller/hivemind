@@ -11,6 +11,7 @@ const state = {
   schedules: [],
   heartbeats: [],
   auditEvents: [],
+  runtime: null,
   selectedCredentialTemplate: "github_oauth_app",
 };
 
@@ -353,6 +354,31 @@ function currentPage() {
   return window.location.pathname.startsWith(ROUTES.credentials) ? "credentials" : "overview";
 }
 
+function statusChipState(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (["ok", "ready", "running"].includes(normalized)) return "ready";
+  if (["error", "stopped"].includes(normalized)) return "error";
+  return "warning";
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds || 0);
+  if (value >= 86400) return `${Math.floor(value / 86400)}d`;
+  if (value >= 3600) return `${Math.floor(value / 3600)}h`;
+  if (value >= 60) return `${Math.floor(value / 60)}m`;
+  return `${value}s`;
+}
+
+function setStatusChip(selector, status) {
+  const node = $(selector);
+  node.textContent = status || "unknown";
+  node.dataset.state = statusChipState(status);
+}
+
+function renderHealthList(selector, items, emptyText, renderItem) {
+  $(selector).innerHTML = items.length ? items.map(renderItem).join("") : `<p class="meta">${emptyText}</p>`;
+}
+
 function credentialName(credentialId) {
   const credential = state.credentials.find((item) => item.id === credentialId);
   return credential ? credential.name : credentialId;
@@ -539,7 +565,60 @@ function renderPendingApprovals() {
     .join("") || '<p class="meta">No pending approvals.</p>';
 }
 
+function renderRuntimeOverview() {
+  const runtime = state.runtime;
+  if (!runtime) return;
+  const counts = runtime.counts || {};
+  setStatusChip("#runtime-status", runtime.status);
+  setStatusChip("#runtime-db-status", runtime.db?.status);
+  setStatusChip("#runtime-scheduler-status", runtime.scheduler?.status);
+  $("#runtime-health-summary").textContent =
+    runtime.status === "degraded"
+      ? "Runtime is serving requests, but a required background loop is not healthy."
+      : "DB reachability, scheduler state, and overdue work at a glance.";
+  $("#runtime-health-detail").textContent = runtime.scheduler?.last_error || runtime.scheduler?.detail || "Runtime snapshot ready.";
+  $("#runtime-updated-at").textContent = runtime.checked_at || "pending";
+  $("#runtime-active-leases-count").textContent = counts.active_leases ?? 0;
+  $("#runtime-due-schedules-count").textContent = counts.due_schedules ?? 0;
+  $("#runtime-stale-heartbeats-count").textContent = counts.stale_heartbeats ?? 0;
+  $("#runtime-failed-tasks-count").textContent = counts.failed_tasks ?? 0;
+  renderHealthList(
+    "#due-schedules-health-list",
+    runtime.due_schedules || [],
+    "No due schedules.",
+    (schedule) =>
+      item(
+        schedule.name,
+        `Task: ${escapeHtml(schedule.task_title)}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Agent: ${escapeHtml(agentName(schedule.assigned_agent_id || "unassigned"))}`,
+        [schedule.enabled ? "enabled" : "paused", `overdue ${formatDuration(schedule.overdue_seconds)}`],
+      ),
+  );
+  renderHealthList(
+    "#stale-heartbeats-health-list",
+    runtime.stale_heartbeats || [],
+    "No stale heartbeats.",
+    (task) =>
+      item(
+        task.title,
+        `Status: ${escapeHtml(task.status)}<br>Agent: ${escapeHtml(agentName(task.assigned_agent_id || "unassigned"))}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
+        [task.priority, `late ${formatDuration(task.overdue_seconds)}`],
+      ),
+  );
+  renderHealthList(
+    "#failed-tasks-health-list",
+    runtime.failed_tasks || [],
+    "No failed tasks.",
+    (task) =>
+      item(
+        task.title,
+        `Agent: ${escapeHtml(agentName(task.assigned_agent_id || "unassigned"))}<br>Updated: ${escapeHtml(task.updated_at)}`,
+        [task.priority, task.status],
+      ),
+  );
+}
+
 function renderTasks() {
+  const staleTaskIds = new Set((state.runtime?.stale_heartbeats || []).map((task) => task.id));
   $("#task-count").textContent = state.tasks.length;
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
@@ -552,7 +631,7 @@ function renderTasks() {
       return item(
         task.title,
         `${escapeHtml(task.description)}<br>Status: ${escapeHtml(task.status)}<br>Agent: ${escapeHtml(task.assigned_agent_id || "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
-        [task.priority],
+        staleTaskIds.has(task.id) ? [task.priority, "stale heartbeat"] : [task.priority],
         actions,
       );
     })
@@ -560,6 +639,7 @@ function renderTasks() {
 }
 
 function renderSchedules() {
+  const dueScheduleIds = new Set((state.runtime?.due_schedules || []).map((schedule) => schedule.id));
   $("#schedule-count").textContent = state.schedules.length;
   $("#schedules-list").innerHTML = state.schedules
     .map((schedule) => {
@@ -572,7 +652,9 @@ function renderSchedules() {
       return item(
         schedule.name,
         `Every ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
-        [schedule.enabled ? "enabled" : "paused"],
+        dueScheduleIds.has(schedule.id)
+          ? [schedule.enabled ? "enabled" : "paused", "due now"]
+          : [schedule.enabled ? "enabled" : "paused"],
         actions,
       );
     })
@@ -618,6 +700,7 @@ function render() {
   renderAuth();
   if (!state.me) return;
   renderConfig();
+  renderRuntimeOverview();
   renderSelectors();
   renderOAuthProviders();
   renderAgents();
@@ -657,7 +740,7 @@ async function refresh() {
     render();
     return;
   }
-  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = await Promise.all([
+  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = await Promise.all([
     api("/config"),
     api("/agents"),
     api("/credentials"),
@@ -667,8 +750,9 @@ async function refresh() {
     api("/schedules"),
     api("/heartbeats"),
     api("/audit-events"),
+    api("/runtime/overview"),
   ]);
-  Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents });
+  Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
   render();
   consumeOAuthStatus();
 }

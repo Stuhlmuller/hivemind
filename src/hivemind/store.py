@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -331,6 +332,38 @@ def redact_public_metadata_value(value: Any) -> Any:
             for key, item in value.items()
         }
     return value
+
+
+TERMINAL_TASK_STATUSES = ("done", "failed", "cancelled")
+SENSITIVE_LOG_KEY_FRAGMENTS = (
+    "authorization",
+    "ciphertext",
+    "code_verifier",
+    "password",
+    "secret",
+    "token",
+)
+AUDIT_LOGGER = logging.getLogger("hivemind.audit")
+STRUCTURED_AUDIT_LOG_PREFIXES = ("credential.lease.", "credential.action.")
+
+
+def is_sensitive_log_key(key: str) -> bool:
+    normalized = key.lower()
+    return any(fragment in normalized for fragment in SENSITIVE_LOG_KEY_FRAGMENTS)
+
+
+def sanitize_log_value(key: str | None, value: Any) -> Any:
+    if key and is_sensitive_log_key(key):
+        return REDACTED_VALUE
+    if isinstance(value, Mapping):
+        return {str(item_key): sanitize_log_value(str(item_key), item_value) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [sanitize_log_value(key, item) for item in value]
+    return value
+
+
+def should_emit_structured_audit_log(event_type: str) -> bool:
+    return event_type.startswith(STRUCTURED_AUDIT_LOG_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -1497,6 +1530,91 @@ class HivemindStore:
         with self.connect() as conn:
             return [self.public_lease(row) for row in conn.execute("SELECT * FROM leases ORDER BY issued_at DESC")]
 
+    def ping(self) -> None:
+        with self.connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+
+    def runtime_overview(self, *, limit: int = 5) -> dict[str, Any]:
+        now = utcnow()
+        now_iso = iso(now)
+        with self.connect() as conn:
+            active_leases = conn.execute(
+                "SELECT COUNT(*) FROM leases WHERE status = 'active' AND expires_at > ?",
+                (now_iso,),
+            ).fetchone()[0]
+            due_schedule_count = conn.execute(
+                "SELECT COUNT(*) FROM schedules WHERE enabled = 1 AND next_run_at <= ?",
+                (now_iso,),
+            ).fetchone()[0]
+            due_schedule_rows = list(
+                conn.execute(
+                    "SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT ?",
+                    (now_iso, limit),
+                )
+            )
+            stale_heartbeat_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE next_heartbeat_at IS NOT NULL
+                  AND next_heartbeat_at <= ?
+                  AND lower(status) NOT IN (?, ?, ?)
+                """,
+                (now_iso, *TERMINAL_TASK_STATUSES),
+            ).fetchone()[0]
+            stale_heartbeat_rows = list(
+                conn.execute(
+                    """
+                    SELECT *
+                    FROM tasks
+                    WHERE next_heartbeat_at IS NOT NULL
+                      AND next_heartbeat_at <= ?
+                      AND lower(status) NOT IN (?, ?, ?)
+                    ORDER BY next_heartbeat_at ASC
+                    LIMIT ?
+                    """,
+                    (now_iso, *TERMINAL_TASK_STATUSES, limit),
+                )
+            )
+            failed_task_count = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE lower(status) = ?",
+                ("failed",),
+            ).fetchone()[0]
+            failed_task_rows = list(
+                conn.execute(
+                    "SELECT * FROM tasks WHERE lower(status) = ? ORDER BY updated_at DESC LIMIT ?",
+                    ("failed", limit),
+                )
+            )
+        return {
+            "checked_at": now_iso,
+            "counts": {
+                "active_leases": active_leases,
+                "due_schedules": due_schedule_count,
+                "stale_heartbeats": stale_heartbeat_count,
+                "failed_tasks": failed_task_count,
+            },
+            "due_schedules": [self.runtime_schedule_view(row, now) for row in due_schedule_rows],
+            "stale_heartbeats": [self.runtime_task_view(row, "next_heartbeat_at", now) for row in stale_heartbeat_rows],
+            "failed_tasks": [self.runtime_task_view(row, "updated_at", now) for row in failed_task_rows],
+        }
+
+    def overdue_seconds(self, timestamp: str | None, now: datetime) -> int:
+        due_at = parse_dt(timestamp)
+        if due_at is None:
+            return 0
+        return max(int((now - due_at).total_seconds()), 0)
+
+    def runtime_schedule_view(self, row: sqlite3.Row | dict[str, Any], now: datetime) -> dict[str, Any]:
+        schedule = self.public_schedule(row)
+        schedule["overdue_seconds"] = self.overdue_seconds(schedule["next_run_at"], now)
+        return schedule
+
+    def runtime_task_view(self, row: sqlite3.Row | dict[str, Any], timestamp_key: str, now: datetime) -> dict[str, Any]:
+        task = dict(row)
+        task["overdue_seconds"] = self.overdue_seconds(task.get(timestamp_key), now)
+        return task
+
     def public_lease(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         status = row["status"]
         if status == "active" and parse_dt(row["expires_at"]) <= utcnow():
@@ -2166,16 +2284,33 @@ class HivemindStore:
         now: datetime | None = None,
     ) -> None:
         audit_time = now or utcnow()
+        sanitized_metadata = sanitize_log_value("metadata", metadata)
+        row = {
+            "id": f"audit_{secrets.token_urlsafe(10)}",
+            "type": event_type,
+            "actor_id": actor_id,
+            "target_id": target_id,
+            "decision": decision,
+            "reason": reason,
+            "metadata": dumps(sanitized_metadata),
+            "created_at": iso(audit_time),
+        }
         conn.execute(
             "INSERT INTO audit_events (id, type, actor_id, target_id, decision, reason, metadata, created_at) VALUES (:id, :type, :actor_id, :target_id, :decision, :reason, :metadata, :created_at)",
-            {
-                "id": f"audit_{secrets.token_urlsafe(10)}",
-                "type": event_type,
-                "actor_id": actor_id,
-                "target_id": target_id,
-                "decision": decision,
-                "reason": reason,
-                "metadata": dumps(metadata),
-                "created_at": iso(audit_time),
-            },
+            row,
         )
+        if should_emit_structured_audit_log(event_type):
+            AUDIT_LOGGER.info(
+                dumps(
+                    {
+                        "event": "audit.decision",
+                        "type": event_type,
+                        "actor_id": actor_id,
+                        "target_id": target_id,
+                        "decision": decision,
+                        "reason": reason,
+                        "metadata": sanitized_metadata,
+                        "created_at": row["created_at"],
+                    }
+                )
+            )
