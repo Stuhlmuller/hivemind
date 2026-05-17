@@ -13,8 +13,13 @@ The current implementation includes:
 - SQLite persistence.
 - A credential broker that stores secret references instead of secret values.
 - Short-lived, scoped leases after policy and intent validation.
-- Tasks, schedules, heartbeats, and an audit trail.
+- Tasks, schedules with explicit catch-up policies, heartbeats, and an audit trail.
 - A FastAPI HTTP surface that runs as a single container.
+
+Schedules expose three operator-visible catch-up policies: `run_once` executes
+one immediate recovery task and resets cadence from now, `skip_missed` drops
+older missed slots while keeping the original cadence, and `backfill` creates
+one task per overdue slot before resuming the next scheduled run.
 
 ## Run Locally
 

@@ -182,6 +182,14 @@ function credentialTypeLabel(credential) {
   return credential.metadata?.auth_type === "oauth" ? "OAuth Broker Credential" : credentialKindLabel(credential.metadata?.credential_kind);
 }
 
+function scheduleCatchUpPolicyLabel(policy) {
+  return {
+    skip_missed: "skip missed / keep cadence",
+    run_once: "run once / reset cadence",
+    backfill: "backfill every missed run",
+  }[policy] || policy;
+}
+
 function credentialAgentScope(credential) {
   return credential.policy.allowed_agents.length
     ? credential.policy.allowed_agents.map((agentId) => agentName(agentId)).join(", ")
@@ -480,7 +488,7 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
+        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
         [schedule.enabled ? "enabled" : "paused"],
         actions,
       );
