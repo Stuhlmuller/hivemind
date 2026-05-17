@@ -16,9 +16,9 @@ from hivemind.store import HivemindStore, StoreError, hash_password
 TEST_PASSWORD = "operator-not-secret"
 
 
-def client_for(tmp_path: Path) -> TestClient:
+def client_for(tmp_path: Path, *, base_url: str = "https://testserver") -> TestClient:
     store = HivemindStore(tmp_path / "hivemind.db")
-    return TestClient(create_app(store, start_scheduler=False))
+    return TestClient(create_app(store, start_scheduler=False), base_url=base_url)
 
 
 def require_equal(actual: object, expected: object, message: str) -> None:
@@ -145,6 +145,58 @@ def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path)
     require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
     require_equal(me_response.json()["role"], "admin", "me should expose the role")
     require_true("email" not in me_response.json(), "me should not expose an email field")
+
+
+def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    setup_response = client.post(
+        "/auth/setup",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    logout_response = client.post("/auth/logout")
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+
+    assert setup_response.status_code == 201
+    assert logout_response.status_code == 200
+    assert login_response.status_code == 200
+    for response in (setup_response, login_response, logout_response):
+        set_cookie = response.headers["set-cookie"]
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=lax" in set_cookie
+        assert "Secure" in set_cookie
+
+
+def test_auth_session_cookies_allow_http_in_explicit_development_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_DEVELOPMENT_MODE", "true")
+    client = client_for(tmp_path, base_url="http://testserver")
+
+    setup_response = client.post(
+        "/auth/setup",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    me_response = client.get("/me")
+    logout_response = client.post("/auth/logout")
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+
+    assert setup_response.status_code == 201
+    assert me_response.status_code == 200
+    assert logout_response.status_code == 200
+    assert login_response.status_code == 200
+    for response in (setup_response, login_response, logout_response):
+        set_cookie = response.headers["set-cookie"]
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=lax" in set_cookie
+        assert "Secure" not in set_cookie
 
 
 def test_persisted_sessions_store_only_token_hashes(tmp_path: Path) -> None:

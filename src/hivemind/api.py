@@ -139,12 +139,15 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             raise HTTPException(status_code=401, detail="authentication required")
         return user
 
+    def session_cookie_secure() -> bool:
+        return not config.development_mode
+
     def set_session_cookie(response: Response, token: str) -> None:
         response.set_cookie(
             SESSION_COOKIE,
             token,
             httponly=True,
-            secure=os.getenv("HIVEMIND_COOKIE_SECURE", "false").lower() == "true",
+            secure=session_cookie_secure(),
             samesite="lax",
             max_age=12 * 60 * 60,
             path="/",
@@ -215,7 +218,13 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/auth/logout")
     def logout(response: Response, session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict[str, bool]:
         db.logout(session)
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(
+            SESSION_COOKIE,
+            path="/",
+            secure=session_cookie_secure(),
+            httponly=True,
+            samesite="lax",
+        )
         return {"ok": True}
 
     @app.get("/me")
