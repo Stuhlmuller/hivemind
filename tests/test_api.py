@@ -753,6 +753,103 @@ def test_registered_agent_provider_adapter_receives_model_and_secret_ref_referen
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
 
 
+def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    db_path = tmp_path / "task-run-race.db"
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    setup_store = HivemindStore(
+        db_path,
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run one queued task",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    task = setup_store.create_task(
+        {
+            "title": "Race provider execution",
+            "description": "Only one caller may claim this task.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    read_task = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+            row = super().get_task_row(conn, task_id)
+            if task_id == task["id"] and row["status"] == "queued":
+                read_task.wait(timeout=5)
+            return row
+
+    stores = [
+        RacingStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+        RacingStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+    ]
+
+    def run(store: HivemindStore) -> tuple[str, object]:
+        try:
+            return ("ok", store.run_task(task["id"]))
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result() for future in [executor.submit(run, store) for store in stores]]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one task run should claim execution")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["only queued tasks can be executed"],
+        "losing task run should fail before provider execution",
+    )
+    require_equal(len(adapter.requests), 1, "provider adapter should execute the claimed task exactly once")
+    require_equal(setup_store.get_task(task["id"])["status"], "done", "claimed task should finish successfully")
+
+
+def test_remote_agent_provider_requires_credential_ref_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", raising=False)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Missing credential runner",
+            "role": "exercise provider credential fail-closed behavior",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Provider task",
+            "description": "This should fail before adapter execution.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+
+    require_equal(response.status_code, 403, "remote providers without credential refs should fail closed")
+    require_true(
+        "agent provider credential_ref is not configured" in response.json()["detail"],
+        "failure should explain that provider credentials are missing",
+    )
+    require_equal(adapter.requests, [], "provider adapter should not run without a configured credential ref")
+    require_equal(updated_task["status"], "failed", "credential configuration failures should mark the task failed")
+
+
 def test_unregistered_agent_provider_fails_closed_without_leaking_secret_ref(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
     store = HivemindStore(tmp_path / "hivemind.db", config=HivemindConfig.from_env())

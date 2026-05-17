@@ -112,6 +112,7 @@ ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
+TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
@@ -1286,7 +1287,7 @@ class HivemindStore:
             if agent is None:
                 raise StoreValidationError(f"assigned_agent_id references unknown agent: {task['assigned_agent_id']}")
             now = iso()
-            conn.execute(TASK_STATUS_UPDATE_SQL, ("running", now, task_id))
+            self.claim_queued_task_for_execution(conn, task_id, now)
             conn.execute("UPDATE agents SET status = ?, updated_at = ? WHERE id = ?", ("working", now, agent["id"]))
 
         provider_id = normalize_agent_provider_id(agent["provider"])
@@ -1373,6 +1374,11 @@ class HivemindStore:
             "agent_id": agent["id"],
             **redact_provider_public_value(result.public_view(), provider_config.credential_ref),
         }
+
+    def claim_queued_task_for_execution(self, conn: sqlite3.Connection, task_id: str, now: str) -> None:
+        claim = conn.execute(TASK_RUN_CLAIM_SQL, ("running", now, task_id, "queued"))
+        if claim.rowcount != 1:
+            raise StoreError("only queued tasks can be executed")
 
     def _finish_task_execution(
         self,
