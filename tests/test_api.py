@@ -1158,7 +1158,7 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         any(
             event["type"] == "credential.action.performed"
             and event["target_id"] == PROVIDER_CREDENTIAL_ID
-            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            and event["metadata"]["payload_key_count"] == 4
             for event in audit_events
         ),
         "provider credential use should consume a brokered credential action",
@@ -1167,7 +1167,7 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         any(
             event["type"] == "credential.action.performed"
             and event["target_id"] == credential["id"]
-            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            and event["metadata"]["payload_key_count"] == 4
             for event in audit_events
         ),
         "task tool credential use should consume a brokered credential action",
@@ -1738,6 +1738,40 @@ def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -
     require_true("LEAKME_ACCESS_TOKEN" not in response.text, "credential metadata should not expose token-like metadata values")
 
 
+def test_credential_actions_accept_digits_after_first_character(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "GitHub Versioned Actions",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_VERSIONED_ACTION_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo_v2", "oauth2_exchange"],
+            "approval_required_actions": ["oauth2_exchange"],
+            "max_ttl_seconds": 120,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+
+    require_equal(response.status_code, 201, "action names should allow digits after the first character")
+    credential = response.json()
+    require_equal(
+        credential["policy"]["allowed_actions"],
+        ["oauth2_exchange", "read_repo_v2"],
+        "credential policy should preserve normalized versioned action names",
+    )
+    require_equal(
+        credential["policy"]["approval_required_actions"],
+        ["oauth2_exchange"],
+        "approval policy should preserve normalized versioned action names",
+    )
+
+
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -2126,8 +2160,12 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, oauth://, or secret://"
+    require_equal(response.status_code, 400, "invalid secret refs should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "secret_ref must use env://, file://, vault://, oauth://, or secret://",
+        "invalid secret ref errors should list supported schemes",
+    )
 
 
 def test_create_credential_rejects_client_supplied_secret_ref(tmp_path: Path) -> None:
