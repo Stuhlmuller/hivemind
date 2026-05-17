@@ -1,7 +1,8 @@
 policy:
   approval:
-    - signed
-    - cursor bot approved
+    - and:
+      - signed
+      - cursor bot approved
 
 approval_rules:
   - name: signed
