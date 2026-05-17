@@ -206,20 +206,25 @@ def test_explicit_scheduler_start_overrides_env_disable(tmp_path: Path, monkeypa
     require_true(not thread.is_alive(), "scheduler thread should stop after app lifespan exits")
 
 
-def test_scheduler_lifespan_does_not_duplicate_when_previous_thread_is_still_stopping(
+def test_scheduler_lifespan_replaces_stopping_thread_and_resumes_passes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(api_module, "SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(api_module, "SCHEDULER_INTERVAL_SECONDS", 0.01)
     store = HivemindStore(tmp_path / "hivemind.db")
     scheduler_started = Event()
     release_scheduler = Event()
-    scheduler_calls: list[object] = []
+    scheduler_resumed = Event()
+    scheduler_calls: list[int] = []
 
     def blocked_schedule_pass() -> list[dict[str, object]]:
-        scheduler_calls.append(object())
-        scheduler_started.set()
-        release_scheduler.wait(timeout=2)
+        scheduler_calls.append(len(scheduler_calls) + 1)
+        if len(scheduler_calls) == 1:
+            scheduler_started.set()
+            release_scheduler.wait(timeout=2)
+        else:
+            scheduler_resumed.set()
         return []
 
     store.run_due_schedules_once = blocked_schedule_pass  # type: ignore[method-assign]
@@ -233,16 +238,19 @@ def test_scheduler_lifespan_does_not_duplicate_when_previous_thread_is_still_sto
     require_true(first_thread.is_alive(), "blocked scheduler should still be stopping after shutdown timeout")
 
     with TestClient(app, base_url="https://testserver"):
-        require_equal(
-            getattr(app.state, "scheduler_thread", None),
-            first_thread,
-            "restart should keep the still-stopping scheduler thread instead of creating a duplicate",
-        )
-        require_equal(len(scheduler_calls), 1, "restart should not start another scheduler pass")
+        replacement_thread = getattr(app.state, "scheduler_thread", None)
+        require_true(replacement_thread is not None, "restart should create a replacement scheduler thread")
+        require_true(replacement_thread is not first_thread, "restart should not reuse a stopping scheduler thread")
+        require_true(replacement_thread.is_alive(), "replacement scheduler should run during the active lifespan")
+        require_equal(len(scheduler_calls), 1, "replacement should not overlap the blocked scheduler pass")
         release_scheduler.set()
+        first_thread.join(timeout=1)
+        require_true(not first_thread.is_alive(), "previous scheduler should stop after its blocked pass drains")
+        require_true(scheduler_resumed.wait(timeout=1), "replacement scheduler should resume passes")
+        require_true(replacement_thread.is_alive(), "replacement scheduler should stay alive during the active lifespan")
 
-    first_thread.join(timeout=1)
-    require_true(not first_thread.is_alive(), "released scheduler should stop")
+    replacement_thread.join(timeout=1)
+    require_true(not replacement_thread.is_alive(), "replacement scheduler should stop after lifespan exit")
     require_equal(getattr(app.state, "scheduler_thread", None), None, "stopped scheduler should clear state")
 
 
