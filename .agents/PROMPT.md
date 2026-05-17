@@ -17,7 +17,8 @@ Before doing any other work:
 2. Check `gh auth status` before relying on any GitHub CLI workflow.
 3. Verify issue access with `gh issue list --state all --limit 1`.
 4. If any required `gh` command fails, stop the run immediately.
-5. Do not skip issue or PR automation, and do not continue with a local-only fallback when GitHub CLI is broken.
+5. Ralph runs with full access specifically so `gh` can reach GitHub; treat unexpected GitHub network failures as blockers, not soft warnings.
+6. Do not skip issue or PR automation, and do not continue with a local-only fallback when GitHub CLI is broken.
 
 ## Issue workflow
 

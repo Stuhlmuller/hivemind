@@ -110,7 +110,9 @@ run_codex_exec() {
   local -a cmd
 
   prompt_text="$(<"$prompt_file")"
-  cmd=(codex exec -C "$repo_root" -s workspace-write)
+  # Ralph must be able to read issues, open PRs, and merge them via `gh`,
+  # which requires network access inside the spawned Codex run.
+  cmd=(codex exec -C "$repo_root" -s danger-full-access)
 
   if [[ "$#" -gt 0 ]]; then
     cmd+=("$@")
