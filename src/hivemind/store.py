@@ -1019,6 +1019,8 @@ class HivemindStore:
             if not changes:
                 return dict(row)
 
+            if str(updated["status"]) in TERMINAL_TASK_STATUS_VALUES:
+                updated["next_heartbeat_at"] = None
             updated["updated_at"] = iso(now)
             conn.execute(
                 """
@@ -1052,21 +1054,26 @@ class HivemindStore:
 
     def update_task_status(self, task_id: str, status: str, *, actor_id: str) -> dict[str, Any]:
         now = iso()
-        self.validate_task_status(str(status))
+        next_status = str(status)
+        self.validate_task_status(next_status)
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
             current_status = str(row["status"])
-            self.validate_task_transition(current_status, str(status))
-            if current_status == str(status):
+            self.validate_task_transition(current_status, next_status)
+            if current_status == next_status:
                 return dict(row)
-            conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (status, now, task_id))
+            next_heartbeat_at = None if next_status in TERMINAL_TASK_STATUS_VALUES else row["next_heartbeat_at"]
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                (next_status, next_heartbeat_at, now, task_id),
+            )
         self.audit(
             "task.status.updated",
             actor_id,
             task_id,
             "allowed",
-            f"task marked {status}",
-            {"from_status": current_status, "to_status": str(status)},
+            f"task marked {next_status}",
+            {"from_status": current_status, "to_status": next_status},
         )
         return self.get_task(task_id)
 

@@ -1021,6 +1021,7 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     done_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "done"})
     assert done_response.status_code == 200
     assert done_response.json()["status"] == "done"
+    assert done_response.json()["next_heartbeat_at"] is None
 
     invalid_transition = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
     assert invalid_transition.status_code == 400
@@ -1059,6 +1060,7 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     failed_response = client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
     assert failed_response.status_code == 200
     assert failed_response.json()["status"] == "failed"
+    assert failed_response.json()["next_heartbeat_at"] is None
     failed_heartbeat = client.post(
         f"/tasks/{failed_task['id']}/heartbeats",
         json={"note": "should be rejected"},
@@ -1079,12 +1081,21 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     cancelled_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "cancelled"})
     assert cancelled_response.status_code == 200
     assert cancelled_response.json()["status"] == "cancelled"
+    assert cancelled_response.json()["next_heartbeat_at"] is None
     cancelled_heartbeat = client.post(
         f"/tasks/{cancelled_task['id']}/heartbeats",
         json={"note": "should be rejected"},
     )
     assert cancelled_heartbeat.status_code == 400
     assert cancelled_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: cancelled"
+
+    edited_done_task = client.patch(
+        f"/tasks/{task['id']}",
+        json={"heartbeat_seconds": 120},
+    )
+    assert edited_done_task.status_code == 200
+    assert edited_done_task.json()["heartbeat_seconds"] == 120
+    assert edited_done_task.json()["next_heartbeat_at"] is None
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
