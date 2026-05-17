@@ -62,15 +62,9 @@ Prefer these top-level surfaces:
 
 Before shipping frontend changes:
 
-1. Open the app in the browser at desktop and mobile widths.
-2. Complete setup or login.
-3. Create or view an agent.
-4. Create or view a credential without exposing the raw secret.
-5. Request a lease and confirm expiry/action/status are visible.
-6. Perform an action and confirm the audit stream records it.
-7. Create a task, heartbeat it, and change its status.
-8. Create a schedule and run due schedules.
-9. Capture screenshots and reject the UI if it reads as generic SaaS, cute bee theme, or marketing page.
+1. Do not use the Codex browser tool during general development. Reserve live browser validation for the main-branch scout lane.
+2. Verify the intended setup/login, agent, credential, lease, audit, task, heartbeat, and schedule states from code, tests, and any already-provided artifacts.
+3. Reject the UI if it reads as generic SaaS, cute bee theme, or marketing page.
 
 ## Rejection Test
 
@@ -79,4 +73,3 @@ If the UI could be renamed to any random AI dashboard without changing the layou
 If a security engineer cannot tell which agent can use which credential for which action and for how long, it fails.
 
 If the page looks friendlier than it looks inspectable, it fails.
-

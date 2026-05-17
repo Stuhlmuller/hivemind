@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_ralph="$repo_root/.agents/ralph.sh"
 source_prompt="$repo_root/.agents/PROMPT.md"
+source_shared_prompt="$repo_root/.agents/PROMPT-ralph-subagents.md"
 source_tools="$repo_root/.agents/TOOLS.md"
 source_flake="$repo_root/flake.nix"
 
@@ -57,13 +58,14 @@ setup_fixture_repo() {
   mkdir -p "$repo/.agents" "$bin_dir"
   cp "$source_ralph" "$repo/.agents/ralph.sh"
   cp "$source_prompt" "$repo/.agents/PROMPT.md"
+  cp "$source_shared_prompt" "$repo/.agents/PROMPT-ralph-subagents.md"
   cp "$source_tools" "$repo/.agents/TOOLS.md"
   cp "$source_flake" "$repo/flake.nix"
 
   git init -q -b main "$repo"
   git -C "$repo" config user.name "Test User"
   git -C "$repo" config user.email "test@example.com"
-  git -C "$repo" add .agents/ralph.sh .agents/PROMPT.md .agents/TOOLS.md flake.nix
+  git -C "$repo" add .agents/ralph.sh .agents/PROMPT.md .agents/PROMPT-ralph-subagents.md .agents/TOOLS.md flake.nix
   git -C "$repo" -c commit.gpgsign=false commit -q -m "fixture"
   git -C "$repo" update-ref refs/remotes/origin/main HEAD
   git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
@@ -249,6 +251,11 @@ test_accepts_direct_issue_worktree_creation() {
   assert_eq "$(cat "$sandbox_log")" "danger-full-access" "sandbox flag"
   assert_eq "$(cat "$review_log")" "$(canonical_path "$worktree_path")" "auto-review worktree"
   assert_eq "$(git -C "$repo" branch --show-current)" "main" "primary checkout branch"
+  assert_file_contains "$scenario_tmp/exec-prompt-1.txt" "## Ralph Subagent Fanout"
+  assert_file_contains "$scenario_tmp/exec-prompt-1.txt" "Use as many concurrent subagents as the runtime safely supports"
+  assert_file_contains "$scenario_tmp/exec-prompt-1.txt" "reviewer lanes should keep up with worker lanes"
+  assert_file_contains "$scenario_tmp/exec-prompt-1.txt" "feature-requester lanes should outpace worker lanes"
+  assert_file_contains "$scenario_tmp/exec-prompt-1.txt" "Reserve the Codex browser tool for main-branch issue scouting"
   assert_file_contains "$stdout_log" "[ralph] starting auto-review for run 1 in $(canonical_path "$worktree_path")"
 }
 

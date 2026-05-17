@@ -6,6 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_repo_root="$(cd "$script_dir/.." && pwd)"
 source_ralph="$script_dir/ralph.sh"
 source_prompt="$script_dir/PROMPT.md"
+source_shared_prompt="$script_dir/PROMPT-ralph-subagents.md"
 source_tools="$script_dir/TOOLS.md"
 source_flake="$source_repo_root/flake.nix"
 
@@ -40,6 +41,7 @@ setup_case_repo() {
   mkdir -p "$repo_root/.agents"
   cp "$source_ralph" "$repo_root/.agents/ralph.sh"
   cp "$source_prompt" "$repo_root/.agents/PROMPT.md"
+  cp "$source_shared_prompt" "$repo_root/.agents/PROMPT-ralph-subagents.md"
   cp "$source_tools" "$repo_root/.agents/TOOLS.md"
   cp "$source_flake" "$repo_root/flake.nix"
 

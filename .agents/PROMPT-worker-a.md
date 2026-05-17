@@ -6,11 +6,9 @@ Use this prompt for the first development worker loop.
 
 Before doing any other work:
 
-1. Ensure `flake.nix` exists and includes every CLI you plan to use in the current run.
-2. Ensure `.agents/TOOLS.md` exists and lists every CLI used in the current run, its nix package name, and why it is needed.
-3. If you introduce a new CLI during the run, update `flake.nix` immediately. If the flake cannot be made usable in the current environment, record the tool in `.agents/TOOLS.md` before continuing.
-4. Prefer working from the nix shell when available so the toolchain is consistent across agent spawns.
-5. If `nix flake check` passes but `nix develop` is blocked by host-level CA, daemon, or other machine-local Nix configuration, treat the dev shell as unavailable for that run. Record any needed external tools in `.agents/TOOLS.md` and continue instead of stalling on local environment repair.
+1. Prefer `nix develop`. Treat `flake.nix` as the source of truth for repo CLIs.
+2. Add new repo tooling to `flake.nix` first. Use `.agents/TOOLS.md` only for external or host-managed exceptions that cannot reasonably live in nix for the run.
+3. If `nix flake check` passes but `nix develop` is blocked by host-level Nix problems, note the temporary external fallback in `.agents/TOOLS.md` and continue.
 
 ## GitHub CLI prerequisite
 
@@ -54,3 +52,4 @@ Before doing any other work:
 - Do not pick even-numbered issues.
 - Do not work on more than one issue branch at a time in this worktree.
 - Do not merge PRs from this loop.
+- Do not use the Codex browser tool. Leave live browser validation to the main-branch scout loop.

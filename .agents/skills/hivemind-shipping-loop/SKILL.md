@@ -1,6 +1,6 @@
 ---
 name: hivemind-shipping-loop
-description: Drive Hivemind toward a shippable open-source single-container app. Use when planning or implementing broad app work, release readiness, Docker packaging, README updates, tests, browser verification, commit checkpoints, or when the user asks to keep churning until the app is ready to ship.
+description: Drive Hivemind toward a shippable open-source single-container app. Use when planning or implementing broad app work, release readiness, Docker packaging, README updates, tests, release verification, commit checkpoints, or when the user asks to keep churning until the app is ready to ship.
 ---
 
 # Hivemind Shipping Loop
@@ -11,7 +11,7 @@ description: Drive Hivemind toward a shippable open-source single-container app.
 2. Implement the smallest complete backend and frontend path.
 3. Add tests for security boundaries and core behavior.
 4. Run the full test suite.
-5. Verify the local app in the browser when UI changed.
+5. For UI changes, use tests and code-level verification during development. Reserve Codex browser validation for the main-branch scout lane.
 6. Commit a checkpoint.
 7. Repeat until the app is coherent.
 
@@ -39,5 +39,4 @@ Use:
 python3 -m compileall src tests
 ```
 
-For frontend work, start the app and verify in the browser at `http://127.0.0.1:8000/`.
-
+For frontend work, rely on tests, logs, and code inspection during development. If live shipped behavior still needs browser validation, leave that check to the main-branch scout lane after the relevant changes are in the default branch.

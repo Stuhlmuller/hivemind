@@ -9,6 +9,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 prompt_file="$script_dir/PROMPT.md"
+shared_prompt_file="${RALPH_SHARED_PROMPT_FILE:-$script_dir/PROMPT-ralph-subagents.md}"
 tools_file="$script_dir/TOOLS.md"
 flake_file="$repo_root/flake.nix"
 
@@ -112,6 +113,9 @@ compose_prompt_text() {
   local prompt_text
 
   prompt_text="$(<"$run_root/.agents/PROMPT.md")"
+  if [[ -n "$shared_prompt_file" ]]; then
+    prompt_text="$(<"$shared_prompt_file")"$'\n\n'"$prompt_text"
+  fi
   if [[ -z "$recovery_prompt" ]]; then
     printf '%s' "$prompt_text"
     return
@@ -554,6 +558,11 @@ fi
 
 if [[ ! -f "$prompt_file" ]]; then
   echo "[ralph] missing prompt file: $prompt_file" >&2
+  exit 1
+fi
+
+if [[ -n "$shared_prompt_file" && ! -f "$shared_prompt_file" ]]; then
+  echo "[ralph] missing shared prompt file: $shared_prompt_file" >&2
   exit 1
 fi
 
