@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-if [[ -z "${BASH_VERSION:-}" ]]; then
+if [ -z "${BASH_VERSION:-}" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
 
@@ -16,11 +16,6 @@ max_runs="${RALPH_MAX_RUNS:-0}"
 sleep_seconds="${RALPH_SLEEP_SECONDS:-0}"
 review_prompt="${RALPH_REVIEW_PROMPT:-Review the current uncommitted changes. Prioritize correctness bugs, regressions, and missing tests.}"
 iteration=1
-
-declare -a extra_args=()
-if [[ "$#" -gt 0 ]]; then
-  extra_args=("$@")
-fi
 
 trap 'printf "\n[ralph] stopping\n"; exit 0' INT TERM
 
@@ -90,8 +85,8 @@ run_codex_exec() {
   prompt_text="$(<"$prompt_file")"
   cmd=(codex exec -C "$repo_root" -s workspace-write)
 
-  if [[ "${#extra_args[@]}" -gt 0 ]]; then
-    cmd+=("${extra_args[@]}")
+  if [[ "$#" -gt 0 ]]; then
+    cmd+=("$@")
   fi
 
   cmd+=("$prompt_text")
@@ -120,7 +115,7 @@ ensure_flake_file
 
 while :; do
   echo "[ralph] starting Codex run $iteration"
-  run_codex_exec
+  run_codex_exec "$@"
 
   echo "[ralph] starting auto-review for run $iteration"
   run_auto_review
