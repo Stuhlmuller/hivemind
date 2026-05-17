@@ -68,5 +68,6 @@ software; use username/password local auth, not email-first SaaS account flows.
 Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
 `.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
 must require working `gh`, run with GitHub-capable network access, move work
-onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
-that branch behavior.
+onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
+reuse the primary checkout or repurpose a worktree via local issue-branch
+checkout, and fail when the wrapper cannot verify those rules.
