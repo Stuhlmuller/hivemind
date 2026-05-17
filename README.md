@@ -18,7 +18,23 @@ The current implementation includes:
 
 ## Run Locally
 
+With Nix:
+
 ```bash
+nix develop
+uvicorn hivemind.api:create_app --factory --reload
+```
+
+The dev shell includes Python 3.12 plus the runtime and test dependencies, and
+it exports `PYTHONPATH=src` so the app can be started directly from the repo
+checkout. It also defaults `HIVEMIND_DB_PATH` to `.data/hivemind.db` so local
+development does not try to write to the container-only `/data` mount.
+
+Without Nix:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 uvicorn hivemind.api:create_app --factory --reload
 ```
