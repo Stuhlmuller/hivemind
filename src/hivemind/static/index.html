@@ -4,12 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hivemind</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="prompt">$</span>
+        <span class="brand-mark" aria-hidden="true">
+          <img src="/static/favicon-32.png" alt="" />
+        </span>
         <div>
           <h1>hivemind</h1>
           <p>self-hosted agent control plane</p>
@@ -43,8 +48,11 @@ leases: scoped + ttl
 agents: brokered capabilities</pre>
         </div>
         <form id="auth-form" class="panel stack">
-          <div class="panel-heading">
-            <h2 id="auth-title">setup admin</h2>
+          <div class="panel-heading auth-heading">
+            <div class="heading-lockup">
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <h2 id="auth-title">setup admin</h2>
+            </div>
             <p id="auth-mode">first local admin</p>
           </div>
           <label>
@@ -79,8 +87,11 @@ agents: brokered capabilities</pre>
         <section class="runtime-shell">
           <aside class="sidecar">
             <div class="node-id">
-              <span>node</span>
-              <strong>local://hivemind</strong>
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <div>
+                <span>node</span>
+                <strong>local://hivemind</strong>
+              </div>
             </div>
             <div class="side-section">
               <p>session</p>
