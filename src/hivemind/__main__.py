@@ -69,13 +69,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        store = HivemindStore.from_env()
         if args.command == "backup":
+            store = HivemindStore.from_env(require_existing=True)
             bundle = store.export_backup_bundle()
             write_json_document(args.path, bundle)
             emit_summary("backed up", args.path, bundle["summary"])
             return 0
         if args.command == "restore":
+            store = HivemindStore.from_env()
             bundle = read_json_document(args.path)
             summary = store.restore_backup_bundle(bundle)
             emit_summary("restored", args.path, summary)

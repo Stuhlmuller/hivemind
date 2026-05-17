@@ -265,3 +265,20 @@ def test_cli_backup_and_restore_commands_use_hivemind_db_path(tmp_path: Path, mo
     require_equal(main(["restore", str(backup_path)]), 0, "restore command should exit cleanly")
 
     require_equal(table_rows(target_db, "users"), backup_bundle["tables"]["users"], "cli restore should replace users")
+
+
+def test_cli_backup_rejects_missing_hivemind_db_path_without_creating_database(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    missing_db = tmp_path / "missing.db"
+    backup_path = tmp_path / "backup.json"
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(missing_db))
+
+    require_equal(main(["backup", str(backup_path)]), 1, "backup command should reject missing source DB")
+
+    captured = capsys.readouterr()
+    require_true("configured database does not exist" in captured.err, "backup should explain the missing DB path")
+    require_true(missing_db.exists() is False, "backup should not create a fresh source database")
+    require_true(backup_path.exists() is False, "backup should not write an output bundle after source validation fails")

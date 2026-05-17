@@ -222,12 +222,25 @@ class HivemindStore:
         self._migrate()
 
     @classmethod
-    def from_env(cls, *, provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None) -> "HivemindStore":
+    def from_env(
+        cls,
+        *,
+        require_existing: bool = False,
+        provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None,
+    ) -> "HivemindStore":
         config = HivemindConfig.from_env()
         path = os.getenv("HIVEMIND_DB_PATH", "/data/hivemind.db")
         if path == ":memory:":
+            if require_existing:
+                raise StoreError("cannot back up ephemeral in-memory database")
             return cls(path, config=config, provider_reviewers=provider_reviewers)
-        return cls(Path(path), config=config, provider_reviewers=provider_reviewers)
+        db_path = Path(path)
+        if require_existing:
+            if not db_path.exists():
+                raise StoreError("configured database does not exist; check HIVEMIND_DB_PATH")
+            if not db_path.is_file():
+                raise StoreError("configured database path is not a file; check HIVEMIND_DB_PATH")
+        return cls(db_path, config=config, provider_reviewers=provider_reviewers)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
