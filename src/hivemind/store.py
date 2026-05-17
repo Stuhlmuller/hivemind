@@ -36,6 +36,13 @@ from hivemind.secret_refs import (
     validate_external_secret_ref,
     validate_secret_ref,
 )
+from hivemind.tool_registry import (
+    DEFAULT_TOOL_ACTIONS,
+    TOOL_ACTION_RISK_LEVELS,
+    normalize_tool_action_name,
+    payload_schema_error,
+    validate_tool_action_schema,
+)
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
@@ -450,6 +457,16 @@ class HivemindStore:
                   updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS tool_actions (
+                  name TEXT PRIMARY KEY,
+                  description TEXT NOT NULL,
+                  input_schema TEXT NOT NULL,
+                  required_credential_action TEXT NOT NULL,
+                  risk_level TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS oauth_states (
                   id TEXT PRIMARY KEY,
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -552,6 +569,7 @@ class HivemindStore:
             self._migrate_schedules_to_catch_up_policy(conn)
             self._migrate_credentials_to_approval_actions(conn)
             self._migrate_leases_to_store_ttl(conn)
+            self._seed_default_tool_actions(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -760,6 +778,80 @@ class HivemindStore:
                 conn.executemany(BACKUP_INSERT_STATEMENTS[table], rows)
         return {table: len(rows) for table, rows in tables.items()}
 
+    def _default_agent_provider_tool_actions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}",
+                "description": f"Broker credential access for the {provider_id} agent provider.",
+                "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": True},
+                "required_credential_action": f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}",
+                "risk_level": "medium",
+            }
+            for provider_id in sorted(self.config.agent_providers)
+            if provider_id not in CREDENTIAL_OPTIONAL_AGENT_PROVIDERS
+        ]
+
+    def _seed_default_tool_actions(self, conn: sqlite3.Connection) -> None:
+        now = iso()
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO tool_actions
+            (name, description, input_schema, required_credential_action, risk_level, created_at, updated_at)
+            VALUES (:name, :description, :input_schema, :required_credential_action, :risk_level, :created_at, :updated_at)
+            """,
+            [
+                {
+                    **action,
+                    "input_schema": dumps(action["input_schema"]),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for action in (*DEFAULT_TOOL_ACTIONS, *self._default_agent_provider_tool_actions())
+            ],
+        )
+        legacy_schema = dumps({"type": "object", "properties": {}, "required": [], "additionalProperties": True})
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO tool_actions
+            (name, description, input_schema, required_credential_action, risk_level, created_at, updated_at)
+            VALUES (:name, :description, :input_schema, :required_credential_action, :risk_level, :created_at, :updated_at)
+            """,
+            [
+                {
+                    "name": action,
+                    "description": "Migrated legacy action.",
+                    "input_schema": legacy_schema,
+                    "required_credential_action": action,
+                    "risk_level": "medium",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for action in self._existing_action_names(conn)
+            ],
+        )
+
+    def _existing_action_names(self, conn: sqlite3.Connection) -> list[str]:
+        actions: set[str] = set()
+        for row in conn.execute("SELECT allowed_actions, approval_required_actions FROM credentials"):
+            for column in ("allowed_actions", "approval_required_actions"):
+                actions.update(self._json_action_names(row[column]))
+        for query in ("SELECT action FROM tasks", "SELECT action FROM schedules", "SELECT action FROM leases"):
+            actions.update(
+                normalize_tool_action_name(row["action"])
+                for row in conn.execute(query)
+                if normalize_tool_action_name(row["action"])
+            )
+        return sorted(actions)
+
+    def _json_action_names(self, value: str | None) -> set[str]:
+        try:
+            raw_actions = loads(value, [])
+        except (TypeError, ValueError):
+            raw_actions = []
+        if not isinstance(raw_actions, list):
+            return set()
+        return {normalized for action in raw_actions if (normalized := normalize_tool_action_name(str(action)))}
+
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
             return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
@@ -911,6 +1003,70 @@ class HivemindStore:
             if row is None:
                 raise StoreNotFoundError(f"unknown agent: {agent_id}")
             return dict(row)
+
+    def _prepare_tool_action_row(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = iso()
+        name = normalize_tool_action_name(str(data["name"]))
+        required_action = normalize_tool_action_name(str(data.get("required_credential_action") or name))
+        risk_level = str(data.get("risk_level") or "low").strip().lower()
+        if not name:
+            raise StoreError("tool action name is required")
+        if not required_action:
+            raise StoreError("tool action required_credential_action is required")
+        if risk_level not in TOOL_ACTION_RISK_LEVELS:
+            raise StoreError("tool action risk_level must be low, medium, or high")
+        try:
+            schema = validate_tool_action_schema(data.get("input_schema") or {"type": "object"})
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
+        return {
+            "name": name,
+            "description": str(data.get("description") or "").strip(),
+            "input_schema": dumps(schema),
+            "required_credential_action": required_action,
+            "risk_level": risk_level,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def public_tool_action(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": row["name"],
+            "description": row["description"],
+            "input_schema": loads(row["input_schema"], {}),
+            "required_credential_action": row["required_credential_action"],
+            "risk_level": row["risk_level"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_tool_actions(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [self.public_tool_action(row) for row in conn.execute("SELECT * FROM tool_actions ORDER BY name")]
+
+    def get_tool_action(self, name: str) -> dict[str, Any]:
+        normalized_name = normalize_tool_action_name(str(name))
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM tool_actions WHERE name = ?", (normalized_name,)).fetchone()
+            if row is None:
+                raise StoreNotFoundError(f"unknown tool action: {normalized_name}")
+            return self.public_tool_action(row)
+
+    def create_tool_action(self, data: dict[str, Any]) -> dict[str, Any]:
+        row = self._prepare_tool_action_row(data)
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO tool_actions
+                    (name, description, input_schema, required_credential_action, risk_level, created_at, updated_at)
+                    VALUES (:name, :description, :input_schema, :required_credential_action, :risk_level, :created_at, :updated_at)
+                    """,
+                    row,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreError(f"tool action already exists: {row['name']}") from exc
+        return self.public_tool_action(row)
 
     def list_credentials(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1225,6 +1381,15 @@ class HivemindStore:
             raise StoreNotFoundError(f"missing broker secret for credential: {credential_id}")
         return secret_box.decrypt_text(row["ciphertext"])
 
+    def _tool_action_for_request(self, action: str) -> dict[str, Any]:
+        normalized_action = normalize_tool_action_name(action)
+        if not normalized_action:
+            raise StoreError("tool action is required")
+        try:
+            return self.get_tool_action(normalized_action)
+        except StoreNotFoundError as exc:
+            raise StoreError(f"unknown tool action: {normalized_action}") from exc
+
     def request_lease(
         self,
         credential_id: str,
@@ -1238,6 +1403,19 @@ class HivemindStore:
         self.get_agent(agent_id)
         credential = self.get_credential(credential_id)
         base_audit_metadata = dict(audit_metadata or {})
+        try:
+            tool_action = self._tool_action_for_request(action)
+        except StoreError as exc:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                str(exc),
+                {**base_audit_metadata, "action": normalize_tool_action_name(action)},
+            )
+            raise
+        credential_action = tool_action["required_credential_action"]
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
         review = self._policy_engine.review_request(
             PolicyReviewInput(
@@ -1247,12 +1425,17 @@ class HivemindStore:
                 allowed_actions=frozenset(loads(credential["allowed_actions"], [])),
                 require_intent=bool(credential["require_intent"]),
                 agent_id=agent_id,
-                action=action,
+                action=credential_action,
                 intent=intent,
                 credential_metadata=loads(credential["metadata"], {}),
             )
         )
-        normalized_action = review.normalized_action
+        normalized_action = tool_action["name"]
+        lease_audit_metadata = {
+            **base_audit_metadata,
+            "action": normalized_action,
+            "credential_action": credential_action,
+        }
         if not review.allowed:
             self.audit(
                 LEASE_DENIED_EVENT,
@@ -1260,11 +1443,11 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 review.reason,
-                {"action": normalized_action, **base_audit_metadata},
+                lease_audit_metadata,
             )
             raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
-        requires_approval = normalized_action in approval_required_actions
+        requires_approval = credential_action in approval_required_actions
         token = f"hvp_{secrets.token_urlsafe(24)}" if requires_approval else f"hvl_{secrets.token_urlsafe(24)}"
         now = utcnow()
         row = {
@@ -1295,7 +1478,7 @@ class HivemindStore:
                 credential_id,
                 "pending",
                 "action requires operator approval",
-                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+                {**lease_audit_metadata, "lease_id": row["id"], "ttl_seconds": ttl},
             )
             return None, self.public_lease(row)
         self.audit(
@@ -1304,15 +1487,22 @@ class HivemindStore:
             credential_id,
             "allowed",
             review.reason,
-            {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+            {**lease_audit_metadata, "lease_id": row["id"], "ttl_seconds": ttl},
         )
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public
 
-    def perform_credential_action(self, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def perform_credential_action(
+        self,
+        lease_token: str,
+        action: str,
+        payload: dict[str, Any],
+        *,
+        validate_payload: bool = True,
+    ) -> dict[str, Any]:
         token_hash = self.hash_token(lease_token)
-        normalized_action = action.strip().lower()
+        normalized_action = normalize_tool_action_name(action)
         error_detail: str | None = None
         result: dict[str, Any] | None = None
         with self.connect() as conn:
@@ -1321,16 +1511,56 @@ class HivemindStore:
                 error_detail = "unknown credential lease token"
                 self._insert_unknown_credential_action_denial(conn, normalized_action, error_detail)
             else:
-                error_detail = self._credential_action_denial_reason(lease, normalized_action)
-                if error_detail is not None:
-                    self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
-                else:
-                    result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
+                error_detail = self._preflight_credential_action(
+                    conn,
+                    lease,
+                    normalized_action,
+                    payload,
+                    validate_payload=validate_payload,
+                )
+                if error_detail is None:
+                    result, error_detail = self._consume_credential_action(
+                        conn,
+                        lease,
+                        normalized_action,
+                        payload,
+                    )
         if error_detail is not None:
             raise StoreError(error_detail)
         if result is None:
             raise RuntimeError("credential action flow ended without a result")
         return result
+
+    def _preflight_credential_action(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        payload: dict[str, Any],
+        *,
+        validate_payload: bool,
+    ) -> str | None:
+        error_detail = self._credential_action_denial_reason(lease, normalized_action)
+        if error_detail is not None:
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return error_detail
+        try:
+            tool_action = self._tool_action_for_request(normalized_action)
+        except StoreError as exc:
+            error_detail = str(exc)
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return error_detail
+        payload_error = payload_schema_error(tool_action["input_schema"], payload) if validate_payload else None
+        if payload_error is None:
+            return None
+        self._insert_credential_action_denial(
+            conn,
+            lease,
+            normalized_action,
+            payload_error,
+            metadata={"payload_keys": sorted(payload.keys())},
+        )
+        return payload_error
 
     def _credential_action_denial_reason(self, lease: sqlite3.Row, normalized_action: str) -> str | None:
         if lease["status"] == "pending":
@@ -1365,6 +1595,7 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         error_detail: str,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._insert_audit(
             conn,
@@ -1373,7 +1604,7 @@ class HivemindStore:
             lease["credential_id"],
             "denied",
             error_detail,
-            {"action": normalized_action},
+            {"action": normalized_action, "lease_id": lease["id"], **(metadata or {})},
         )
 
     def _consume_credential_action(
@@ -1386,6 +1617,12 @@ class HivemindStore:
         credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
         if credential is None:
             error_detail = "credential no longer exists"
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return None, error_detail
+        try:
+            tool_action = self._tool_action_for_request(normalized_action)
+        except StoreError as exc:
+            error_detail = str(exc)
             self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
             return None, error_detail
         consumed_at = utcnow()
@@ -1411,7 +1648,11 @@ class HivemindStore:
             lease["credential_id"],
             "allowed",
             "action matched active credential lease",
-            {"action": normalized_action, "payload_keys": sorted(payload.keys())},
+            {
+                "action": normalized_action,
+                "credential_action": tool_action["required_credential_action"],
+                "payload_keys": sorted(payload.keys()),
+            },
         )
         return (
             {
@@ -1419,6 +1660,7 @@ class HivemindStore:
                 "provider": credential["provider"],
                 "credential_id": credential["id"],
                 "action": normalized_action,
+                "credential_action": tool_action["required_credential_action"],
                 "result": "credential lease matched requested action",
             },
             None,
@@ -1552,6 +1794,21 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown credential: {value}")
 
+    def validate_optional_tool_action_reference(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        value: str | None,
+    ) -> str:
+        normalized = normalize_tool_action_name(value or "")
+        if not normalized:
+            return ""
+        row = conn.execute("SELECT 1 FROM tool_actions WHERE name = ?", (normalized,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"{field_name} references unknown tool action: {normalized}")
+        return normalized
+
     def _insert_task(self, conn: sqlite3.Connection, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
         task_time = now or utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
@@ -1579,6 +1836,11 @@ class HivemindStore:
             conn,
             field_name="credential_id",
             value=row["credential_id"],
+        )
+        row["action"] = self.validate_optional_tool_action_reference(
+            conn,
+            field_name="action",
+            value=row["action"],
         )
         try:
             conn.execute(
@@ -1801,6 +2063,7 @@ class HivemindStore:
                     "model": model,
                     "capability": "agent_provider",
                 },
+                validate_payload=False,
             )
         except StoreError as exc:
             if str(exc) != "agent provider credential requires operator-approved lease":
@@ -1870,6 +2133,7 @@ class HivemindStore:
                     "model": model,
                     "capability": "provider_tool",
                 },
+                validate_payload=False,
             )
         except StoreError as exc:
             if str(exc) != "credential action requires operator-approved lease":
@@ -2015,6 +2279,11 @@ class HivemindStore:
                 conn,
                 field_name="credential_id",
                 value=row["credential_id"],
+            )
+            row["action"] = self.validate_optional_tool_action_reference(
+                conn,
+                field_name="action",
+                value=row["action"],
             )
             try:
                 conn.execute(

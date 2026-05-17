@@ -372,6 +372,8 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert "credential broker" in response.text
     assert 'id="credential-template-picker"' in response.text
     assert 'id="credential-template-fields"' in response.text
+    if 'id="tool-actions-list"' not in response.text:
+        raise AssertionError("credentials frontend should render the tool action registry")
     assert 'name="approval_required_actions"' in response.text
     assert 'id="pending-approvals-list"' in response.text
 
@@ -661,6 +663,309 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
     require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
     require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
+
+
+def test_tool_action_registry_lists_builtins_and_persists_custom_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "tool-actions.db"
+    store = HivemindStore(db_path)
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+
+    builtins = client.get("/tool-actions")
+    create_response = client.post(
+        "/tool-actions",
+        json={
+            "name": "repo_status",
+            "description": "Read repository status.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    restarted = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
+    restarted_login = restarted.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
+    persisted = restarted.get("/tool-actions")
+
+    require_equal(builtins.status_code, 200, "tool action registry should be readable after setup")
+    require_true(any(action["name"] == "read_repo" for action in builtins.json()), "registry should seed read_repo")
+    require_equal(create_response.status_code, 201, "custom tool action should be persisted")
+    require_equal(create_response.json()["name"], "repo_status", "custom action name should normalize")
+    require_equal(restarted_login.status_code, 200, "restarted client should authenticate")
+    require_true(any(action["name"] == "repo_status" for action in persisted.json()), "custom tool action should survive store restart")
+
+
+def test_tool_action_registry_rejects_inconsistent_input_schemas(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    missing_required = client.post(
+        "/tool-actions",
+        json={
+            "name": "broken_required",
+            "description": "Invalid schema.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    unsupported_type = client.post(
+        "/tool-actions",
+        json={
+            "name": "broken_type",
+            "description": "Invalid property type.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "strng"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    actions = {action["name"] for action in client.get("/tool-actions").json()}
+
+    require_equal(
+        missing_required.status_code,
+        400,
+        "tool actions should reject required fields missing from properties",
+    )
+    require_equal(
+        missing_required.json()["detail"],
+        "tool action input_schema required field is not declared in properties: repo",
+        "missing required field error should name the invalid field",
+    )
+    require_equal(unsupported_type.status_code, 400, "tool actions should reject unsupported schema property types")
+    require_equal(
+        unsupported_type.json()["detail"],
+        "tool action input_schema property type is unsupported: repo",
+        "unsupported schema type error should name the invalid property",
+    )
+    require_true("broken_required" not in actions, "invalid required schema should not be persisted")
+    require_true("broken_type" not in actions, "invalid type schema should not be persisted")
+
+
+def test_tool_action_registry_migrates_existing_credential_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-tool-actions.db"
+    store = HivemindStore(db_path)
+    agent = store.create_agent({"name": "Legacy Worker", "role": "Carry forward existing local scopes."})
+    legacy_secret_ref = "/".join(("env:", "", "LEGACY_GITHUB_TOKEN"))
+    credential = store.create_credential(
+        {
+            "name": "Legacy GitHub Capability",
+            "provider": "github",
+            "secret_ref": legacy_secret_ref,
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["archive_repo"],
+            "approval_required_actions": ["archive_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {},
+        }
+    )
+    restarted = HivemindStore(db_path)
+    actions = restarted.list_tool_actions()
+    token, lease = restarted.request_lease(
+        credential["id"],
+        agent["id"],
+        "archive_repo",
+        "Archive a repository after explicit operator approval.",
+        30,
+    )
+
+    migrated = next(action for action in actions if action["name"] == "archive_repo")
+    require_equal(migrated["required_credential_action"], "archive_repo", "legacy action should map to its existing credential scope")
+    require_equal(migrated["risk_level"], "medium", "legacy migrated action should use a conservative risk level")
+    require_equal(token, None, "approval-required migrated action should not return a token before approval")
+    require_equal(lease["action"], "archive_repo", "migrated action should be usable for lease requests")
+
+
+def test_unknown_tool_action_is_denied_before_lease_issuance(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository even though no registered tool action allows it.",
+            "ttl_seconds": 30,
+        },
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "unknown tool actions should fail closed")
+    require_equal(response.json()["detail"], "unknown tool action: delete_repo", "denial should identify the unknown action")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["reason"] == "unknown tool action: delete_repo"
+            and event["metadata"]["action"] == "delete_repo"
+            for event in audit_events
+        ),
+        "unknown tool action should be audited as a denied lease request",
+    )
+
+
+def test_tool_action_maps_to_required_credential_action_and_validates_payload(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    tool_response = client.post(
+        "/tool-actions",
+        json={
+            "name": "repo_status",
+            "description": "Read repository status through the read_repo scope.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "repo_status",
+            "intent": "Read repository status for implementation triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    invalid_action = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_status", "payload": {}},
+    )
+    audit_after_invalid = client.get("/audit-events").json()
+    valid_action = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_status", "payload": {"repo": "hivemind"}},
+    )
+
+    require_equal(tool_response.status_code, 201, "custom mapped tool action should be created")
+    require_equal(lease_response.status_code, 201, "tool action should issue through the required credential action")
+    require_equal(lease_response.json()["action"], "repo_status", "lease should bind to the exact tool action")
+    require_equal(invalid_action.status_code, 403, "invalid payload should fail before broker acceptance")
+    require_equal(invalid_action.json()["detail"], "payload missing required field: repo", "missing required field should be reported")
+    require_true(
+        not any(event["type"] == "credential.action.performed" and event["metadata"]["action"] == "repo_status" for event in audit_after_invalid),
+        "invalid payload should not write a success audit event",
+    )
+    require_equal(valid_action.status_code, 200, "valid payload should be accepted")
+    require_equal(valid_action.json()["credential_action"], "read_repo", "result should expose the required credential action")
+
+
+def test_lease_for_one_tool_action_cannot_execute_another_with_same_credential_scope(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    for action_name in ("repo_status", "repo_summary"):
+        response = client.post(
+            "/tool-actions",
+            json={
+                "name": action_name,
+                "description": f"Read {action_name}.",
+                "required_credential_action": "read_repo",
+                "risk_level": "low",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"repo": {"type": "string"}},
+                    "required": ["repo"],
+                    "additionalProperties": True,
+                },
+            },
+        )
+        require_equal(response.status_code, 201, f"{action_name} should be registered")
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "repo_status",
+            "intent": "Read repository status for implementation triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    action_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_summary", "payload": {"repo": "hivemind"}},
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(lease_response.status_code, 201, "lease should issue for the first tool action")
+    require_equal(action_response.status_code, 403, "lease should not authorize another tool action")
+    require_equal(action_response.json()["detail"], "credential lease does not allow this action", "lease should stay tool-action scoped")
+    require_true(
+        any(
+            event["type"] == "credential.action.denied"
+            and event["reason"] == "credential lease does not allow this action"
+            and event["metadata"]["lease_id"] == lease_response.json()["id"]
+            for event in audit_events
+        ),
+        "action mismatch should be audited as a denied brokered action",
+    )
+
+
+def test_tasks_and_schedules_reject_unregistered_tool_actions(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Unsafe task",
+            "description": "Try an action outside the registry.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository without a registered action.",
+            "heartbeat_seconds": None,
+        },
+    )
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Unsafe schedule",
+            "enabled": True,
+            "interval_seconds": 60,
+            "task_title": "Unsafe scheduled task",
+            "task_description": "Try an action outside the registry.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository without a registered action.",
+            "next_run_at": None,
+        },
+    )
+
+    require_equal(task_response.status_code, 400, "tasks should reject unknown registered actions")
+    require_equal(task_response.json()["detail"], "action references unknown tool action: delete_repo", "task denial should name the unknown action")
+    require_equal(schedule_response.status_code, 400, "schedules should reject unknown registered actions")
+    require_equal(schedule_response.json()["detail"], "action references unknown tool action: delete_repo", "schedule denial should name the unknown action")
 
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
@@ -1769,6 +2074,18 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "provider": "local",
                 "model": "deterministic-policy",
                 "system_prompt": "Respond briefly.",
+            },
+        ),
+        ("GET", "/tool-actions", None),
+        (
+            "POST",
+            "/tool-actions",
+            {
+                "name": "repo_metadata",
+                "description": "Read repository metadata.",
+                "input_schema": {"type": "object"},
+                "required_credential_action": "read_repo",
+                "risk_level": "low",
             },
         ),
         ("GET", "/credentials", None),

@@ -60,8 +60,8 @@ class CredentialServiceTests(unittest.TestCase):
             service.request_lease(
                 credential_id="github.main",
                 agent_id="agent.scout",
-                action="delete_repo",
-                intent="Delete the repository because the task asked for it",
+                action="open_issue",
+                intent="Open an issue even though this credential only allows repository reads.",
             )
 
     def test_vault_rejects_invalid_secret_refs(self) -> None:
@@ -264,10 +264,68 @@ class CredentialServiceTests(unittest.TestCase):
         result = service.perform_action(
             lease_token=approved.token,
             action="open_issue",
-            payload={"repo": "hivemind"},
+            payload={"repo": "hivemind", "title": "approval regression"},
         )
 
         self.assertTrue(result["ok"])
+
+    def test_unknown_tool_action_is_denied_before_policy_review(self) -> None:
+        service = make_service()
+
+        with self.assertRaisesRegex(CredentialError, "unknown tool action"):
+            service.request_lease(
+                credential_id="github.main",
+                agent_id="agent.scout",
+                action="delete_repo",
+                intent="Delete the repository because the task asked for it.",
+            )
+
+    def test_payload_schema_is_checked_before_broker_acceptance(self) -> None:
+        service = make_service()
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "payload missing required field: repo"):
+            service.perform_action(
+                lease_token=lease.token,
+                action="read_repo",
+                payload={},
+            )
+
+    def test_unsupported_payload_schema_type_fails_closed(self) -> None:
+        service = make_service(
+            tool_actions=[
+                {
+                    "name": "read_repo",
+                    "description": "Read repository metadata.",
+                    "required_credential_action": "read_repo",
+                    "risk_level": "low",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"repo": {"type": "strng"}},
+                        "required": ["repo"],
+                        "additionalProperties": True,
+                    },
+                }
+            ]
+        )
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "unsupported type"):
+            service.perform_action(
+                lease_token=lease.token,
+                action="read_repo",
+                payload={"repo": "hivemind"},
+            )
 
 
 if __name__ == "__main__":

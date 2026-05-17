@@ -162,7 +162,7 @@ agents: brokered capabilities</pre>
                       <label>credential<select name="credential_id"></select></label>
                     </div>
                     <div class="two-col">
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                       <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="300" /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Use repo metadata to produce an actionable implementation note.</textarea></label>
@@ -197,7 +197,7 @@ agents: brokered capabilities</pre>
                     <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
                     <div class="two-col">
                       <label>credential<select name="credential_id"></select></label>
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
                     <button type="submit">create schedule</button>
@@ -311,6 +311,14 @@ agents: brokered capabilities</pre>
 
                 <div class="panel">
                   <div class="panel-heading">
+                    <h2>action registry</h2>
+                    <p>tool metadata + required scope</p>
+                  </div>
+                  <div id="tool-actions-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
                     <h2>issue jit lease</h2>
                     <p>agent + action + ttl</p>
                   </div>
@@ -318,7 +326,7 @@ agents: brokered capabilities</pre>
                     <label>agent<select name="agent_id"></select></label>
                     <label>credential<select name="credential_id"></select></label>
                     <div class="two-col">
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                       <label>ttl seconds<input name="ttl_seconds" type="number" min="1" value="60" /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="4">Read repository metadata to triage the next safe implementation step.</textarea></label>
@@ -349,7 +357,7 @@ agents: brokered capabilities</pre>
                   </div>
                   <form id="action-form" class="stack">
                     <label>lease token<input name="lease_token" placeholder="hvl_..." autocomplete="off" /></label>
-                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                    <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                     <label>payload<textarea name="payload" rows="5">{"repo":"hivemind"}</textarea></label>
                     <button type="submit">check lease</button>
                   </form>
@@ -371,6 +379,7 @@ agents: brokered capabilities</pre>
     </main>
 
     <div id="toast" role="status" aria-live="polite"></div>
+    <datalist id="tool-action-options"></datalist>
     <script src="/static/app.js" type="module"></script>
   </body>
 </html>

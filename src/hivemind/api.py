@@ -178,6 +178,14 @@ class PerformCredentialActionRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateToolActionRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    required_credential_action: str = Field(min_length=1)
+    risk_level: str = Field(default="low", pattern="^(low|medium|high)$")
+
+
 class CreateTaskRequest(BaseModel):
     title: str = Field(min_length=1)
     description: str = ""
@@ -330,6 +338,29 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/agents", status_code=201)
     def spawn_agent(request: SpawnAgentRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         return db.create_agent(request.model_dump())
+
+    @app.get("/tool-actions")
+    def list_tool_actions(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
+        return db.list_tool_actions()
+
+    @app.post("/tool-actions", status_code=201)
+    def create_tool_action(request: CreateToolActionRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            action = db.create_tool_action(request.model_dump())
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(
+            "tool_action.created",
+            user.id,
+            action["name"],
+            "allowed",
+            "tool action registered",
+            {
+                "required_credential_action": action["required_credential_action"],
+                "risk_level": action["risk_level"],
+            },
+        )
+        return action
 
     @app.get("/credentials")
     def list_credentials(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
