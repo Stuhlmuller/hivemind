@@ -23,11 +23,27 @@ windows are processed in bounded batches so restarts remain responsive.
 
 ## Start The Dev Server
 
+The fastest path is the Nix dev shell:
+
+```bash
+nix develop
+hivemind-dev
+```
+
+`nix develop` prepares the local `.data` directory, points
+`HIVEMIND_DB_PATH` at `.data/hivemind.db`, and prints the local app URL.
+`hivemind-dev` starts the FastAPI server with reload enabled and opts that
+server process into `HIVEMIND_DEVELOPMENT_MODE=true` for plain HTTP login.
+Override `HIVEMIND_HOST`, `HIVEMIND_PORT`, or `HIVEMIND_DB_PATH` before
+running it if you need a different local target.
+
+If you are outside the Nix shell, use the same environment explicitly:
+
 ```bash
 pip install -e ".[dev]"
 mkdir -p .data
 export HIVEMIND_DEVELOPMENT_MODE=true
-export HIVEMIND_DB_PATH="$PWD/.data/hivemind-dev.db"
+export HIVEMIND_DB_PATH="$PWD/.data/hivemind.db"
 uvicorn hivemind.api:create_app --factory --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -41,13 +57,17 @@ The API docs are available at `http://localhost:8000/docs`.
 
 ## Nix Dev Shell
 
-The repository flake is primarily used to keep the swarm loops and repo agent
-runs aligned on a repeatable CLI set:
+The repository flake is the source of truth for the local development toolchain.
+It provides Python, pytest, uvicorn, GitHub CLI, ripgrep, and the
+`hivemind-dev` launcher:
 
 ```bash
 nix flake check
 nix develop
 ```
+
+After the shell opens, run `hivemind-dev` to start the reload server or
+`pytest` to run the backend tests.
 
 If `nix flake check` passes but `nix develop` fails with `Problem with the SSL
 CA cert (path? access rights?)`, the repo flake is usually fine and the local
