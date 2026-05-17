@@ -96,6 +96,7 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
 
 def validate_declarative_config(store: HivemindStore, config: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _normalize_config(config)
+    _validate_store_credential_rows(store, normalized["credentials"])
     return {
         "valid": True,
         "dry_run": True,
@@ -112,6 +113,7 @@ def import_declarative_config(
     dry_run: bool,
 ) -> dict[str, Any]:
     normalized = _normalize_config(config)
+    _validate_store_credential_rows(store, normalized["credentials"])
     plan = _build_plan(store, normalized)
     if dry_run:
         return {"valid": True, "dry_run": True, "applied": False, "plan": plan}
@@ -317,11 +319,7 @@ def _normalize_schedules(items: Sequence[Any]) -> list[dict[str, Any]]:
             raise DeclarativeConfigError(f"{prefix}.id duplicates {schedule_id}")
         seen.add(schedule_id)
         interval = _int(schedule.get("interval_seconds"), f"{prefix}.interval_seconds", 60, 365 * 24 * 60 * 60)
-        next_run_at = _optional_str(schedule, "next_run_at") or iso(utcnow())
-        try:
-            parse_dt(next_run_at)
-        except ValueError as exc:
-            raise DeclarativeConfigError(f"{prefix}.next_run_at must be an ISO timestamp") from exc
+        next_run_at = _schedule_next_run_at(schedule, prefix)
         task_template = _mapping(schedule.get("task_template"), f"{prefix}.task_template")
         _reject_unknown_keys(
             task_template,
@@ -430,6 +428,14 @@ def _validate_schedule_credential_policy(
         raise DeclarativeConfigError(
             f"schedules[{index}].task_template.intent is too short for credential policy"
         )
+
+
+def _validate_store_credential_rows(store: HivemindStore, credentials: list[dict[str, Any]]) -> None:
+    for index, credential in enumerate(credentials):
+        try:
+            store._prepare_credential_row(dict(credential))
+        except StoreError as exc:
+            raise DeclarativeConfigError(f"credentials[{index}] {exc}") from exc
 
 
 def _build_plan(store: HivemindStore, normalized: Mapping[str, list[dict[str, Any]]]) -> dict[str, dict[str, int]]:
@@ -621,6 +627,20 @@ def _int(value: Any, name: str, minimum: int, maximum: int) -> int:
 def _bool(value: Any, name: str) -> bool:
     if not isinstance(value, bool):
         raise DeclarativeConfigError(f"{name} must be true or false")
+    return value
+
+
+def _schedule_next_run_at(schedule: Mapping[str, Any], prefix: str) -> str:
+    name = f"{prefix}.next_run_at"
+    value = _optional_str(schedule, "next_run_at") or iso(utcnow())
+    try:
+        parsed = parse_dt(value)
+    except ValueError as exc:
+        raise DeclarativeConfigError(f"{name} must be a valid ISO timestamp") from exc
+    if parsed is None:
+        raise DeclarativeConfigError(f"{name} must be a valid ISO timestamp")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise DeclarativeConfigError(f"{name} must include a timezone")
     return value
 
 

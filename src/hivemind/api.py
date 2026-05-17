@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from hivemind.declarative import (
-    DeclarativeConfigError,
     export_declarative_config,
     import_declarative_config,
     validate_declarative_config,
@@ -633,7 +632,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def validate_config(request: DeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
             return validate_declarative_config(db, request.config)
-        except DeclarativeConfigError as exc:
+        except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/declarative-config/import")
@@ -645,7 +644,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
                 actor_id=user.id,
                 dry_run=request.dry_run,
             )
-        except DeclarativeConfigError as exc:
+        except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/audit-events")

@@ -2544,6 +2544,34 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         "declarative schedules should validate catch-up behavior",
     )
 
+    naive_schedule_time = {
+        **bad_schedule_policy,
+        "schedules": [
+            {
+                **bad_schedule_policy["schedules"][0],
+                "next_run_at": "2030-01-01T00:00:00",
+                "task_template": {
+                    **bad_schedule_policy["schedules"][0]["task_template"],
+                    "action": "read_repo",
+                },
+            }
+        ],
+    }
+    naive_time_response = client.post(
+        "/declarative-config/validate",
+        json={"config": naive_schedule_time},
+    )
+    require_equal(
+        naive_time_response.status_code,
+        400,
+        "naive schedule timestamps should fail",
+    )
+    require_equal(
+        naive_time_response.json()["detail"],
+        "schedules[0].next_run_at must include a timezone",
+        "declarative schedules should fail closed before scheduler runtime",
+    )
+
     missing_approval_gate = {
         **bad_secret_ref,
         "credentials": [
@@ -2592,6 +2620,58 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         approval_response.json()["detail"],
         "credentials[0].policy.approval_required_actions is outside allowed_actions: delete_repo",
         "approval gate validation should reject actions outside the credential policy",
+    )
+
+    guided_metadata_missing_fields = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "provider": "github",
+                "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+                "policy": {
+                    "allowed_agents": [agent["id"]],
+                    "allowed_actions": ["exchange_oauth_code"],
+                    "approval_required_actions": [],
+                    "max_ttl_seconds": 60,
+                    "require_intent": True,
+                },
+                "metadata": {"credential_kind": "github_oauth_app"},
+            }
+        ],
+        "schedules": [],
+    }
+    guided_validate_response = client.post(
+        "/declarative-config/validate",
+        json={"config": guided_metadata_missing_fields},
+    )
+    require_equal(
+        guided_validate_response.status_code,
+        400,
+        "guided credential metadata should validate",
+    )
+    require_equal(
+        guided_validate_response.json()["detail"],
+        "credentials[0] github_oauth_app metadata requires client_id",
+        "declarative validation should include store-level credential validation",
+    )
+    guided_import_response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": guided_metadata_missing_fields},
+    )
+    require_equal(
+        guided_import_response.status_code,
+        400,
+        "guided credential import errors should be client errors",
+    )
+    require_equal(
+        guided_import_response.json()["detail"],
+        "credentials[0] github_oauth_app metadata requires client_id",
+        "declarative import should map store validation errors to HTTP 400",
+    )
+    require_true(
+        all(item["id"] != "cred_bad" for item in client.get("/credentials").json()),
+        "failed guided metadata import should not create credentials",
     )
 
 
