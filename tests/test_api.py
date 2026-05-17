@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from hivemind.api import create_app
 from hivemind.store import HivemindStore, hash_password
 
-
 TEST_PASSWORD = "operator-not-secret"
 
 
@@ -33,6 +32,19 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
+    for required in ['name="username"', 'name="password"', 'autocomplete="new-password"']:
+        if required not in response.text:
+            raise AssertionError(f"missing expected auth form markup: {required}")
+    username_input_start = response.text.index('name="username"')
+    username_input_end = response.text.index("/>", username_input_start)
+    password_input_start = response.text.index('name="password"')
+    password_input_end = response.text.index("/>", password_input_start)
+    username_markup = response.text[username_input_start:username_input_end]
+    password_markup = response.text[password_input_start:password_input_end]
+    if 'value="' in username_markup:
+        raise AssertionError("username input should not ship with a preset value")
+    if 'value="' in password_markup:
+        raise AssertionError("password input should not ship with a preset value")
 
 
 def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:

@@ -18,7 +18,6 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `rg` | `ripgrep` | Search the codebase quickly |
 | `find` | `findutils` | Discover files and repo structure |
 | `sed` | `gnused` | Read targeted file sections |
-<<<<<<< HEAD
 | `cat` / `chmod` / `cp` / `kill` / `ls` / `mkdir` / `mktemp` / `nohup` / `pwd` / `rm` / `sleep` / `tail` / `tr` / `wc` | `coreutils` | Basic shell utilities for navigation, temp files, background loop management, log inspection, and focused script verification |
 
 ## Update rule

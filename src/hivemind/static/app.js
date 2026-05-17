@@ -1,5 +1,6 @@
 const state = {
   setupComplete: false,
+  authMode: null,
   me: null,
   config: null,
   agents: [],
@@ -108,10 +109,23 @@ function renderNavigation() {
 }
 
 function renderAuth() {
+  const authMode = state.setupComplete ? "login" : "setup";
+  const authForm = $("#auth-form");
+  const usernameInput = authForm.elements.username;
+  const passwordInput = authForm.elements.password;
+
+  if (state.authMode !== authMode) {
+    authForm.reset();
+    state.authMode = authMode;
+  }
+
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
+  usernameInput.placeholder = state.setupComplete ? "username" : "local-admin";
+  passwordInput.placeholder = state.setupComplete ? "password" : "create admin password";
+  passwordInput.autocomplete = state.setupComplete ? "current-password" : "new-password";
   $("#auth-title").textContent = state.setupComplete ? "Log in" : "Set up admin";
   $("#auth-mode").textContent = state.setupComplete ? "Use your local Hivemind account." : "First local user becomes admin.";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
@@ -285,10 +299,12 @@ async function refresh() {
 
 $("#auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
+  const form = event.currentTarget;
+  const payload = readForm(form);
   const path = state.setupComplete ? "/auth/login" : "/auth/setup";
   try {
     await api(path, { method: "POST", body: JSON.stringify(payload) });
+    form.reset();
     await refresh();
     toast(state.setupComplete ? "Signed in." : "Admin created.");
   } catch (error) {
