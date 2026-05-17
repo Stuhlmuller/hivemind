@@ -27,6 +27,7 @@ def test_runtime_sidebar_frontend_routes_are_served(tmp_path: Path) -> None:
 
     routes = {
         "/control/agents": ('data-page-link="agents"', 'id="agents-page"', 'id="agents-list"'),
+        "/control/agents/": ('data-page-link="agents"', 'id="agents-page"', 'id="agents-list"'),
         "/control/tasks": ('data-page-link="tasks"', 'id="tasks-page"', 'id="tasks-list"'),
         "/control/schedules": ('data-page-link="schedules"', 'id="schedules-page"', 'id="schedules-list"'),
         "/control/audit": ('data-page-link="audit"', 'id="audit-page"', 'id="audit-list"'),
@@ -38,3 +39,14 @@ def test_runtime_sidebar_frontend_routes_are_served(tmp_path: Path) -> None:
         require_equal(response.status_code, 200, f"{path} should serve the frontend")
         for markup in required_markup:
             require_true(markup in response.text, f"{path} should include {markup}")
+
+
+def test_frontend_route_selection_handles_trailing_control_paths() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    app_js = (repo_root / "src/hivemind/static/app.js").read_text(encoding="utf-8")
+
+    require_true("function normalizePagePath(pathname)" in app_js, "frontend should normalize route paths")
+    require_true(
+        "pathname === routePath || pathname.startsWith(`${routePath}/`)" in app_js,
+        "frontend should match trailing and nested control routes to their page",
+    )

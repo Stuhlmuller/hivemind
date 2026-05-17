@@ -420,9 +420,15 @@ function scalarOptionList(values, selectedValue) {
   }).join("");
 }
 
+function normalizePagePath(pathname) {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+}
+
 function currentPage() {
-  const pathname = window.location.pathname;
-  const route = Object.entries(ROUTES).find(([, routePath]) => routePath !== "/" && pathname === routePath);
+  const pathname = normalizePagePath(window.location.pathname);
+  const route = Object.entries(ROUTES).find(
+    ([, routePath]) => routePath !== "/" && (pathname === routePath || pathname.startsWith(`${routePath}/`)),
+  );
   return route ? route[0] : "overview";
 }
 
