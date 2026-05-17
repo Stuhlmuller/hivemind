@@ -18,7 +18,13 @@ from typing import Any, Iterator
 from hivemind.config import HivemindConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
-from hivemind.secret_refs import ALLOWED_SECRET_REF_SCHEMES, preview_secret_ref, validate_external_secret_ref, validate_secret_ref
+from hivemind.secret_refs import (
+    ALLOWED_SECRET_REF_SCHEMES,
+    preview_secret_ref,
+    validate_external_credential_metadata,
+    validate_external_secret_ref,
+    validate_secret_ref,
+)
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
@@ -574,7 +580,12 @@ class HivemindStore:
             )
         return normalized
 
-    def _prepare_credential_row(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_credential_row(
+        self,
+        data: dict[str, Any],
+        *,
+        allow_managed_secret_metadata: bool = False,
+    ) -> dict[str, Any]:
         now = iso()
         actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
         agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
@@ -585,6 +596,11 @@ class HivemindStore:
         name = str(data["name"]).strip()
         secret_ref = str(data.get("secret_ref") or "").strip()
         metadata = self.normalize_credential_metadata(provider, data.get("metadata"))
+        if not allow_managed_secret_metadata:
+            try:
+                validate_external_credential_metadata(metadata)
+            except ValueError as exc:
+                raise StoreError(str(exc)) from exc
         if not actions:
             raise StoreError("credential must allow at least one action")
         if not set(approval_required_actions).issubset(actions):
@@ -643,7 +659,8 @@ class HivemindStore:
                 "id": credential_id,
                 "secret_ref": f"{BROKER_SECRET_SCHEME}://{credential_id}",
                 "metadata": metadata,
-            }
+            },
+            allow_managed_secret_metadata=True,
         )
         broker_secret_row = {
             "credential_id": credential_row["id"],

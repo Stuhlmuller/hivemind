@@ -845,6 +845,52 @@ def test_store_rejects_client_supplied_broker_secret_ref(tmp_path: Path) -> None
         raise AssertionError("client-supplied secret:// credential was accepted")
 
 
+def test_create_credential_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Forged Managed Secret",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_actions": ["review_intent"],
+            "metadata": {"credential_kind": "managed_secret"},
+        },
+    )
+
+    require_equal(response.status_code, 400, "external refs should not claim broker-managed secret metadata")
+    require_equal(
+        response.json()["detail"],
+        "managed_secret metadata is broker-generated; provide secret_value for broker-managed storage",
+        "external refs should explain how to use managed storage",
+    )
+
+
+def test_store_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    try:
+        store.create_credential(
+            {
+                "name": "Forged Managed Secret",
+                "provider": "openrouter",
+                "secret_ref": "env://OPENROUTER_API_KEY",
+                "allowed_actions": ["review_intent"],
+                "metadata": {"credential_kind": "managed_secret"},
+            }
+        )
+    except StoreError as exc:
+        require_equal(
+            str(exc),
+            "managed_secret metadata is broker-generated; provide secret_value for broker-managed storage",
+            "store should preserve broker-managed metadata invariant",
+        )
+    else:
+        raise AssertionError("external ref with managed_secret metadata was accepted")
+
+
 def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
