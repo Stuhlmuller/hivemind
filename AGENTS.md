@@ -30,6 +30,20 @@ Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
 
+Bootstrap rule: before starting repo work or spawning a repo agent, follow
+`.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
+CLI set for the run, inspect issues with `gh issue list --state all --limit
+100` before choosing issue-driven work, use one issue per branch and PR, and
+state the blocker explicitly if GitHub access is unavailable in the current
+environment.
+
+Quality rule: before finishing code changes, run Qlty from the repo root against
+the scope you touched. At minimum run `qlty check` on changed files. Use
+`qlty check --all` for broad refactors or release-facing changes, and run
+`qlty smells` when you touched larger structures or risked duplication. Fix the
+issues you introduced or explicitly call out remaining findings in the final
+handoff.
+
 Frontend rule: before changing the Hivemind UI, use the project-local
 `hivemind-ui-no-slop` skill. The UI must feel technical, open-source,
 self-hosted, agentic, security-focused, and new; reject generic SaaS styling,
