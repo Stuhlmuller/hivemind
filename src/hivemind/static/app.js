@@ -601,10 +601,17 @@ function renderSchedules() {
     .map((schedule) => {
       const nextRunAt = Date.parse(schedule.next_run_at || "");
       const due = schedule.enabled && !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
+      const actions = `
+        <div class="button-row">
+          <button data-schedule-enabled="${escapeHtml(schedule.id)}" data-enabled="${schedule.enabled ? "false" : "true"}" type="button">
+            ${schedule.enabled ? "Pause" : "Enable"}
+          </button>
+        </div>`;
       return item(
         schedule.name,
         `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned")}<br>Credential: ${escapeHtml(schedule.credential_id ? credentialName(schedule.credential_id) : "none")}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
         [schedule.enabled ? "enabled" : "paused", schedule.priority, due ? "due now" : "scheduled"],
+        actions,
       );
     })
     .join("") || '<p class="meta">No schedules yet.</p>';
@@ -908,6 +915,18 @@ $("#schedule-form").addEventListener("submit", async (event) => {
   await api("/schedules", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Schedule created.");
+});
+
+$("#schedules-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) return;
+  if (!target.dataset.scheduleEnabled) return;
+  await api(`/schedules/${target.dataset.scheduleEnabled}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: target.dataset.enabled === "true" }),
+  });
+  await refresh();
+  toast(target.dataset.enabled === "true" ? "Schedule enabled." : "Schedule paused.");
 });
 
 $("#run-due-button").addEventListener("click", async () => {
