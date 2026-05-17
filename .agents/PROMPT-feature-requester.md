@@ -24,10 +24,11 @@ Before doing any other work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
 2. Audit product gaps, self-hosted UX friction, workflow rough edges, onboarding gaps, developer experience pain, and release ergonomics.
-3. Open new issues only for concrete feature requests or capability gaps that are not already covered by an issue or PR.
-4. Keep each new issue focused on one capability and include repo evidence for why it belongs in the backlog now.
-5. Open at most 2 new issues per run unless you are uncovering several non-duplicate, high-signal requests.
-6. If the current backlog already covers the meaningful feature gaps you found, do not create filler tickets.
+3. Treat issue creation as exceptional when there is already an actionable open backlog. Prefer updating, de-duplicating, ranking, or commenting on existing issues.
+4. Open new issues only for concrete feature requests or capability gaps that are not already covered by an issue or PR.
+5. Keep each new issue focused on one capability and include repo evidence for why it belongs in the backlog now.
+6. Open at most 1 new issue per run, and only when the request is materially more important than the current open backlog.
+7. If the current backlog already covers the meaningful feature gaps you found, do not create filler tickets.
 
 ## Browser Scope
 

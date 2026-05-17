@@ -47,10 +47,10 @@ swarm_role_prompt_path() {
 
 swarm_role_sleep_seconds() {
   case "$1" in
-    reviewer) printf '%s\n' "${HIVEMIND_REVIEWER_SLEEP_SECONDS:-900}" ;;
+    reviewer) printf '%s\n' "${HIVEMIND_REVIEWER_SLEEP_SECONDS:-3600}" ;;
     worker) printf '%s\n' "${HIVEMIND_WORKER_SLEEP_SECONDS:-300}" ;;
-    feature-requester) printf '%s\n' "${HIVEMIND_FEATURE_REQUESTER_SLEEP_SECONDS:-1200}" ;;
-    scout) printf '%s\n' "${HIVEMIND_SCOUT_SLEEP_SECONDS:-1800}" ;;
+    feature-requester) printf '%s\n' "${HIVEMIND_FEATURE_REQUESTER_SLEEP_SECONDS:-7200}" ;;
+    scout) printf '%s\n' "${HIVEMIND_SCOUT_SLEEP_SECONDS:-10800}" ;;
     beekeeper) printf '%s\n' "${HIVEMIND_BEEKEEPER_SLEEP_SECONDS:-240}" ;;
     *)
       echo "[swarm] unknown role: $1" >&2

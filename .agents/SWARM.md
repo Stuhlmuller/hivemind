@@ -7,10 +7,10 @@ aliases.
 
 ## Roles
 
-- `reviewer`: audits the repository, open PRs, tests, docs, CI, and release posture, then opens grounded follow-up issues without implementing code.
-- `feature-requester`: audits product, operator, docs, and developer-experience gaps, then opens focused feature backlog issues without implementation.
+- `reviewer`: audits the repository, open PRs, tests, docs, CI, and release posture, then prefers refining existing issues before opening rare grounded follow-up issues without implementing code.
+- `feature-requester`: audits product, operator, docs, and developer-experience gaps, then prefers refining existing backlog issues before opening rare focused feature issues without implementation.
 - `worker`: owns one issue branch at a time in its dedicated worktree and ships implementation updates.
-- `scout`: audits the repository and shipped default-branch behavior, and is the only role allowed to use the Codex browser tool.
+- `scout`: audits the repository and shipped default-branch behavior, prefers refining existing issues, and is the only role allowed to use the Codex browser tool.
 - `beekeeper`: keeps the PR queue healthy by fixing clear CI failures on idle PR branches and merging ready work.
 - Every loop prepends a shared subagent delegation policy, and each top-level role may fan out bounded subagents whenever useful while staying responsible for final GitHub mutations.
 
@@ -58,6 +58,7 @@ For "open laptop and let it keep going" development on macOS:
 - `swarm-launchd.sh install` installs a macOS LaunchAgent that runs `swarm.sh run` at login with `KeepAlive`, which is the current stopgap until Hivemind owns this scheduling natively.
 - `swarm.sh logs --follow` tails the active log files as one stream and color-codes each line by agent role.
 - `scout` is the only top-level swarm role allowed to use the Codex browser tool.
+- Issue-making roles are intentionally conservative: reviewer, feature-requester, and scout runs should open at most one issue per run, and only when existing issues or PRs do not already cover the finding.
 
 ## Useful env overrides
 
@@ -74,3 +75,7 @@ For "open laptop and let it keep going" development on macOS:
 - `HIVEMIND_FEATURE_REQUESTER_MAX_RUNS`
 - `HIVEMIND_SCOUT_MAX_RUNS`
 - `HIVEMIND_BEEKEEPER_MAX_RUNS`
+
+Default issue-maker cadence is intentionally slow: reviewer every 3600 seconds,
+feature-requester every 7200 seconds, and scout every 10800 seconds. Override
+those values only when the operator explicitly wants faster issue creation.
