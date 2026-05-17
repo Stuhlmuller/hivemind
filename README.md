@@ -189,7 +189,8 @@ include secret references such as
 Dry-run import validates references, TTLs, interval bounds, schedule task
 templates, and credential policy compatibility without writing to SQLite. Apply
 with `"dry_run": false` after the operator has provisioned the referenced
-external secrets.
+external secrets. Applied imports create or update matching objects; they do not
+delete agents, credentials, or schedules omitted from the config.
 
 See `docs/declarative-config.example.json` for a complete example.
 
