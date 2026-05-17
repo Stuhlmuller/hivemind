@@ -107,7 +107,7 @@ const credentialTemplates = {
     buildPayload(form) {
       return {
         provider: form.elements.provider.value.trim(),
-        secret_value: form.elements.secret_value.value.trim(),
+        secret_value: form.elements.secret_value.value,
         metadata: {
           credential_kind: "managed_secret",
         },

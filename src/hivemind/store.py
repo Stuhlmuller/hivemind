@@ -628,8 +628,7 @@ class HivemindStore:
         secret_value: str,
         secret_box: SecretBox,
     ) -> dict[str, Any]:
-        normalized_secret = secret_value.strip()
-        if not normalized_secret:
+        if len(secret_value) == 0:
             raise StoreError("secret_value is required")
         credential_id = data.get("id") or f"cred_{secrets.token_urlsafe(8)}"
         metadata = dict(data.get("metadata") or {})
@@ -644,7 +643,7 @@ class HivemindStore:
         )
         broker_secret_row = {
             "credential_id": credential_row["id"],
-            "ciphertext": secret_box.encrypt_text(normalized_secret),
+            "ciphertext": secret_box.encrypt_text(secret_value),
             "created_at": credential_row["created_at"],
             "updated_at": credential_row["updated_at"],
         }

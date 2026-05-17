@@ -828,13 +828,14 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     client = client_for(tmp_path)
     setup(client)
     agent = client.get("/agents").json()[0]
+    managed_value = "  -----BEGIN TEST SECRET-----\nline-one\nline-two\n-----END TEST SECRET-----\n"
 
     response = client.post(
         "/credentials",
         json={
             "name": "Broker Secret",
             "provider": "openrouter",
-            "secret_value": "sk-test-local-secret",
+            "secret_value": managed_value,
             "allowed_agents": [agent["id"]],
             "allowed_actions": ["review_intent"],
             "max_ttl_seconds": 180,
@@ -848,16 +849,16 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     assert credential["metadata"]["credential_kind"] == "managed_secret"
     assert credential["secret_ref_preview"].startswith("secret://")
     assert "secret_value" not in credential
-    assert "sk-test-local-secret" not in response.text
+    assert managed_value not in response.text
 
     list_response = client.get("/credentials")
     assert list_response.status_code == 200
-    assert "sk-test-local-secret" not in list_response.text
+    assert managed_value not in list_response.text
 
     store = client.app.state.store
     secret_box = SecretBox.from_env()
     assert secret_box is not None
-    assert store.resolve_broker_secret(credential["id"], secret_box) == "sk-test-local-secret"
+    assert store.resolve_broker_secret(credential["id"], secret_box) == managed_value
 
     conn = sqlite3.connect(tmp_path / "hivemind.db")
     try:
@@ -875,7 +876,7 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     assert row is not None
     assert row[0] == f"secret://{credential['id']}"
     assert secret_row is not None
-    assert "sk-test-local-secret" not in secret_row[0]
+    assert "BEGIN TEST SECRET" not in secret_row[0]
 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:

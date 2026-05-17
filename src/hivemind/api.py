@@ -296,9 +296,9 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def create_credential(request: CreateCredentialRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         payload = request.model_dump()
         secret_ref = str(payload.get("secret_ref") or "").strip()
-        secret_value = str(payload.pop("secret_value") or "").strip()
+        secret_value = payload.pop("secret_value", None)
         has_secret_ref = bool(secret_ref)
-        has_secret_value = bool(secret_value)
+        has_secret_value = secret_value is not None
         if has_secret_ref == has_secret_value:
             raise HTTPException(status_code=400, detail="provide exactly one of secret_ref or secret_value")
         payload["secret_ref"] = secret_ref or None
