@@ -4,7 +4,7 @@ import os
 from importlib.resources import files
 from threading import Event, Thread
 from time import sleep
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 import httpx
@@ -105,6 +105,7 @@ class CreateScheduleRequest(BaseModel):
     name: str = Field(min_length=1)
     enabled: bool = True
     interval_seconds: int = Field(ge=60)
+    catch_up_policy: Literal["skip_missed", "run_once", "backfill"] = "run_once"
     task_title: str = Field(min_length=1)
     task_description: str = ""
     priority: str = "normal"
@@ -370,7 +371,17 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
                 secret_box=secret_box,
                 actor_id=user.id,
             )
-        except (OAuthConfigurationError, StoreError, ValueError, httpx.HTTPError) as exc:
+        except (OAuthConfigurationError, StoreError) as exc:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                str(exc),
+                {"provider": provider},
+            )
+            return oauth_frontend_redirect("error", str(exc))
+        except (ValueError, httpx.HTTPError) as exc:
             db.audit(
                 OAUTH_FAILED_EVENT,
                 user.id,
@@ -483,7 +494,10 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/schedules/run-due")
     def run_due_schedules(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return {"created_tasks": db.run_due_schedules_once()}
+        try:
+            return {"created_tasks": db.run_due_schedules_once()}
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/audit-events")
     def list_audit_events(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:

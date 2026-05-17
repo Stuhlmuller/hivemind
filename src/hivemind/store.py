@@ -20,6 +20,9 @@ from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
 from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
+SCHEDULE_BACKFILL_BATCH_LIMIT = 100
+SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -33,6 +36,18 @@ def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value)
+
+
+def require_aware_utc(value: str, *, field_name: str) -> datetime:
+    try:
+        parsed = parse_dt(value)
+    except (TypeError, ValueError) as exc:
+        raise StoreError(f"schedule {field_name} must be a valid ISO datetime") from exc
+    if parsed is None:
+        raise StoreError(f"schedule {field_name} is required")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise StoreError(f"schedule {field_name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def dumps(value: Any) -> str:
@@ -228,6 +243,7 @@ class HivemindStore:
                   name TEXT NOT NULL,
                   enabled INTEGER NOT NULL,
                   interval_seconds INTEGER NOT NULL,
+                  catch_up_policy TEXT NOT NULL DEFAULT 'run_once',
                   task_title TEXT NOT NULL,
                   task_description TEXT NOT NULL,
                   priority TEXT NOT NULL,
@@ -263,6 +279,7 @@ class HivemindStore:
             )
             self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
+            self._migrate_schedules_to_catch_up_policy(conn)
             self._migrate_credentials_to_approval_actions(conn)
             self._migrate_leases_to_store_ttl(conn)
 
@@ -329,6 +346,18 @@ class HivemindStore:
             if issued_at is not None and expires_at is not None:
                 ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
             conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
+
+    def _migrate_schedules_to_catch_up_policy(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
+        if "catch_up_policy" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN catch_up_policy TEXT NOT NULL DEFAULT 'run_once'")
+        conn.execute(
+            """
+            UPDATE schedules
+            SET catch_up_policy = 'run_once'
+            WHERE catch_up_policy IS NULL OR catch_up_policy = ''
+            """
+        )
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
@@ -1065,11 +1094,20 @@ class HivemindStore:
         interval = int(data["interval_seconds"])
         if interval < 60:
             raise StoreError("schedule interval must be at least 60 seconds")
+        catch_up_policy = data.get("catch_up_policy") or "run_once"
+        if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
+            raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+        next_run_at = (
+            require_aware_utc(data["next_run_at"], field_name="next_run_at")
+            if data.get("next_run_at")
+            else now + timedelta(seconds=interval)
+        )
         row = {
             "id": f"sched_{secrets.token_urlsafe(10)}",
             "name": data["name"],
             "enabled": 1 if data.get("enabled", True) else 0,
             "interval_seconds": interval,
+            "catch_up_policy": catch_up_policy,
             "task_title": data["task_title"],
             "task_description": data.get("task_description") or "",
             "priority": data.get("priority") or "normal",
@@ -1077,7 +1115,7 @@ class HivemindStore:
             "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
-            "next_run_at": data.get("next_run_at") or iso(now + timedelta(seconds=interval)),
+            "next_run_at": iso(next_run_at),
             "last_run_at": None,
             "created_at": iso(now),
             "updated_at": iso(now),
@@ -1097,14 +1135,21 @@ class HivemindStore:
                 conn.execute(
                     """
                     INSERT INTO schedules
-                    (id, name, enabled, interval_seconds, task_title, task_description, priority, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
-                    VALUES (:id, :name, :enabled, :interval_seconds, :task_title, :task_description, :priority, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
+                    (id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
+                    VALUES (:id, :name, :enabled, :interval_seconds, :catch_up_policy, :task_title, :task_description, :priority, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
                     """,
                     row,
                 )
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("schedule references an unknown agent or credential") from exc
-        self.audit("schedule.created", row["assigned_agent_id"] or "user", row["id"], "allowed", "schedule created", {"interval_seconds": interval})
+        self.audit(
+            "schedule.created",
+            row["assigned_agent_id"] or "user",
+            row["id"],
+            "allowed",
+            "schedule created",
+            {"interval_seconds": interval, "catch_up_policy": catch_up_policy},
+        )
         return self.public_schedule(row)
 
     def list_schedules(self) -> list[dict[str, Any]]:
@@ -1127,29 +1172,78 @@ class HivemindStore:
     def run_due_schedules_once(self) -> list[dict[str, Any]]:
         now = utcnow()
         created: list[dict[str, Any]] = []
-        with self.connect() as conn:
-            rows = list(conn.execute("SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ?", (iso(now),)))
-        for row in rows:
-            task = self.create_task(
-                {
-                    "title": row["task_title"],
-                    "description": row["task_description"],
-                    "priority": row["priority"],
-                    "assigned_agent_id": row["assigned_agent_id"],
-                    "credential_id": row["credential_id"],
-                    "action": row["action"],
-                    "intent": row["intent"],
-                    "heartbeat_seconds": None,
-                }
-            )
-            next_run = now + timedelta(seconds=int(row["interval_seconds"]))
+        with self._lock:
             with self.connect() as conn:
-                conn.execute(
-                    "UPDATE schedules SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
-                    (iso(now), iso(next_run), iso(now), row["id"]),
+                rows = list(
+                    conn.execute(
+                        "SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC",
+                        (iso(now),),
+                    )
                 )
-            self.audit("schedule.ran", row["assigned_agent_id"] or "scheduler", row["id"], "allowed", "scheduled task created", {"task_id": task["id"]})
-            created.append(task)
+            for row in rows:
+                interval_seconds = int(row["interval_seconds"])
+                interval = timedelta(seconds=interval_seconds)
+                catch_up_policy = row["catch_up_policy"] or "run_once"
+                if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
+                    raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+                next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
+                if next_run_at > now:
+                    continue
+                missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
+                if catch_up_policy == "backfill":
+                    run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
+                    scheduled_runs = [next_run_at + (interval * index) for index in range(run_count)]
+                    next_run = next_run_at + (interval * run_count)
+                    skipped_run_count = 0
+                    remaining_run_count = missed_run_count - run_count
+                elif catch_up_policy == "skip_missed":
+                    scheduled_runs = [next_run_at + (interval * (missed_run_count - 1))]
+                    next_run = next_run_at + (interval * missed_run_count)
+                    skipped_run_count = missed_run_count - 1
+                    remaining_run_count = 0
+                else:
+                    scheduled_runs = [now]
+                    next_run = now + interval
+                    skipped_run_count = missed_run_count - 1
+                    remaining_run_count = 0
+
+                task_ids: list[str] = []
+                for _ in scheduled_runs:
+                    task = self.create_task(
+                        {
+                            "title": row["task_title"],
+                            "description": row["task_description"],
+                            "priority": row["priority"],
+                            "assigned_agent_id": row["assigned_agent_id"],
+                            "credential_id": row["credential_id"],
+                            "action": row["action"],
+                            "intent": row["intent"],
+                            "heartbeat_seconds": None,
+                        }
+                    )
+                    created.append(task)
+                    task_ids.append(task["id"])
+                with self.connect() as conn:
+                    conn.execute(
+                        "UPDATE schedules SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
+                        (iso(now), iso(next_run), iso(now), row["id"]),
+                    )
+                self.audit(
+                    "schedule.ran",
+                    row["assigned_agent_id"] or "scheduler",
+                    row["id"],
+                    "allowed",
+                    "scheduled task created",
+                    {
+                        "catch_up_policy": catch_up_policy,
+                        "created_task_count": len(task_ids),
+                        "missed_run_count": missed_run_count,
+                        "remaining_run_count": remaining_run_count,
+                        "scheduled_for": [iso(scheduled_for) for scheduled_for in scheduled_runs],
+                        "skipped_run_count": skipped_run_count,
+                        "task_ids": task_ids,
+                    },
+                )
         return created
 
     def get_schedule(self, schedule_id: str) -> dict[str, Any]:
