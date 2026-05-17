@@ -915,6 +915,26 @@ class HivemindStore:
         updated[field] = next_value
         return True
 
+    def normalize_schedule_priority(self, schedule_row: sqlite3.Row, *, actor_id: str, now: datetime) -> str:
+        priority = str(schedule_row["priority"] or "")
+        if priority in VALID_TASK_PRIORITIES:
+            return priority
+        normalized = TaskPriority.NORMAL.value
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE schedules SET priority = ?, updated_at = ? WHERE id = ?",
+                (normalized, iso(now), schedule_row["id"]),
+            )
+        self.audit(
+            "schedule.priority.normalized",
+            actor_id,
+            str(schedule_row["id"]),
+            "allowed",
+            "legacy schedule priority normalized",
+            {"from_priority": priority, "to_priority": normalized},
+        )
+        return normalized
+
     def create_task(self, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
         now = utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
@@ -1175,11 +1195,12 @@ class HivemindStore:
         with self.connect() as conn:
             rows = list(conn.execute("SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ?", (iso(now),)))
         for row in rows:
+            priority = self.normalize_schedule_priority(row, actor_id=actor_id, now=now)
             task = self.create_task(
                 {
                     "title": row["task_title"],
                     "description": row["task_description"],
-                    "priority": row["priority"],
+                    "priority": priority,
                     "assigned_agent_id": row["assigned_agent_id"],
                     "credential_id": row["credential_id"],
                     "action": row["action"],

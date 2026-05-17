@@ -1119,6 +1119,68 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
     assert schedule_response.json()["credential_id"] is None
 
 
+def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "legacy-schedule-priority.db")
+    client = TestClient(create_app(store, start_scheduler=False))
+    setup(client)
+    me = client.get("/me").json()
+    agent = client.get("/agents").json()[0]
+
+    legacy_schedule = client.post(
+        "/schedules",
+        json={
+            "name": "Legacy priority schedule",
+            "interval_seconds": 60,
+            "task_title": "Legacy review task",
+            "priority": "high",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    ).json()
+    healthy_schedule = client.post(
+        "/schedules",
+        json={
+            "name": "Healthy due schedule",
+            "interval_seconds": 60,
+            "task_title": "Healthy review task",
+            "priority": "low",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    ).json()
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE schedules SET priority = ?, updated_at = ? WHERE id = ?",
+            ("legacy-urgent", "1999-01-01T00:00:00+00:00", legacy_schedule["id"]),
+        )
+
+    run_response = client.post("/schedules/run-due")
+
+    assert run_response.status_code == 200
+    created_tasks = {task["title"]: task for task in run_response.json()["created_tasks"]}
+    assert set(created_tasks) == {"Legacy review task", "Healthy review task"}
+    assert created_tasks["Legacy review task"]["priority"] == "normal"
+    assert created_tasks["Healthy review task"]["priority"] == "low"
+
+    schedules = {schedule["id"]: schedule for schedule in client.get("/schedules").json()}
+    assert schedules[legacy_schedule["id"]]["priority"] == "normal"
+    assert schedules[healthy_schedule["id"]]["priority"] == "low"
+
+    normalized_event = next(
+        event
+        for event in client.get("/audit-events").json()
+        if event["type"] == "schedule.priority.normalized" and event["target_id"] == legacy_schedule["id"]
+    )
+    assert normalized_event["actor_id"] == me["id"]
+    assert normalized_event["decision"] == "allowed"
+    assert normalized_event["reason"] == "legacy schedule priority normalized"
+    assert normalized_event["metadata"] == {
+        "from_priority": "legacy-urgent",
+        "to_priority": "normal",
+    }
+
+
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
