@@ -566,6 +566,51 @@ def test_codex_oauth_flow_audits_unknown_state_callback(
     assert audit_events[0]["target_id"] == "codex"
 
 
+def test_codex_oauth_flow_audits_missing_code_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["delegate_code", "review_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+    assert start_response.status_code == 201
+    authorize_url = start_response.json()["authorize_url"]
+    query = parse_qs(urlparse(authorize_url).query)
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}",
+        follow_redirects=False,
+    )
+
+    assert callback_response.status_code == 303
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    assert redirect_params["oauth"] == ["error"]
+    assert redirect_params["detail"] == ["Missing OAuth authorization code."]
+    audit_events = client.get("/audit-events").json()
+    assert audit_events[0]["type"] == "credential.oauth.failed"
+    assert audit_events[0]["reason"] == "Missing OAuth authorization code."
+    assert audit_events[0]["target_id"] == "codex"
+    credentials = client.get("/credentials").json()
+    assert all(item["provider"] != "codex" for item in credentials)
+
+
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

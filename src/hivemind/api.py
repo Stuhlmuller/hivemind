@@ -24,6 +24,7 @@ from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFound
 
 
 SESSION_COOKIE = "hivemind_session"
+OAUTH_FAILED_EVENT = "credential.oauth.failed"
 
 
 class SetupRequest(BaseModel):
@@ -304,9 +305,9 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return oauth_frontend_redirect("error", "Missing OAuth state.")
         try:
             oauth_state = db.consume_oauth_state(state_id=state, provider=provider, user_id=user.id)
-        except (StoreError, StoreNotFoundError) as exc:
+        except StoreError as exc:
             db.audit(
-                "credential.oauth.failed",
+                OAUTH_FAILED_EVENT,
                 user.id,
                 provider,
                 "denied",
@@ -316,7 +317,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return oauth_frontend_redirect("error", str(exc))
         if error:
             db.audit(
-                "credential.oauth.failed",
+                OAUTH_FAILED_EVENT,
                 user.id,
                 provider,
                 "denied",
@@ -325,6 +326,14 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             )
             return oauth_frontend_redirect("error", error_description or error)
         if not code:
+            db.audit(
+                OAUTH_FAILED_EVENT,
+                user.id,
+                provider,
+                "denied",
+                "Missing OAuth authorization code.",
+                {"provider": provider},
+            )
             return oauth_frontend_redirect("error", "Missing OAuth authorization code.")
         redirect_uri = str(http_request.url_for("oauth_callback", provider=provider))
         try:
@@ -349,7 +358,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             )
         except (OAuthConfigurationError, StoreError, ValueError, httpx.HTTPError) as exc:
             db.audit(
-                "credential.oauth.failed",
+                OAUTH_FAILED_EVENT,
                 user.id,
                 provider,
                 "denied",
