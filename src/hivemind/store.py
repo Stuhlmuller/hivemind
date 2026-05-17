@@ -333,6 +333,9 @@ def redact_public_metadata_value(value: Any) -> Any:
     return value
 
 
+TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled"}
+
+
 @dataclass(frozen=True)
 class SessionUser:
     id: str
@@ -1526,6 +1529,37 @@ class HivemindStore:
             raise StoreNotFoundError(f"unknown schedule: {schedule_id}")
         return row
 
+    def public_task(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row | dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        item = dict(row)
+        last_heartbeat_row = conn.execute(
+            "SELECT created_at FROM heartbeat_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            (item["id"],),
+        ).fetchone()
+        last_heartbeat_at = last_heartbeat_row["created_at"] if last_heartbeat_row else None
+        heartbeat_state = "disabled"
+        heartbeat_overdue_seconds: int | None = None
+        if item["heartbeat_seconds"] and item["status"] not in TERMINAL_TASK_STATUSES:
+            deadline = parse_dt(item["next_heartbeat_at"])
+            if deadline is not None:
+                overdue_seconds = int(((now or utcnow()) - deadline).total_seconds())
+                if overdue_seconds >= 0:
+                    heartbeat_overdue_seconds = overdue_seconds
+                    heartbeat_state = "stale" if last_heartbeat_at else "missing"
+                else:
+                    heartbeat_state = "healthy"
+            else:
+                heartbeat_state = "healthy"
+        item["last_heartbeat_at"] = last_heartbeat_at
+        item["heartbeat_state"] = heartbeat_state
+        item["heartbeat_overdue_seconds"] = heartbeat_overdue_seconds
+        return item
+
     def validate_optional_agent_reference(
         self,
         conn: sqlite3.Connection,
@@ -1601,7 +1635,7 @@ class HivemindStore:
             {"status": row["status"]},
             now=task_time,
         )
-        return row
+        return self.public_task(conn, row, now=task_time)
 
     def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
         with self.connect() as conn:
@@ -1609,19 +1643,31 @@ class HivemindStore:
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
+            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            return [self.public_task(conn, row) for row in rows]
 
     def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
-        now = iso()
+        now = utcnow()
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
+            next_heartbeat_at = row["next_heartbeat_at"]
+            if row["heartbeat_seconds"]:
+                if status in TERMINAL_TASK_STATUSES:
+                    next_heartbeat_at = None
+                elif next_heartbeat_at is None:
+                    next_heartbeat_at = iso(now + timedelta(seconds=int(row["heartbeat_seconds"])))
+            else:
+                next_heartbeat_at = None
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                (status, next_heartbeat_at, iso(now), task_id),
+            )
         self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            return dict(self.get_task_row(conn, task_id))
+            return self.public_task(conn, self.get_task_row(conn, task_id))
 
     def run_task(self, task_id: str, operator_input: str | None = None) -> dict[str, Any]:
         with self.connect() as conn:

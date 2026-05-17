@@ -99,7 +99,7 @@ agents: brokered capabilities</pre>
             </div>
             <div class="side-section">
               <p>surface</p>
-              <code id="surface-line">runtime overview / agents, tasks, schedules</code>
+              <code id="surface-line">runtime overview / agents, tasks, schedules, heartbeats</code>
             </div>
             <div class="side-section">
               <p>policy checks</p>
@@ -118,7 +118,7 @@ agents: brokered capabilities</pre>
                   <p class="eyebrow">overview</p>
                   <h2>runtime surface</h2>
                 </div>
-                <p>agents, tasks, schedules, and audit events share the main runtime surface.</p>
+                <p>agents, tasks, schedules, heartbeats, and the live audit stream stay in the main control surface.</p>
               </div>
 
               <section class="metrics" aria-label="Runtime summary">
@@ -126,6 +126,8 @@ agents: brokered capabilities</pre>
                 <div><span id="credential-count">0</span><p>credentials</p></div>
                 <div><span id="task-count">0</span><p>tasks</p></div>
                 <div><span id="schedule-count">0</span><p>schedules</p></div>
+                <div><span id="stale-heartbeat-count">0</span><p>stale heartbeats</p></div>
+                <div><span id="missing-heartbeat-count">0</span><p>missing check-ins</p></div>
                 <div><span id="lease-count">0</span><p>leases</p></div>
                 <div><span id="audit-count">0</span><p>audit</p></div>
               </section>
@@ -169,6 +171,32 @@ agents: brokered capabilities</pre>
                     <button type="submit">create task</button>
                   </form>
                   <div id="tasks-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>heartbeat watch</h2>
+                    <p>late work + recent check-ins</p>
+                  </div>
+                  <section class="subpanel stack">
+                    <div class="inline-heading">
+                      <div>
+                        <h3>overdue work</h3>
+                        <p>missing first heartbeat or stale task</p>
+                      </div>
+                      <span id="heartbeat-alert-count" class="status-chip">0</span>
+                    </div>
+                    <div id="heartbeat-alert-list" class="list"></div>
+                  </section>
+                  <section class="subpanel stack">
+                    <div class="inline-heading">
+                      <div>
+                        <h3>recent heartbeats</h3>
+                        <p>append-only operator check-ins</p>
+                      </div>
+                    </div>
+                    <div id="heartbeats-list" class="list"></div>
+                  </section>
                 </div>
 
                 <div class="panel">

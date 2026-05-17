@@ -158,6 +158,22 @@ const ROUTES = {
   credentials: "/control/credentials",
 };
 
+const TASK_STATUS_TONES = {
+  queued: "neutral",
+  running: "good",
+  blocked: "warning",
+  done: "good",
+  failed: "error",
+  cancelled: "warning",
+};
+
+const HEARTBEAT_STATES = {
+  disabled: { label: "heartbeat off", tone: "neutral" },
+  healthy: { label: "on cadence", tone: "good" },
+  missing: { label: "missing check-in", tone: "warning" },
+  stale: { label: "stale heartbeat", tone: "error" },
+};
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -219,6 +235,20 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function detailLines(lines) {
+  return lines.map((line) => escapeHtml(line)).join("<br>");
+}
+
+function formatDuration(totalSeconds) {
+  if (!Number.isFinite(totalSeconds)) return "0s";
+  if (totalSeconds < 60) return `${Math.max(0, Math.floor(totalSeconds))}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes ? `${hours}h ${remainderMinutes}m` : `${hours}h`;
 }
 
 function readForm(form) {
@@ -337,11 +367,18 @@ function applyCredentialTemplate(reset = false) {
   form.elements.require_intent.checked = template.defaults.requireIntent;
 }
 
-function item(title, meta, pills = [], actions = "") {
+function renderPill(pill) {
+  const config = typeof pill === "string" ? { label: pill } : pill;
+  const tone = config.tone ? ` data-tone="${escapeHtml(config.tone)}"` : "";
+  return `<span class="pill"${tone}>${escapeHtml(config.label)}</span>`;
+}
+
+function item(title, meta, pills = [], actions = "", options = {}) {
+  const state = options.state ? ` data-state="${escapeHtml(options.state)}"` : "";
   const pillMarkup = pills.length
-    ? `<div class="pill-row">${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}</div>`
+    ? `<div class="pill-row">${pills.map((pill) => renderPill(pill)).join("")}</div>`
     : "";
-  return `<article class="item"><strong>${escapeHtml(title)}</strong><div class="meta">${meta}</div>${pillMarkup}${actions}</article>`;
+  return `<article class="item"${state}><strong>${escapeHtml(title)}</strong><div class="meta">${meta}</div>${pillMarkup}${actions}</article>`;
 }
 
 function optionList(items, labelKey = "name", includeEmpty = false) {
@@ -378,12 +415,27 @@ function leaseDetailRows(lease) {
   ].join("<br>");
 }
 
+function taskTitle(taskId) {
+  const task = state.tasks.find((item) => item.id === taskId);
+  return task ? task.title : taskId;
+}
+
+function heartbeatState(task) {
+  return HEARTBEAT_STATES[task.heartbeat_state] || HEARTBEAT_STATES.disabled;
+}
+
+function overdueHeartbeatTasks() {
+  return state.tasks
+    .filter((task) => task.heartbeat_state === "missing" || task.heartbeat_state === "stale")
+    .sort((left, right) => (right.heartbeat_overdue_seconds || 0) - (left.heartbeat_overdue_seconds || 0));
+}
+
 function renderNavigation() {
   const page = currentPage();
   $("#overview-page").hidden = page !== "overview";
   $("#credentials-page").hidden = page !== "credentials";
   $("#surface-line").textContent =
-    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules";
+    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules, heartbeats";
   for (const link of $$("[data-page-link]")) {
     const active = link.dataset.pageLink === page;
     link.classList.toggle("active", active);
@@ -543,20 +595,89 @@ function renderTasks() {
   $("#task-count").textContent = state.tasks.length;
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
+      const heartbeat = heartbeatState(task);
       const actions = `
         <div class="button-row">
           <button data-task-status="${escapeHtml(task.id)}" data-status="running" type="button">Start</button>
           <button data-task-status="${escapeHtml(task.id)}" data-status="done" type="button">Done</button>
           <button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>
         </div>`;
+      const lines = [
+        task.description || "No task description.",
+        `Status: ${task.status}`,
+        `Agent: ${task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned"}`,
+      ];
+      if (task.heartbeat_seconds) {
+        lines.push(`Cadence: every ${task.heartbeat_seconds}s`);
+        lines.push(`Last heartbeat: ${task.last_heartbeat_at || "none"}`);
+        lines.push(`Next heartbeat: ${task.next_heartbeat_at || "not scheduled"}`);
+        if (task.heartbeat_overdue_seconds != null) {
+          lines.push(`Overdue: ${formatDuration(task.heartbeat_overdue_seconds)} late`);
+        }
+      } else {
+        lines.push("Heartbeat: not required");
+      }
       return item(
         task.title,
-        `${escapeHtml(task.description)}<br>Status: ${escapeHtml(task.status)}<br>Agent: ${escapeHtml(task.assigned_agent_id || "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
-        [task.priority],
+        detailLines(lines),
+        [
+          { label: task.status, tone: TASK_STATUS_TONES[task.status] || "neutral" },
+          task.priority,
+          { label: heartbeat.label, tone: heartbeat.tone },
+        ],
         actions,
+        { state: task.heartbeat_state },
       );
     })
     .join("") || '<p class="meta">No tasks yet.</p>';
+}
+
+function renderHeartbeats() {
+  const staleTasks = state.tasks.filter((task) => task.heartbeat_state === "stale");
+  const missingTasks = state.tasks.filter((task) => task.heartbeat_state === "missing");
+  const overdueTasks = overdueHeartbeatTasks();
+  $("#stale-heartbeat-count").textContent = staleTasks.length;
+  $("#missing-heartbeat-count").textContent = missingTasks.length;
+
+  const alertChip = $("#heartbeat-alert-count");
+  alertChip.textContent = String(overdueTasks.length);
+  alertChip.dataset.state = overdueTasks.length === 0 ? "ready" : staleTasks.length ? "error" : "warning";
+
+  $("#heartbeat-alert-list").innerHTML = overdueTasks
+    .map((task) => {
+      const heartbeat = heartbeatState(task);
+      return item(
+        task.title,
+        detailLines([
+          `Task ID: ${task.id}`,
+          `Status: ${task.status}`,
+          `Agent: ${task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned"}`,
+          `Last heartbeat: ${task.last_heartbeat_at || "none"}`,
+          `Due at: ${task.next_heartbeat_at || "not scheduled"}`,
+          `Overdue: ${formatDuration(task.heartbeat_overdue_seconds)} late`,
+        ]),
+        [task.priority, { label: heartbeat.label, tone: heartbeat.tone }],
+        "",
+        { state: task.heartbeat_state },
+      );
+    })
+    .join("") || '<p class="meta">No overdue heartbeat expectations.</p>';
+
+  $("#heartbeats-list").innerHTML = state.heartbeats
+    .slice(0, 8)
+    .map((heartbeat) =>
+      item(
+        taskTitle(heartbeat.task_id),
+        detailLines([
+          `Task ID: ${heartbeat.task_id}`,
+          `Agent: ${heartbeat.agent_id ? agentName(heartbeat.agent_id) : "user"}`,
+          `Note: ${heartbeat.note}`,
+          `Recorded: ${heartbeat.created_at}`,
+        ]),
+        [heartbeat.id],
+      ),
+    )
+    .join("") || '<p class="meta">No heartbeats recorded yet.</p>';
 }
 
 function renderSchedules() {
@@ -625,6 +746,7 @@ function render() {
   renderLeases();
   renderPendingApprovals();
   renderTasks();
+  renderHeartbeats();
   renderSchedules();
   renderAudit();
   renderCredentialAudit();
