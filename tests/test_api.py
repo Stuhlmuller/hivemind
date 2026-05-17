@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
+from hivemind.oauth import SecretBox
 from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
 from hivemind.store import HivemindStore, SCHEDULE_BACKFILL_BATCH_LIMIT, StoreError, hash_password
 
@@ -797,7 +798,84 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, oauth://, or secret://"
+
+
+def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Broker Secret",
+            "provider": "openrouter",
+            "secret_value": "sk-test-local-secret",
+            "allowed_actions": ["review_intent"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Set HIVEMIND_SECRETS_KEY to enable broker-side local secret storage."
+    assert "sk-test-local-secret" not in response.text
+
+
+def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Broker Secret",
+            "provider": "openrouter",
+            "secret_value": "sk-test-local-secret",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["review_intent"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+        },
+    )
+
+    assert response.status_code == 201
+    credential = response.json()
+    assert credential["provider"] == "openrouter"
+    assert credential["metadata"]["credential_kind"] == "managed_secret"
+    assert credential["secret_ref_preview"].startswith("secret://")
+    assert "secret_value" not in credential
+    assert "sk-test-local-secret" not in response.text
+
+    list_response = client.get("/credentials")
+    assert list_response.status_code == 200
+    assert "sk-test-local-secret" not in list_response.text
+
+    store = client.app.state.store
+    secret_box = SecretBox.from_env()
+    assert secret_box is not None
+    assert store.resolve_broker_secret(credential["id"], secret_box) == "sk-test-local-secret"
+
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    try:
+        row = conn.execute(
+            "SELECT secret_ref FROM credentials WHERE id = ?",
+            (credential["id"],),
+        ).fetchone()
+        secret_row = conn.execute(
+            "SELECT ciphertext FROM broker_secrets WHERE credential_id = ?",
+            (credential["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row[0] == f"secret://{credential['id']}"
+    assert secret_row is not None
+    assert "sk-test-local-secret" not in secret_row[0]
 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:

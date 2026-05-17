@@ -83,6 +83,37 @@ const credentialTemplates = {
       };
     },
   },
+  managed_secret: {
+    label: "Broker-Stored Secret",
+    provider: "custom",
+    summary: "Encrypt secret material at rest inside Hivemind instead of pointing at a host-side ref.",
+    note: "Requires HIVEMIND_SECRETS_KEY. Public views still expose only a redacted secret:// reference, and only the broker can decrypt the stored material.",
+    defaults: {
+      name: "Broker Managed Secret",
+      allowedActions: "read_repo",
+      maxTtlSeconds: 300,
+      requireIntent: true,
+    },
+    renderFields() {
+      return `
+        <div class="two-col">
+          <label>provider<input name="provider" value="custom" autocomplete="off" required /></label>
+          <label>storage<input value="broker-encrypted" readonly /></label>
+        </div>
+        <label>secret value<textarea name="secret_value" rows="4" autocomplete="off" required></textarea></label>
+        <p class="field-hint">Use this when Hivemind should keep the secret locally in encrypted broker storage and return only a generated <code>secret://</code> ref from public APIs.</p>
+      `;
+    },
+    buildPayload(form) {
+      return {
+        provider: form.elements.provider.value.trim(),
+        secret_value: form.elements.secret_value.value.trim(),
+        metadata: {
+          credential_kind: "managed_secret",
+        },
+      };
+    },
+  },
   generic_reference: {
     label: "Generic Ref",
     provider: "custom",
@@ -118,6 +149,7 @@ const credentialTemplates = {
 const credentialKindLabels = {
   github_oauth_app: "GitHub OAuth Secret Ref",
   github_app: "GitHub App",
+  managed_secret: "Broker-Stored Secret",
   generic_reference: "Generic Ref",
 };
 
@@ -668,7 +700,10 @@ $("#credential-form").addEventListener("submit", async (event) => {
   const templatePayload = template.buildPayload(form);
   payload.name = payload.name.trim();
   payload.provider = templatePayload.provider;
-  payload.secret_ref = templatePayload.secret_ref;
+  delete payload.secret_ref;
+  delete payload.secret_value;
+  payload.secret_ref = templatePayload.secret_ref ?? null;
+  payload.secret_value = templatePayload.secret_value ?? null;
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.approval_required_actions = splitCsv(payload.approval_required_actions);

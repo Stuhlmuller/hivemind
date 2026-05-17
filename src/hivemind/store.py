@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from hivemind.config import HivemindConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
-from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
+from hivemind.secret_refs import ALLOWED_SECRET_REF_SCHEMES, preview_secret_ref, validate_secret_ref
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
@@ -94,6 +94,12 @@ class StoreValidationError(StoreError):
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
+BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
+CREDENTIAL_INSERT_SQL = """
+    INSERT INTO credentials
+    (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
+    VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+"""
 
 
 @dataclass(frozen=True)
@@ -204,6 +210,13 @@ class HivemindStore:
                   token_ciphertext TEXT NOT NULL,
                   token_expires_at TEXT,
                   has_refresh_token INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS broker_secrets (
+                  credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+                  ciphertext TEXT NOT NULL,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -543,7 +556,7 @@ class HivemindStore:
             return normalized
         kind = str(kind).strip().lower()
         normalized["credential_kind"] = kind
-        if kind not in {"generic_reference", "github_oauth_app", "github_app"}:
+        if kind not in {"generic_reference", "github_oauth_app", "github_app", "managed_secret"}:
             raise StoreError(f"unsupported credential_kind: {kind}")
         if kind == "github_oauth_app":
             self.require_guided_credential_fields(
@@ -570,7 +583,7 @@ class HivemindStore:
         )
         provider = str(data["provider"]).strip().lower()
         name = str(data["name"]).strip()
-        secret_ref = str(data["secret_ref"]).strip()
+        secret_ref = str(data.get("secret_ref") or "").strip()
         metadata = self.normalize_credential_metadata(provider, data.get("metadata"))
         if not actions:
             raise StoreError("credential must allow at least one action")
@@ -580,6 +593,8 @@ class HivemindStore:
             raise StoreError("credential name is required")
         if not provider:
             raise StoreError("provider is required")
+        if not secret_ref:
+            raise StoreError("secret_ref is required")
         row = {
             "id": data.get("id") or f"cred_{secrets.token_urlsafe(8)}",
             "name": name,
@@ -603,15 +618,47 @@ class HivemindStore:
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
         with self.connect() as conn:
+            conn.execute(CREDENTIAL_INSERT_SQL, row)
+        return self.public_credential(row)
+
+    def create_managed_credential(
+        self,
+        data: dict[str, Any],
+        *,
+        secret_value: str,
+        secret_box: SecretBox,
+    ) -> dict[str, Any]:
+        normalized_secret = secret_value.strip()
+        if not normalized_secret:
+            raise StoreError("secret_value is required")
+        credential_id = data.get("id") or f"cred_{secrets.token_urlsafe(8)}"
+        metadata = dict(data.get("metadata") or {})
+        metadata.setdefault("credential_kind", "managed_secret")
+        credential_row = self._prepare_credential_row(
+            {
+                **data,
+                "id": credential_id,
+                "secret_ref": f"{BROKER_SECRET_SCHEME}://{credential_id}",
+                "metadata": metadata,
+            }
+        )
+        broker_secret_row = {
+            "credential_id": credential_row["id"],
+            "ciphertext": secret_box.encrypt_text(normalized_secret),
+            "created_at": credential_row["created_at"],
+            "updated_at": credential_row["updated_at"],
+        }
+        with self.connect() as conn:
+            conn.execute(CREDENTIAL_INSERT_SQL, credential_row)
             conn.execute(
                 """
-                INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+                INSERT INTO broker_secrets
+                (credential_id, ciphertext, created_at, updated_at)
+                VALUES (:credential_id, :ciphertext, :created_at, :updated_at)
                 """,
-                row,
+                broker_secret_row,
             )
-        return self.public_credential(row)
+        return self.public_credential(credential_row)
 
     def create_oauth_state(
         self,
@@ -713,14 +760,7 @@ class HivemindStore:
             "updated_at": credential_row["updated_at"],
         }
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO credentials
-                (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
-                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
-                """,
-                credential_row,
-            )
+            conn.execute(CREDENTIAL_INSERT_SQL, credential_row)
             conn.execute(
                 """
                 INSERT INTO oauth_connections
@@ -767,6 +807,20 @@ class HivemindStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def resolve_broker_secret(self, credential_id: str, secret_box: SecretBox) -> str:
+        credential = self.get_credential(credential_id)
+        scheme, _, target = str(credential["secret_ref"]).partition("://")
+        if scheme != BROKER_SECRET_SCHEME or target != credential_id:
+            raise StoreError("credential does not use broker-managed secret storage")
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT ciphertext FROM broker_secrets WHERE credential_id = ?",
+                (credential_id,),
+            ).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"missing broker secret for credential: {credential_id}")
+        return secret_box.decrypt_text(row["ciphertext"])
 
     def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str | None, dict[str, Any]]:
         self.get_agent(agent_id)
