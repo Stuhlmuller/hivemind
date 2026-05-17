@@ -15,9 +15,7 @@
       ];
       forAllSystems = f:
         nixpkgs.lib.genAttrs systems (system: f system);
-    in
-    {
-      devShells = forAllSystems (system:
+      mkSystem = system:
         let
           pkgs = import nixpkgs { inherit system; };
           pythonEnv = pkgs.python312.withPackages (ps: with ps; [
@@ -34,6 +32,24 @@
           python312Compat = pkgs.writeShellScriptBin "python3.12" ''
             exec ${pythonEnv}/bin/python "$@"
           '';
+          validateScript = pkgs.writeShellApplication {
+            name = "validate";
+            runtimeInputs = [ pythonEnv ];
+            text = ''
+              export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
+              export HIVEMIND_DB_PATH="''${HIVEMIND_DB_PATH:-$PWD/.data/hivemind.db}"
+              exec python -m pytest -q
+            '';
+          };
+        in
+        {
+          inherit pkgs pythonEnv python3Compat python312Compat validateScript;
+        };
+    in
+    {
+      devShells = forAllSystems (system:
+        let
+          inherit (mkSystem system) pkgs pythonEnv python3Compat python312Compat;
         in
         {
           default = pkgs.mkShell {
@@ -57,6 +73,28 @@
               export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
               export HIVEMIND_DB_PATH="''${HIVEMIND_DB_PATH:-$PWD/.data/hivemind.db}"
             '';
+          };
+        });
+      packages = forAllSystems (system:
+        let
+          inherit (mkSystem system) validateScript;
+        in
+        {
+          validate = validateScript;
+          default = validateScript;
+        });
+      apps = forAllSystems (system:
+        let
+          inherit (mkSystem system) validateScript;
+        in
+        {
+          validate = {
+            type = "app";
+            program = "${validateScript}/bin/validate";
+          };
+          default = {
+            type = "app";
+            program = "${validateScript}/bin/validate";
           };
         });
     };
