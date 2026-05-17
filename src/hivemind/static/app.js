@@ -280,6 +280,27 @@ function agentName(agentId) {
   return agent ? agent.name : agentId;
 }
 
+function agentTaskSummary(agent) {
+  if (!agent.assigned_tasks.length) return "none";
+  return agent.assigned_tasks
+    .map((task) => `${escapeHtml(task.title)} [${escapeHtml(task.status)}]`)
+    .join("<br>");
+}
+
+function agentScheduleSummary(agent) {
+  if (!agent.assigned_schedules.length) return "none";
+  return agent.assigned_schedules
+    .map((schedule) => `${escapeHtml(schedule.name)} -> ${escapeHtml(schedule.task_title)}`)
+    .join("<br>");
+}
+
+function agentPolicySummary(agent) {
+  if (!agent.credential_policies.length) return "none";
+  return agent.credential_policies
+    .map((policy) => `${escapeHtml(policy.name)} [${escapeHtml(policy.allowed_actions.join(", "))}]`)
+    .join("<br>");
+}
+
 function renderNavigation() {
   const page = currentPage();
   $("#overview-page").hidden = page !== "overview";
@@ -343,13 +364,26 @@ function renderSelectors() {
 function renderAgents() {
   $("#agent-count").textContent = state.agents.length;
   $("#agents-list").innerHTML = state.agents
-    .map((agent) =>
-      item(
+    .map((agent) => {
+      const actions = `
+        <div class="button-row">
+          <button data-agent-status="${escapeHtml(agent.id)}" data-status="idle" type="button"${agent.status === "idle" ? " disabled" : ""}>idle</button>
+          <button data-agent-status="${escapeHtml(agent.id)}" data-status="working" type="button"${agent.status === "working" ? " disabled" : ""}>working</button>
+          <button data-agent-status="${escapeHtml(agent.id)}" data-status="blocked" type="button"${agent.status === "blocked" ? " disabled" : ""}>blocked</button>
+        </div>`;
+      return item(
         agent.name,
-        `${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}`,
-        [agent.status, agent.provider, agent.model],
-      ),
-    )
+        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
+        [
+          agent.status,
+          agent.provider,
+          agent.model,
+          `${agent.assigned_task_count} tasks`,
+          `${agent.credential_policy_count} policies`,
+        ],
+        actions,
+      );
+    })
     .join("") || '<p class="meta">No agents yet.</p>';
 }
 
@@ -596,6 +630,23 @@ $("#spawn-form").addEventListener("submit", async (event) => {
   await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
   await refresh();
   toast("Agent joined the swarm.");
+});
+
+$("#agents-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest("[data-agent-status]");
+  if (!(button instanceof HTMLButtonElement)) return;
+  try {
+    await api(`/agents/${button.dataset.agentStatus}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: button.dataset.status }),
+    });
+    await refresh();
+    toast(`Agent marked ${button.dataset.status}.`);
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 $("#credential-form").addEventListener("submit", async (event) => {

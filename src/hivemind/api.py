@@ -45,6 +45,10 @@ class SpawnAgentRequest(BaseModel):
     system_prompt: str = ""
 
 
+class UpdateAgentStatusRequest(BaseModel):
+    status: str = Field(pattern="^(idle|working|blocked)$")
+
+
 class CreateCredentialRequest(BaseModel):
     name: str = Field(min_length=1)
     provider: str = Field(min_length=1)
@@ -232,7 +236,20 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/agents", status_code=201)
     def spawn_agent(request: SpawnAgentRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return db.create_agent(request.model_dump())
+        return db.create_agent(request.model_dump(), actor_id=user.id)
+
+    @app.patch("/agents/{agent_id}/status")
+    def update_agent_status(
+        agent_id: str,
+        request: UpdateAgentStatusRequest,
+        user: SessionUser = Depends(require_user),
+    ) -> dict[str, Any]:
+        try:
+            return db.update_agent_status(agent_id, request.status, actor_id=user.id)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/credentials")
     def list_credentials(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:

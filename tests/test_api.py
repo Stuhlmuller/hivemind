@@ -247,6 +247,126 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert "github-app.pem" not in response.text
 
 
+def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    assert create_response.status_code == 201
+    agent = create_response.json()
+    assert agent["status"] == "idle"
+    assert agent["assigned_task_count"] == 0
+    assert agent["assigned_schedule_count"] == 0
+    assert agent["credential_policy_count"] == 0
+    assert agent["assigned_tasks"] == []
+    assert agent["assigned_schedules"] == []
+    assert agent["credential_policies"] == []
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    assert credential_response.status_code == 201
+    credential = credential_response.json()
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Inspect repo state",
+            "description": "Check the assigned issue branch and report the next action.",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    assert task_response.status_code == 201
+    task = task_response.json()
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Hourly repo scan",
+            "interval_seconds": 60,
+            "task_title": "Scheduled repo scan",
+            "assigned_agent_id": agent["id"],
+        },
+    )
+    assert schedule_response.status_code == 201
+    schedule = schedule_response.json()
+
+    status_response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "working"},
+    )
+    assert status_response.status_code == 200
+    updated = status_response.json()
+    assert updated["status"] == "working"
+    assert updated["assigned_task_count"] == 1
+    assert updated["active_task_count"] == 1
+    assert updated["assigned_schedule_count"] == 1
+    assert updated["credential_policy_count"] == 1
+    assert updated["assigned_tasks"] == [
+        {
+            "id": task["id"],
+            "title": "Inspect repo state",
+            "status": "queued",
+            "priority": "normal",
+            "updated_at": task["updated_at"],
+        }
+    ]
+    assert updated["assigned_schedules"] == [
+        {
+            "id": schedule["id"],
+            "name": "Hourly repo scan",
+            "enabled": True,
+            "interval_seconds": 60,
+            "next_run_at": schedule["next_run_at"],
+            "task_title": "Scheduled repo scan",
+        }
+    ]
+    assert updated["credential_policies"] == [
+        {
+            "id": credential["id"],
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+        }
+    ]
+
+    listed_agents = {item["id"]: item for item in client.get("/agents").json()}
+    assert listed_agents[agent["id"]]["status"] == "working"
+    assert listed_agents[agent["id"]]["assigned_task_count"] == 1
+
+
+def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.patch("/agents/agent_missing/status", json={"status": "blocked"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "unknown agent: agent_missing"
+
+
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
@@ -265,6 +385,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "system_prompt": "Respond briefly.",
             },
         ),
+        ("PATCH", "/agents/agent_demo/status", {"status": "working"}),
         ("GET", "/credentials", None),
         (
             "POST",

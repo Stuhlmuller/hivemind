@@ -76,6 +76,8 @@ class StoreValidationError(StoreError):
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
+AGENT_STATUS_VALUES = frozenset({"idle", "working", "blocked"})
+FINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
 @dataclass(frozen=True)
@@ -409,9 +411,9 @@ class HivemindStore:
 
     def list_agents(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM agents ORDER BY created_at DESC")]
+            return [self.public_agent(conn, row) for row in conn.execute("SELECT * FROM agents ORDER BY created_at DESC")]
 
-    def create_agent(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_agent(self, data: dict[str, Any], *, actor_id: str = "user") -> dict[str, Any]:
         now = iso()
         row = {
             "id": f"agent_{secrets.token_urlsafe(8)}",
@@ -432,14 +434,97 @@ class HivemindStore:
                 """,
                 row,
             )
-        return row
+        self.audit("agent.created", actor_id, row["id"], "allowed", "agent created", {"status": row["status"]})
+        return self.get_agent(row["id"])
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise StoreNotFoundError(f"unknown agent: {agent_id}")
-            return dict(row)
+            return self.public_agent(conn, row)
+
+    def update_agent_status(self, agent_id: str, status: str, *, actor_id: str = "user") -> dict[str, Any]:
+        normalized_status = status.strip().lower()
+        if normalized_status not in AGENT_STATUS_VALUES:
+            raise StoreValidationError(f"unsupported agent status: {status}")
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise StoreNotFoundError(f"unknown agent: {agent_id}")
+            conn.execute(
+                "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?",
+                (normalized_status, iso(), agent_id),
+            )
+        self.audit("agent.status.updated", actor_id, agent_id, "allowed", f"agent marked {normalized_status}", {"status": normalized_status})
+        return self.get_agent(agent_id)
+
+    def public_agent(self, conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        agent = dict(row)
+        agent_id = agent["id"]
+        assigned_tasks = [
+            {
+                "id": task_row["id"],
+                "title": task_row["title"],
+                "status": task_row["status"],
+                "priority": task_row["priority"],
+                "updated_at": task_row["updated_at"],
+            }
+            for task_row in conn.execute(
+                """
+                SELECT id, title, status, priority, updated_at
+                FROM tasks
+                WHERE assigned_agent_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                """,
+                (agent_id,),
+            )
+        ]
+        assigned_schedules = [
+            {
+                "id": schedule_row["id"],
+                "name": schedule_row["name"],
+                "enabled": bool(schedule_row["enabled"]),
+                "interval_seconds": schedule_row["interval_seconds"],
+                "next_run_at": schedule_row["next_run_at"],
+                "task_title": schedule_row["task_title"],
+            }
+            for schedule_row in conn.execute(
+                """
+                SELECT id, name, enabled, interval_seconds, next_run_at, task_title
+                FROM schedules
+                WHERE assigned_agent_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                """,
+                (agent_id,),
+            )
+        ]
+        credential_policies = [
+            {
+                "id": credential_row["id"],
+                "name": credential_row["name"],
+                "provider": credential_row["provider"],
+                "allowed_actions": loads(credential_row["allowed_actions"], []),
+                "max_ttl_seconds": credential_row["max_ttl_seconds"],
+                "require_intent": bool(credential_row["require_intent"]),
+            }
+            for credential_row in conn.execute(
+                """
+                SELECT id, name, provider, allowed_agents, allowed_actions, max_ttl_seconds, require_intent
+                FROM credentials
+                ORDER BY created_at DESC
+                """
+            )
+            if agent_id in loads(credential_row["allowed_agents"], [])
+        ]
+        agent["assigned_task_count"] = len(assigned_tasks)
+        agent["active_task_count"] = sum(1 for task in assigned_tasks if task["status"] not in FINAL_TASK_STATUSES)
+        agent["assigned_schedule_count"] = len(assigned_schedules)
+        agent["credential_policy_count"] = len(credential_policies)
+        agent["assigned_tasks"] = assigned_tasks
+        agent["assigned_schedules"] = assigned_schedules
+        agent["credential_policies"] = credential_policies
+        return agent
 
     def list_credentials(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
