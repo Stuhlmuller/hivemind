@@ -105,23 +105,16 @@ agents: brokered capabilities</pre>
 
               <div class="panel">
                 <div class="panel-heading">
-                  <h2>credentials</h2>
-                  <p>secret refs only</p>
+                  <div>
+                    <h2>credentials</h2>
+                    <p>guided refs + broker policy</p>
+                  </div>
+                  <button id="open-credential-modal" type="button">new credential</button>
                 </div>
-                <form id="credential-form" class="stack">
-                  <label>name<input name="name" value="github repo reader" autocomplete="off" /></label>
-                  <div class="two-col">
-                    <label>provider<input name="provider" value="github" autocomplete="off" /></label>
-                    <label>secret ref<input name="secret_ref" value="env://GITHUB_TOKEN" autocomplete="off" /></label>
-                  </div>
-                  <label>allowed agents<select name="allowed_agents" multiple></select></label>
-                  <div class="two-col">
-                    <label>allowed actions<input name="allowed_actions" value="read_repo,open_issue" autocomplete="off" /></label>
-                    <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" value="300" /></label>
-                  </div>
-                  <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
-                  <button type="submit">add policy</button>
-                </form>
+                <section class="callout">
+                  <p class="eyebrow">broker boundary</p>
+                  <p>Use provider-specific forms to capture IDs and host-side secret refs. Client secrets and private keys stay outside agents and outside the database payload.</p>
+                </section>
                 <div id="credentials-list" class="list"></div>
               </div>
 
@@ -216,6 +209,43 @@ agents: brokered capabilities</pre>
         </section>
       </section>
     </main>
+
+    <div id="credential-modal" class="modal-shell" hidden>
+      <div class="modal-backdrop" data-close-credential-modal></div>
+      <section class="panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="credential-modal-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="credential-modal-title">add credential</h2>
+            <p>guided provider forms with refs only</p>
+          </div>
+          <button id="close-credential-modal" type="button">close</button>
+        </div>
+        <form id="credential-form" class="stack">
+          <section class="stack">
+            <div>
+              <p class="eyebrow">template</p>
+              <div id="credential-template-picker" class="template-grid" role="tablist" aria-label="Credential template"></div>
+            </div>
+            <div id="credential-template-note" class="callout"></div>
+            <div id="credential-template-fields" class="stack"></div>
+          </section>
+          <section class="stack policy-shell">
+            <div>
+              <p class="eyebrow">broker policy</p>
+            </div>
+            <label>name<input name="name" autocomplete="off" /></label>
+            <label>allowed agents<select name="allowed_agents" multiple></select></label>
+            <p class="field-hint">Leave the list empty to keep the credential deny-by-default until an agent is assigned.</p>
+            <div class="two-col">
+              <label>allowed actions<input name="allowed_actions" autocomplete="off" /></label>
+              <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" /></label>
+            </div>
+            <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
+          </section>
+          <button type="submit">save credential</button>
+        </form>
+      </section>
+    </div>
 
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/static/app.js" type="module"></script>

@@ -9,6 +9,114 @@ const state = {
   schedules: [],
   heartbeats: [],
   auditEvents: [],
+  selectedCredentialTemplate: "github_oauth_app",
+};
+
+const credentialTemplates = {
+  github_oauth_app: {
+    label: "GitHub OAuth App",
+    provider: "github",
+    summary: "Capture the public client ID plus a host-side ref for the client secret.",
+    note: "Use this when Hivemind needs to broker OAuth exchange or refresh actions for a GitHub OAuth app.",
+    defaults: {
+      name: "GitHub OAuth App",
+      allowedActions: "exchange_oauth_code,refresh_oauth_token",
+      maxTtlSeconds: 300,
+      requireIntent: true,
+    },
+    renderFields() {
+      return `
+        <div class="two-col">
+          <label>provider<input value="github" readonly /></label>
+          <label>client id<input name="client_id" placeholder="Iv1.0123456789abcdef" autocomplete="off" required /></label>
+        </div>
+        <label>client secret ref<input name="client_secret_ref" value="file:///var/lib/hivemind/github-oauth-app.ref" autocomplete="off" required /></label>
+        <p class="field-hint">Keep the client secret on the host. Point Hivemind at an <code>env://</code> or <code>file://</code> ref instead of pasting the value here.</p>
+      `;
+    },
+    buildPayload(form) {
+      return {
+        provider: "github",
+        secret_ref: form.elements.client_secret_ref.value.trim(),
+        metadata: {
+          credential_kind: "github_oauth_app",
+          client_id: form.elements.client_id.value.trim(),
+        },
+      };
+    },
+  },
+  github_app: {
+    label: "GitHub App",
+    provider: "github",
+    summary: "Store app identifiers in metadata and keep the PEM private key behind a host-side ref.",
+    note: "Use this for GitHub App installation flows where Hivemind needs the app ID, installation ID, and private key reference.",
+    defaults: {
+      name: "GitHub App Installation",
+      allowedActions: "issue_installation_token,read_repo",
+      maxTtlSeconds: 300,
+      requireIntent: true,
+    },
+    renderFields() {
+      return `
+        <div class="two-col">
+          <label>provider<input value="github" readonly /></label>
+          <label>app id<input name="app_id" placeholder="123456" inputmode="numeric" autocomplete="off" required /></label>
+        </div>
+        <div class="two-col">
+          <label>installation id<input name="installation_id" placeholder="987654321" inputmode="numeric" autocomplete="off" required /></label>
+          <label>private key ref<input name="private_key_ref" value="file:///var/lib/hivemind/github-app.pem" autocomplete="off" required /></label>
+        </div>
+        <p class="field-hint">Keep the PEM on disk or in environment-backed secret storage. Hivemind records only the reference and redacts it in public views.</p>
+      `;
+    },
+    buildPayload(form) {
+      return {
+        provider: "github",
+        secret_ref: form.elements.private_key_ref.value.trim(),
+        metadata: {
+          credential_kind: "github_app",
+          app_id: form.elements.app_id.value.trim(),
+          installation_id: form.elements.installation_id.value.trim(),
+        },
+      };
+    },
+  },
+  generic_reference: {
+    label: "Generic Ref",
+    provider: "custom",
+    summary: "Add a plain provider name plus a single host-side secret reference.",
+    note: "Use this for providers that do not need a specialized guided form yet.",
+    defaults: {
+      name: "Generic Credential Ref",
+      allowedActions: "read_repo",
+      maxTtlSeconds: 300,
+      requireIntent: true,
+    },
+    renderFields() {
+      return `
+        <div class="two-col">
+          <label>provider<input name="provider" value="custom" autocomplete="off" required /></label>
+          <label>primary ref<input name="secret_ref" value="vault://provider/default-token-ref" autocomplete="off" required /></label>
+        </div>
+        <p class="field-hint">Use <code>env://</code>, <code>file://</code>, <code>vault://</code>, or <code>oauth://</code> depending on where the secret material lives.</p>
+      `;
+    },
+    buildPayload(form) {
+      return {
+        provider: form.elements.provider.value.trim(),
+        secret_ref: form.elements.secret_ref.value.trim(),
+        metadata: {
+          credential_kind: "generic_reference",
+        },
+      };
+    },
+  },
+};
+
+const credentialKindLabels = {
+  github_oauth_app: "GitHub OAuth App",
+  github_app: "GitHub App",
+  generic_reference: "Generic Ref",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -58,6 +166,82 @@ function splitCsv(value) {
     .filter(Boolean);
 }
 
+function credentialKindLabel(kind) {
+  return credentialKindLabels[kind] || "Credential Ref";
+}
+
+function credentialAgentScope(credential) {
+  const count = credential.policy.allowed_agents.length;
+  return count ? `${count} agent${count === 1 ? "" : "s"}` : "deny by default";
+}
+
+function credentialDetailRows(credential) {
+  const metadata = credential.metadata || {};
+  const rows = [
+    `ID: ${escapeHtml(credential.id)}`,
+    `Type: ${escapeHtml(credentialKindLabel(metadata.credential_kind))}`,
+    `Provider: ${escapeHtml(credential.provider)}`,
+    `Primary ref: ${escapeHtml(credential.secret_ref_preview)}`,
+  ];
+  if (metadata.client_id) {
+    rows.push(`Client ID: ${escapeHtml(metadata.client_id)}`);
+  }
+  if (metadata.app_id) {
+    rows.push(`App ID: ${escapeHtml(metadata.app_id)}`);
+  }
+  if (metadata.installation_id) {
+    rows.push(`Installation ID: ${escapeHtml(metadata.installation_id)}`);
+  }
+  rows.push(`Allowed agents: ${escapeHtml(credentialAgentScope(credential))}`);
+  rows.push(`Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s`);
+  rows.push(`Intent: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`);
+  return rows.join("<br>");
+}
+
+function renderCredentialTemplatePicker() {
+  $("#credential-template-picker").innerHTML = Object.entries(credentialTemplates)
+    .map(
+      ([templateId, template]) => `
+        <button
+          type="button"
+          class="template-card${state.selectedCredentialTemplate === templateId ? " active" : ""}"
+          data-credential-template="${templateId}"
+          aria-pressed="${state.selectedCredentialTemplate === templateId}"
+        >
+          <strong>${escapeHtml(template.label)}</strong>
+          <span>${escapeHtml(template.summary)}</span>
+        </button>`,
+    )
+    .join("");
+}
+
+function applyCredentialTemplate(reset = false) {
+  const template = credentialTemplates[state.selectedCredentialTemplate];
+  const form = $("#credential-form");
+  renderCredentialTemplatePicker();
+  $("#credential-template-note").innerHTML = `
+    <p class="eyebrow">template note</p>
+    <p>${escapeHtml(template.note)}</p>
+  `;
+  $("#credential-template-fields").innerHTML = template.renderFields();
+  if (!reset) return;
+  form.reset();
+  form.elements.name.value = template.defaults.name;
+  form.elements.allowed_actions.value = template.defaults.allowedActions;
+  form.elements.max_ttl_seconds.value = String(template.defaults.maxTtlSeconds);
+  form.elements.require_intent.checked = template.defaults.requireIntent;
+}
+
+function openCredentialModal() {
+  applyCredentialTemplate(true);
+  renderSelectors();
+  $("#credential-modal").hidden = false;
+}
+
+function closeCredentialModal() {
+  $("#credential-modal").hidden = true;
+}
+
 function item(title, meta, pills = [], actions = "") {
   const pillMarkup = pills.length
     ? `<div class="pill-row">${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}</div>`
@@ -75,6 +259,7 @@ function renderAuth() {
   $("#app-view").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
+  if (!state.me) closeCredentialModal();
   $("#auth-title").textContent = state.setupComplete ? "Log in" : "Set up admin";
   $("#auth-mode").textContent = state.setupComplete ? "Use your local Hivemind account." : "First local user becomes admin.";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
@@ -117,8 +302,13 @@ function renderCredentials() {
     .map((credential) =>
       item(
         credential.name,
-        `ID: ${escapeHtml(credential.id)}<br>Provider: ${escapeHtml(credential.provider)}<br>Secret: ${escapeHtml(credential.secret_ref_preview)}`,
-        credential.policy.allowed_actions,
+        credentialDetailRows(credential),
+        [
+          credentialKindLabel(credential.metadata?.credential_kind),
+          `TTL ${credential.policy.max_ttl_seconds}s`,
+          credential.policy.require_intent ? "intent required" : "intent optional",
+          ...credential.policy.allowed_actions,
+        ],
       ),
     )
     .join("") || '<p class="meta">No credentials yet.</p>';
@@ -251,6 +441,39 @@ $("#refresh-button").addEventListener("click", async () => {
   toast("Runtime refreshed.");
 });
 
+$("#open-credential-modal").addEventListener("click", () => {
+  openCredentialModal();
+});
+
+$("#close-credential-modal").addEventListener("click", () => {
+  closeCredentialModal();
+});
+
+$("#credential-modal").addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  if ("closeCredentialModal" in target.dataset) {
+    closeCredentialModal();
+  }
+});
+
+$("#credential-template-picker").addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest("[data-credential-template]");
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (!button.dataset.credentialTemplate) return;
+  state.selectedCredentialTemplate = button.dataset.credentialTemplate;
+  applyCredentialTemplate(true);
+  renderSelectors();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#credential-modal").hidden) {
+    closeCredentialModal();
+  }
+});
+
 $("#spawn-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
@@ -261,15 +484,26 @@ $("#spawn-form").addEventListener("submit", async (event) => {
 $("#credential-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
+  const template = credentialTemplates[state.selectedCredentialTemplate];
   const payload = readForm(form);
+  const templatePayload = template.buildPayload(form);
+  payload.name = payload.name.trim();
+  payload.provider = templatePayload.provider;
+  payload.secret_ref = templatePayload.secret_ref;
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
   payload.require_intent = form.elements.require_intent.checked;
-  payload.metadata = {};
-  await api("/credentials", { method: "POST", body: JSON.stringify(payload) });
-  await refresh();
-  toast("Credential policy created.");
+  payload.metadata = templatePayload.metadata;
+  try {
+    await api("/credentials", { method: "POST", body: JSON.stringify(payload) });
+    closeCredentialModal();
+    applyCredentialTemplate(true);
+    await refresh();
+    toast("Credential policy created.");
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 $("#lease-form").addEventListener("submit", async (event) => {
@@ -351,4 +585,5 @@ $("#run-due-button").addEventListener("click", async () => {
   toast(`${result.created_tasks.length} due schedule(s) ran.`);
 });
 
+applyCredentialTemplate(true);
 refresh().catch((error) => toast(error.message));
