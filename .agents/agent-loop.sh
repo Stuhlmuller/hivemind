@@ -26,16 +26,23 @@ review_prompt=""
 
 loop_sleep_seconds=""
 loop_max_runs=""
+prompt_preamble=""
 
 prompt_file="$(swarm_role_prompt_path "$script_dir" "$role")"
 review_prompt="$(swarm_role_review_prompt "$role")"
 loop_sleep_seconds="$(swarm_role_sleep_seconds "$role")"
 loop_max_runs="$(swarm_role_max_runs "$role")"
+prompt_preamble="$(swarm_role_prompt_preamble "$role")"
 
 export HIVEMIND_LOOP_LABEL="$role"
 export HIVEMIND_LOOP_SLEEP_SECONDS="$loop_sleep_seconds"
 export HIVEMIND_LOOP_MAX_RUNS="$loop_max_runs"
-unset HIVEMIND_LOOP_PROMPT_PREAMBLE
+
+if [[ -n "$prompt_preamble" ]]; then
+  export HIVEMIND_LOOP_PROMPT_PREAMBLE="$prompt_preamble"
+else
+  unset HIVEMIND_LOOP_PROMPT_PREAMBLE
+fi
 
 if [[ -n "$review_prompt" ]]; then
   export HIVEMIND_LOOP_REVIEW_PROMPT="$review_prompt"

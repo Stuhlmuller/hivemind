@@ -377,6 +377,23 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert 'id="pending-approvals-list"' in response.text
 
 
+def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    for required in [
+        'id="running-task-count"',
+        'id="blocked-task-count"',
+        'id="due-schedule-count"',
+        'id="stale-heartbeat-count"',
+        'id="task-health"',
+        'name="status"',
+    ]:
+        assert required in response.text
+
+
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
@@ -1825,6 +1842,14 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "heartbeat_seconds": None,
             },
         ),
+        (
+            "PATCH",
+            "/tasks/task_demo",
+            {
+                "title": "Retitle task",
+                "description": "Unauthorized edit attempt.",
+            },
+        ),
         ("PATCH", "/tasks/task_demo/status", {"status": "running"}),
         ("POST", "/tasks/task_demo/run", {"input": "run this task"}),
         ("POST", "/tasks/task_demo/heartbeats", {"note": "still working"}),
@@ -3228,7 +3253,9 @@ def test_codex_oauth_flow_audits_missing_code_callback(
 def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
+    me = client.get("/me").json()
     agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
     task_response = client.post(
@@ -3236,13 +3263,27 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
         json={
             "title": "Review credential policy",
             "description": "Confirm the denied paths are tested.",
-            "priority": "high",
+            "priority": "urgent",
             "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Review the repo policy path and report blockers.",
             "heartbeat_seconds": 60,
         },
     )
     assert task_response.status_code == 201
     task = task_response.json()
+    assert task["status"] == "queued"
+    assert task["priority"] == "urgent"
+    assert task["credential_id"] == credential["id"]
+
+    task_list = client.get("/tasks")
+    assert task_list.status_code == 200
+    assert task_list.json()[0]["id"] == task["id"]
+
+    task_status = client.patch(f"/tasks/{task['id']}/status", json={"status": "blocked"})
+    assert task_status.status_code == 200
+    assert task_status.json()["status"] == "blocked"
 
     heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": "policy review started"})
     assert heartbeat.status_code == 201
@@ -3309,10 +3350,13 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_equal(metadata["task_ids"], [created_tasks[0]["id"]], "run_once should audit the created task id")
     require_equal(len(metadata["scheduled_for"]), 1, "run_once should audit the single executed slot")
     schedule_run_event = latest_schedule_run_event(client, schedule["id"])
-    require_equal(schedule_run_event["actor_id"], agent["id"], "schedule audit should attribute the assigned agent")
+    require_equal(schedule_run_event["actor_id"], me["id"], "manual schedule run should attribute the authenticated operator")
     require_equal(schedule_run_event["target_id"], schedule["id"], "schedule audit should target the schedule id")
     require_equal(schedule_run_event["decision"], "allowed", "schedule audit should record an allowed decision")
     require_equal(schedule_run_event["reason"], "scheduled task created", "schedule audit should describe the created task")
+    audit_types = [event["type"] for event in client.get("/audit-events").json()]
+    require_true("task.created" in audit_types, "task creation should be audited")
+    require_true("task.status.updated" in audit_types, "task status changes should be audited")
 
 
 def test_due_schedule_run_is_atomic_across_overlapping_store_instances(tmp_path: Path) -> None:
@@ -3646,6 +3690,462 @@ def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) ->
     )
 
 
+def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    me = client.get("/me").json()
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    create_response = client.post(
+        "/tasks",
+        json={
+            "title": "Review audit visibility",
+            "description": "Verify task transitions remain visible in the operator API.",
+            "priority": "urgent",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Inspect the task-management API acceptance surface.",
+            "heartbeat_seconds": 90,
+        },
+    )
+
+    assert create_response.status_code == 201
+    created_task = create_response.json()
+    assert created_task["title"] == "Review audit visibility"
+    assert created_task["description"] == "Verify task transitions remain visible in the operator API."
+    assert created_task["status"] == "queued"
+    assert created_task["priority"] == "urgent"
+    assert created_task["assigned_agent_id"] == agent["id"]
+    assert created_task["credential_id"] == credential["id"]
+    assert created_task["action"] == "read_repo"
+    assert created_task["intent"] == "Inspect the task-management API acceptance surface."
+    assert created_task["heartbeat_seconds"] == 90
+    assert created_task["next_heartbeat_at"] is not None
+    assert created_task["created_at"] == created_task["updated_at"]
+
+    list_response = client.get("/tasks")
+    assert list_response.status_code == 200
+    assert list_response.json() == [created_task]
+
+    status_response = client.patch(f"/tasks/{created_task['id']}/status", json={"status": "running"})
+    assert status_response.status_code == 200
+    updated_task = status_response.json()
+    assert updated_task["id"] == created_task["id"]
+    assert updated_task["status"] == "running"
+    assert updated_task["updated_at"] != created_task["updated_at"]
+    assert updated_task["created_at"] == created_task["created_at"]
+
+    listed_after_update = client.get("/tasks")
+    assert listed_after_update.status_code == 200
+    assert listed_after_update.json() == [updated_task]
+
+    heartbeat_response = client.post(
+        f"/tasks/{created_task['id']}/heartbeats",
+        json={"note": "operator verified the task is active"},
+    )
+    assert heartbeat_response.status_code == 201
+    heartbeat = heartbeat_response.json()
+    assert heartbeat["task_id"] == created_task["id"]
+    assert heartbeat["agent_id"] == agent["id"]
+    assert heartbeat["note"] == "operator verified the task is active"
+
+    heartbeats_response = client.get(f"/heartbeats?task_id={created_task['id']}")
+    assert heartbeats_response.status_code == 200
+    assert heartbeats_response.json() == [heartbeat]
+
+    audit_response = client.get("/audit-events")
+    assert audit_response.status_code == 200
+    audit_events = audit_response.json()
+    task_audit_events = [event for event in audit_events if event["target_id"] == created_task["id"]]
+
+    assert [event["type"] for event in task_audit_events] == [
+        "task.heartbeat",
+        "task.status.updated",
+        "task.created",
+    ]
+    assert task_audit_events[0]["actor_id"] == me["id"]
+    assert task_audit_events[0]["decision"] == "allowed"
+    assert task_audit_events[0]["reason"] == "heartbeat recorded"
+    assert task_audit_events[0]["metadata"] == {
+        "agent_id": agent["id"],
+        "note": "operator verified the task is active",
+    }
+    assert task_audit_events[1]["actor_id"] == me["id"]
+    assert task_audit_events[1]["decision"] == "allowed"
+    assert task_audit_events[1]["reason"] == "task marked running"
+    assert task_audit_events[1]["metadata"] == {"from_status": "queued", "to_status": "running"}
+    assert task_audit_events[2]["actor_id"] == me["id"]
+    assert task_audit_events[2]["decision"] == "allowed"
+    assert task_audit_events[2]["reason"] == "task created"
+    assert task_audit_events[2]["metadata"] == {
+        "status": "queued",
+        "priority": "urgent",
+        "assigned_agent_id": agent["id"],
+        "credential_id": credential["id"],
+        "action": "read_repo",
+        "intent": "Inspect the task-management API acceptance surface.",
+        "heartbeat_seconds": 90,
+    }
+
+
+def test_task_management_allows_non_status_updates_via_task_api(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    created_task = client.post(
+        "/tasks",
+        json={
+            "title": "Original task",
+            "description": "Original description",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Capture the initial task payload.",
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+
+    update_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={
+            "title": "Updated task",
+            "description": "Updated description",
+            "priority": "high",
+            "assigned_agent_id": "",
+            "credential_id": "",
+            "action": "review_code",
+            "intent": "Verify the task update contract.",
+            "heartbeat_seconds": 120,
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_task = update_response.json()
+    assert updated_task["id"] == created_task["id"]
+    assert updated_task["title"] == "Updated task"
+    assert updated_task["description"] == "Updated description"
+    assert updated_task["status"] == "queued"
+    assert updated_task["priority"] == "high"
+    assert updated_task["assigned_agent_id"] is None
+    assert updated_task["credential_id"] is None
+    assert updated_task["action"] == "review_code"
+    assert updated_task["intent"] == "Verify the task update contract."
+    assert updated_task["heartbeat_seconds"] == 120
+    assert updated_task["next_heartbeat_at"] is not None
+    assert updated_task["created_at"] == created_task["created_at"]
+    assert updated_task["updated_at"] != created_task["updated_at"]
+
+    listed_tasks = client.get("/tasks")
+    assert listed_tasks.status_code == 200
+    assert listed_tasks.json() == [updated_task]
+
+
+def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    created_task = client.post(
+        "/tasks",
+        json={
+            "title": "Mutable task",
+            "description": "Needs cleanup",
+            "action": "read_repo",
+            "intent": "Review the mutable task path.",
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+
+    null_title_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={"title": None},
+    )
+    assert null_title_response.status_code == 400
+    assert null_title_response.json()["detail"] == "title must not be null"
+
+    cleared_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={
+            "description": None,
+            "action": None,
+            "intent": None,
+            "heartbeat_seconds": None,
+        },
+    )
+    assert cleared_response.status_code == 200
+    cleared_task = cleared_response.json()
+    assert cleared_task["description"] == ""
+    assert cleared_task["action"] == ""
+    assert cleared_task["intent"] == ""
+    assert cleared_task["heartbeat_seconds"] is None
+    assert cleared_task["next_heartbeat_at"] is None
+
+
+def test_task_update_rejects_payloads_without_editable_fields(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    created_task = client.post(
+        "/tasks",
+        json={"title": "Strict update task"},
+    ).json()
+
+    empty_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={},
+    )
+    require_equal(empty_response.status_code, 400, "empty task updates should be rejected")
+    require_equal(
+        empty_response.json()["detail"],
+        "task update requires at least one editable field",
+        "empty task update errors should identify the missing editable fields",
+    )
+
+    wrong_endpoint_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={"status": "running"},
+    )
+    require_equal(wrong_endpoint_response.status_code, 422, "status-only task detail updates should fail validation")
+
+    mixed_payload_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={"title": "Ambiguous task update", "status": "done"},
+    )
+    require_equal(mixed_payload_response.status_code, 422, "mixed task detail/status updates should fail validation")
+
+    unchanged_task = client.get("/tasks").json()[0]
+    require_equal(unchanged_task["title"], "Strict update task", "invalid task updates should leave title unchanged")
+    require_equal(unchanged_task["status"], "queued", "invalid task updates should leave status unchanged")
+
+
+def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "task-persistence.db"
+    first_client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
+    setup(first_client)
+    first_user = first_client.get("/me").json()
+    agent = first_client.get("/agents").json()[0]
+    credential = first_client.get("/credentials").json()[0]
+
+    create_response = first_client.post(
+        "/tasks",
+        json={
+            "title": "Persist queued task",
+            "description": "This task should survive a process restart.",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Carry the task contract through a restart.",
+            "heartbeat_seconds": 60,
+        },
+    )
+    assert create_response.status_code == 201
+    created_task = create_response.json()
+
+    status_response = first_client.patch(f"/tasks/{created_task['id']}/status", json={"status": "blocked"})
+    assert status_response.status_code == 200
+
+    heartbeat_response = first_client.post(
+        f"/tasks/{created_task['id']}/heartbeats",
+        json={"note": "restart-safe heartbeat"},
+    )
+    assert heartbeat_response.status_code == 201
+    recorded_heartbeat = heartbeat_response.json()
+    first_client.close()
+
+    second_client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
+    login_response = second_client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    assert login_response.status_code == 200
+
+    tasks_response = second_client.get("/tasks")
+    assert tasks_response.status_code == 200
+    persisted_task = tasks_response.json()[0]
+    assert persisted_task["id"] == created_task["id"]
+    assert persisted_task["title"] == "Persist queued task"
+    assert persisted_task["status"] == "blocked"
+    assert persisted_task["assigned_agent_id"] == agent["id"]
+    assert persisted_task["credential_id"] == credential["id"]
+    assert persisted_task["action"] == "read_repo"
+    assert persisted_task["intent"] == "Carry the task contract through a restart."
+    assert persisted_task["heartbeat_seconds"] == 60
+    assert persisted_task["next_heartbeat_at"] is not None
+
+    heartbeats_response = second_client.get(f"/heartbeats?task_id={created_task['id']}")
+    assert heartbeats_response.status_code == 200
+    assert heartbeats_response.json() == [recorded_heartbeat]
+
+    audit_response = second_client.get("/audit-events")
+    assert audit_response.status_code == 200
+    persisted_task_events = [event for event in audit_response.json() if event["target_id"] == created_task["id"]]
+    assert [event["type"] for event in persisted_task_events] == [
+        "task.heartbeat",
+        "task.status.updated",
+        "task.created",
+    ]
+    assert persisted_task_events[0]["actor_id"] == first_user["id"]
+    assert persisted_task_events[0]["metadata"] == {"agent_id": agent["id"], "note": "restart-safe heartbeat"}
+    assert persisted_task_events[1]["actor_id"] == first_user["id"]
+    assert persisted_task_events[1]["reason"] == "task marked blocked"
+    assert persisted_task_events[1]["metadata"] == {"from_status": "queued", "to_status": "blocked"}
+    assert persisted_task_events[2]["actor_id"] == first_user["id"]
+    assert persisted_task_events[2]["metadata"] == {
+        "status": "queued",
+        "priority": "normal",
+        "assigned_agent_id": agent["id"],
+        "credential_id": credential["id"],
+        "action": "read_repo",
+        "intent": "Carry the task contract through a restart.",
+        "heartbeat_seconds": 60,
+    }
+    second_client.close()
+
+
+def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    invalid_create = client.post(
+        "/tasks",
+        json={
+            "title": "Invalid terminal start",
+            "status": "done",
+        },
+    )
+    assert invalid_create.status_code == 400
+    assert invalid_create.json()["detail"] == "new tasks must start in one of: blocked, queued, running"
+
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Transition guard",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+
+    done_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "done"})
+    assert done_response.status_code == 200
+    assert done_response.json()["status"] == "done"
+    assert done_response.json()["next_heartbeat_at"] is None
+
+    invalid_transition = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
+    assert invalid_transition.status_code == 400
+    assert invalid_transition.json()["detail"] == "cannot transition task from done to running"
+
+    terminal_heartbeat = client.post(
+        f"/tasks/{task['id']}/heartbeats",
+        json={"note": "should be rejected"},
+    )
+    assert terminal_heartbeat.status_code == 400
+    assert terminal_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: done"
+
+    blocked_task = client.post(
+        "/tasks",
+        json={
+            "title": "Blocked transition guard",
+            "status": "blocked",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+    blocked_to_queued = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "queued"})
+    assert blocked_to_queued.status_code == 200
+    assert blocked_to_queued.json()["status"] == "queued"
+    queued_to_running = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "running"})
+    assert queued_to_running.status_code == 200
+    assert queued_to_running.json()["status"] == "running"
+
+    failed_task = client.post(
+        "/tasks",
+        json={
+            "title": "Failed transition guard",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    failed_response = client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
+    assert failed_response.status_code == 200
+    assert failed_response.json()["status"] == "failed"
+    assert failed_response.json()["next_heartbeat_at"] is None
+    failed_heartbeat = client.post(
+        f"/tasks/{failed_task['id']}/heartbeats",
+        json={"note": "should be rejected"},
+    )
+    assert failed_heartbeat.status_code == 400
+    assert failed_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: failed"
+
+    cancelled_task = client.post(
+        "/tasks",
+        json={
+            "title": "Cancelled transition guard",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    running_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "running"})
+    assert running_response.status_code == 200
+    cancelled_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "cancelled"})
+    assert cancelled_response.status_code == 200
+    assert cancelled_response.json()["status"] == "cancelled"
+    assert cancelled_response.json()["next_heartbeat_at"] is None
+    cancelled_heartbeat = client.post(
+        f"/tasks/{cancelled_task['id']}/heartbeats",
+        json={"note": "should be rejected"},
+    )
+    assert cancelled_heartbeat.status_code == 400
+    assert cancelled_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: cancelled"
+
+    edited_done_task = client.patch(
+        f"/tasks/{task['id']}",
+        json={"heartbeat_seconds": 120},
+    )
+    assert edited_done_task.status_code == 200
+    assert edited_done_task.json()["heartbeat_seconds"] == 120
+    assert edited_done_task.json()["next_heartbeat_at"] is None
+
+
+def test_terminal_task_heartbeat_deadlines_are_cleared_during_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "terminal-heartbeat-migration.db"
+    store = HivemindStore(db_path)
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+    stale_at = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc).isoformat()
+    rows = [
+        ("task_done", "done task", "done", stale_at, created_at, created_at),
+        ("task_failed", "failed task", "failed", stale_at, created_at, created_at),
+        ("task_cancelled", "cancelled task", "cancelled", stale_at, created_at, created_at),
+        ("task_queued", "queued task", "queued", stale_at, created_at, created_at),
+    ]
+    with store.connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO tasks
+            (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
+            VALUES (?, ?, '', ?, 'normal', NULL, NULL, '', '', 60, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    HivemindStore(db_path)
+
+    with store.connect() as conn:
+        migrated_rows = {
+            row["id"]: dict(row)
+            for row in conn.execute("SELECT id, next_heartbeat_at, updated_at FROM tasks")
+        }
+
+    assert migrated_rows["task_done"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_failed"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_cancelled"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_queued"]["next_heartbeat_at"] == stale_at
+    assert {row["updated_at"] for row in migrated_rows.values()} == {created_at}
+
+
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -3735,6 +4235,67 @@ def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None
         "schedule next_run_at must be a valid ISO datetime",
         "schedule timestamp errors should not leak parser internals",
     )
+
+def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "legacy-schedule-priority.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    me = client.get("/me").json()
+    agent = client.get("/agents").json()[0]
+
+    legacy_schedule = client.post(
+        "/schedules",
+        json={
+            "name": "Legacy priority schedule",
+            "interval_seconds": 60,
+            "task_title": "Legacy review task",
+            "priority": "high",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    ).json()
+    healthy_schedule = client.post(
+        "/schedules",
+        json={
+            "name": "Healthy due schedule",
+            "interval_seconds": 60,
+            "task_title": "Healthy review task",
+            "priority": "low",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    ).json()
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE schedules SET priority = ?, updated_at = ? WHERE id = ?",
+            ("legacy-urgent", "1999-01-01T00:00:00+00:00", legacy_schedule["id"]),
+        )
+
+    run_response = client.post("/schedules/run-due")
+
+    assert run_response.status_code == 200
+    created_tasks = {task["title"]: task for task in run_response.json()["created_tasks"]}
+    assert set(created_tasks) == {"Legacy review task", "Healthy review task"}
+    assert created_tasks["Legacy review task"]["priority"] == "normal"
+    assert created_tasks["Healthy review task"]["priority"] == "low"
+
+    schedules = {schedule["id"]: schedule for schedule in client.get("/schedules").json()}
+    assert schedules[legacy_schedule["id"]]["priority"] == "normal"
+    assert schedules[healthy_schedule["id"]]["priority"] == "low"
+
+    normalized_event = next(
+        event
+        for event in client.get("/audit-events").json()
+        if event["type"] == "schedule.priority.normalized" and event["target_id"] == legacy_schedule["id"]
+    )
+    assert normalized_event["actor_id"] == me["id"]
+    assert normalized_event["decision"] == "allowed"
+    assert normalized_event["reason"] == "legacy schedule priority normalized"
+    assert normalized_event["metadata"] == {
+        "from_priority": "legacy-urgent",
+        "to_priority": "normal",
+    }
 
 
 def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None:
@@ -3844,7 +4405,7 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
     conn.commit()
     conn.close()
 
-    client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
+    client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
     response = client.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
 
     assert response.status_code == 200
