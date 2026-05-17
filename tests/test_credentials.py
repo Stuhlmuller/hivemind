@@ -81,6 +81,39 @@ class CredentialServiceTests(unittest.TestCase):
                         ),
                     )
 
+    def test_vault_rejects_broker_generated_secret_refs(self) -> None:
+        vault = CredentialVault()
+
+        with self.assertRaisesRegex(CredentialError, "secret:// refs are broker-generated"):
+            vault.add(
+                credential_id="cred_forged_broker_secret",
+                name="Forged Broker Secret",
+                provider="github",
+                secret_ref="secret://cred_existing",  # nosec B106
+                policy=CredentialPolicy(
+                    allowed_agents=frozenset({"agent.scout"}),
+                    allowed_actions=frozenset({"read_repo"}),
+                    max_ttl_seconds=60,
+                ),
+            )
+
+    def test_vault_rejects_managed_secret_kind_for_external_refs(self) -> None:
+        vault = CredentialVault()
+
+        with self.assertRaisesRegex(CredentialError, "managed_secret metadata is broker-generated"):
+            vault.add(
+                credential_id="cred_forged_managed_secret",
+                name="Forged Managed Secret",
+                provider="github",
+                secret_ref="env://GITHUB_TOKEN",  # nosec B106
+                policy=CredentialPolicy(
+                    allowed_agents=frozenset({"agent.scout"}),
+                    allowed_actions=frozenset({"read_repo"}),
+                    max_ttl_seconds=60,
+                ),
+                metadata={"credential_kind": "managed_secret"},
+            )
+
     def test_lease_only_allows_matching_action(self) -> None:
         service = make_service()
         lease = service.request_lease(

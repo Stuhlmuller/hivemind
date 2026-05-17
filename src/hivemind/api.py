@@ -47,7 +47,8 @@ class SpawnAgentRequest(BaseModel):
 class CreateCredentialRequest(BaseModel):
     name: str = Field(min_length=1)
     provider: str = Field(min_length=1)
-    secret_ref: str = Field(min_length=6)
+    secret_ref: str | None = Field(default=None, min_length=6)
+    secret_value: str | None = Field(default=None, min_length=1)
     allowed_agents: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
     approval_required_actions: list[str] = Field(default_factory=list)
@@ -293,8 +294,27 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/credentials", status_code=201)
     def create_credential(request: CreateCredentialRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        payload = request.model_dump()
+        secret_ref = str(payload.get("secret_ref") or "").strip()
+        secret_value = payload.pop("secret_value", None)
+        has_secret_ref = bool(secret_ref)
+        has_secret_value = secret_value is not None
+        if has_secret_ref == has_secret_value:
+            raise HTTPException(status_code=400, detail="provide exactly one of secret_ref or secret_value")
+        payload["secret_ref"] = secret_ref or None
         try:
-            return db.create_credential(request.model_dump())
+            if has_secret_value:
+                if secret_box is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Set HIVEMIND_SECRETS_KEY to enable broker-side local secret storage.",
+                    )
+                return db.create_managed_credential(
+                    payload,
+                    secret_value=secret_value,
+                    secret_box=secret_box,
+                )
+            return db.create_credential(payload)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

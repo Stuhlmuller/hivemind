@@ -38,8 +38,9 @@
           <pre>runtime: local
 db: sqlite
 auth: username/password
-secrets: references only
-leases: scoped + ttl</pre>
+secrets: refs or broker-encrypted
+leases: scoped + ttl
+agents: brokered capabilities</pre>
         </div>
         <form id="auth-form" class="panel stack">
           <div class="panel-heading">
@@ -221,7 +222,7 @@ leases: scoped + ttl</pre>
                     <div class="inline-heading">
                       <div>
                         <h3>oauth bootstrap</h3>
-                        <p>brokered refs: env, file, vault, oauth</p>
+                        <p>brokered refs: env, file, vault, oauth, secret</p>
                       </div>
                       <span id="oauth-provider-state" class="status-chip">loading</span>
                     </div>
