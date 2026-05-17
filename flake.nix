@@ -40,10 +40,12 @@
             packages = with pkgs; [
               bash
               coreutils
+              curl
               findutils
               gh
               git
               gnused
+              lsof
               pythonEnv
               python3Compat
               python312Compat
