@@ -447,30 +447,35 @@ class HivemindStore:
                 """,
                 row,
             )
+            public_row = self.public_agent(conn, row)
         self.audit("agent.created", actor_id, row["id"], "allowed", "agent created", {"status": row["status"]})
-        return self.get_agent(row["id"])
+        return public_row
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-            if row is None:
-                raise StoreNotFoundError(f"unknown agent: {agent_id}")
+            row = self.get_agent_row(conn, agent_id)
             return self.public_agent(conn, row)
 
     def update_agent_status(self, agent_id: str, status: str, *, actor_id: str = "user") -> dict[str, Any]:
         normalized_status = AGENT_STATUS_ALIASES.get(status.strip().lower(), status.strip().lower())
         if normalized_status not in AGENT_STATUS_VALUES:
             raise StoreValidationError(f"unsupported agent status: {status}")
+        updated_at = iso()
         with self.connect() as conn:
-            row = conn.execute("SELECT 1 FROM agents WHERE id = ?", (agent_id,)).fetchone()
-            if row is None:
-                raise StoreNotFoundError(f"unknown agent: {agent_id}")
+            row = self.get_agent_row(conn, agent_id)
             conn.execute(
                 "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?",
-                (normalized_status, iso(), agent_id),
+                (normalized_status, updated_at, agent_id),
             )
+            updated = self.public_agent(conn, {**dict(row), "status": normalized_status, "updated_at": updated_at})
         self.audit("agent.status.updated", actor_id, agent_id, "allowed", f"agent marked {normalized_status}", {"status": normalized_status})
-        return self.get_agent(agent_id)
+        return updated
+
+    def get_agent_row(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"unknown agent: {agent_id}")
+        return row
 
     def public_agents(
         self,
@@ -836,7 +841,8 @@ class HivemindStore:
         }
 
     def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str, dict[str, Any]]:
-        self.get_agent(agent_id)
+        with self.connect() as conn:
+            self.get_agent_row(conn, agent_id)
         credential = self.get_credential(credential_id)
         allowed_agents = set(loads(credential["allowed_agents"], []))
         allowed_actions = set(loads(credential["allowed_actions"], []))
@@ -974,6 +980,24 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown credential: {value}")
 
+    def validate_agent_credential_binding(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        assigned_agent_id: str | None,
+        credential_id: str | None,
+    ) -> None:
+        if assigned_agent_id is None or credential_id is None:
+            return
+        row = conn.execute("SELECT allowed_agents FROM credentials WHERE id = ?", (credential_id,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"credential_id references unknown credential: {credential_id}")
+        allowed_agents = set(loads(row["allowed_agents"], []))
+        if assigned_agent_id not in allowed_agents:
+            raise StoreValidationError(
+                f"assigned_agent_id is not allowed to use credential {credential_id}: {assigned_agent_id}"
+            )
+
     def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
         now = utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
@@ -1002,6 +1026,11 @@ class HivemindStore:
                 conn,
                 field_name="credential_id",
                 value=row["credential_id"],
+            )
+            self.validate_agent_credential_binding(
+                conn,
+                assigned_agent_id=row["assigned_agent_id"],
+                credential_id=row["credential_id"],
             )
             try:
                 conn.execute(
@@ -1109,6 +1138,11 @@ class HivemindStore:
                 conn,
                 field_name="credential_id",
                 value=row["credential_id"],
+            )
+            self.validate_agent_credential_binding(
+                conn,
+                assigned_agent_id=row["assigned_agent_id"],
+                credential_id=row["credential_id"],
             )
             try:
                 conn.execute(

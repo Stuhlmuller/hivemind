@@ -556,6 +556,78 @@ def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
     assert response.json()["detail"] == "allowed_agents references unknown agent: agent_missing"
 
 
+def test_oauth_credential_rejects_unknown_allowed_agent_on_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    class FakeTokenResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_token": "access-secret-token",
+                "refresh_token": "refresh-secret-token",
+                "scope": "openid offline_access",
+                "expires_in": 1800,
+                "token_type": "Bearer",
+            }
+
+    def fake_post(url: str, *, data: dict[str, str], headers: dict[str, str], timeout: float) -> FakeTokenResponse:
+        return FakeTokenResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    client = client_for(tmp_path)
+    setup(client)
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": ["agent_missing"],
+            "allowed_actions": ["delegate_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+    require_equal(start_response.status_code, 201, "oauth credential start should succeed before callback validation")
+    authorize_url = start_response.json()["authorize_url"]
+    query = parse_qs(urlparse(authorize_url).query)
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}&code=broker-code",
+        follow_redirects=False,
+    )
+
+    require_equal(callback_response.status_code, 303, "oauth callback should redirect after rejecting an unknown allowed agent")
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    require_equal(redirect_params["oauth"], ["error"], "oauth callback should report an error status")
+    require_equal(
+        redirect_params["detail"],
+        ["allowed_agents references unknown agent: agent_missing"],
+        "oauth callback should explain the unknown allowed agent",
+    )
+    audit_events = client.get("/audit-events").json()
+    require_equal(audit_events[0]["type"], "credential.oauth.failed", "oauth failure should be audited")
+    require_equal(
+        audit_events[0]["reason"],
+        "allowed_agents references unknown agent: agent_missing",
+        "oauth audit reason should explain the unknown allowed agent",
+    )
+    credentials = client.get("/credentials").json()
+    require_true(
+        all(item["provider"] != "codex" for item in credentials),
+        "oauth callback should not create a codex credential for an unknown allowed agent",
+    )
+
+
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
@@ -1088,6 +1160,54 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         bad_schedule_credential.json()["detail"],
         "credential_id references unknown credential: cred_missing",
         "schedule credential rejection should explain the missing reference",
+    )
+
+    scoped_credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [primary_agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(scoped_credential_response.status_code, 201, "scoped credential should be created for the allowed primary agent")
+    scoped_credential = scoped_credential_response.json()
+
+    bad_task_binding = client.post(
+        "/tasks",
+        json={
+            "title": "Forbidden credential binding",
+            "assigned_agent_id": secondary_agent["id"],
+            "credential_id": scoped_credential["id"],
+        },
+    )
+    require_equal(bad_task_binding.status_code, 400, "task agent/credential policy mismatch should be rejected")
+    require_equal(
+        bad_task_binding.json()["detail"],
+        f"assigned_agent_id is not allowed to use credential {scoped_credential['id']}: {secondary_agent['id']}",
+        "task agent/credential rejection should explain the disallowed binding",
+    )
+
+    bad_schedule_binding = client.post(
+        "/schedules",
+        json={
+            "name": "Forbidden schedule credential binding",
+            "interval_seconds": 60,
+            "task_title": "Scheduled forbidden binding",
+            "assigned_agent_id": secondary_agent["id"],
+            "credential_id": scoped_credential["id"],
+        },
+    )
+    require_equal(bad_schedule_binding.status_code, 400, "schedule agent/credential policy mismatch should be rejected")
+    require_equal(
+        bad_schedule_binding.json()["detail"],
+        f"assigned_agent_id is not allowed to use credential {scoped_credential['id']}: {secondary_agent['id']}",
+        "schedule agent/credential rejection should explain the disallowed binding",
     )
 
     task = client.post(
