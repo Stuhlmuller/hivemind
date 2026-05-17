@@ -64,3 +64,9 @@ agents can replicate Hivemind work with little context.
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
+
+Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
+`.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
+must require working `gh`, run with GitHub-capable network access, move work
+onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
+that branch behavior.
