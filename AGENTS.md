@@ -29,6 +29,9 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
+Commit signing rule: every git commit for this repository must be signed.
+Unsigned commits are not acceptable because policy checks reject them. If commit
+signing fails, stop and fix signing before creating or pushing more commits.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
@@ -67,6 +70,10 @@ new ask creates a durable project rule, workflow, taste preference, security
 boundary, or implementation pattern. Prefer small project-local skills so future
 agents can replicate Hivemind work with little context.
 
+Git workflow rule: use the project-local `hivemind-git-commits` skill before
+staging, committing, or pushing Hivemind changes so branch scope, commit
+signing, and verification stay consistent.
+
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
@@ -74,5 +81,6 @@ software; use username/password local auth, not email-first SaaS account flows.
 Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
 `.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
 must require working `gh`, run with GitHub-capable network access, move work
-onto `issue-<number>-<slug>` branches, and fail when the wrapper cannot verify
-that branch behavior.
+onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
+reuse the primary checkout or repurpose a worktree via local issue-branch
+checkout, and fail when the wrapper cannot verify those rules.
