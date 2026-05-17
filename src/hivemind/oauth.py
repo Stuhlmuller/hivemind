@@ -129,13 +129,18 @@ class SecretBox:
             return None
         return cls(value)
 
+    def encrypt_text(self, value: str) -> str:
+        return self._fernet.encrypt(value.encode("utf-8")).decode("utf-8")
+
+    def decrypt_text(self, token: str) -> str:
+        return self._fernet.decrypt(token.encode("utf-8")).decode("utf-8")
+
     def encrypt_json(self, payload: dict[str, Any]) -> str:
-        serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        return self._fernet.encrypt(serialized).decode("utf-8")
+        serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        return self.encrypt_text(serialized)
 
     def decrypt_json(self, token: str) -> dict[str, Any]:
-        raw = self._fernet.decrypt(token.encode("utf-8"))
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(self.decrypt_text(token))
 
 
 def load_oauth_providers_from_env() -> dict[str, OAuthProviderConfig]:

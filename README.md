@@ -10,7 +10,7 @@ The current implementation includes:
 - Local username/password setup and login.
 - Redacted intent reviewer configuration exposed through `/config`.
 - SQLite persistence.
-- A credential broker that stores secret references instead of secret values.
+- A credential broker that stores secret references plus optional broker-encrypted secret material.
 - Short-lived, scoped leases after policy and intent validation.
 - Tasks, schedules with explicit catch-up policies, heartbeats, and an audit trail.
 - A FastAPI HTTP surface that runs as a single container.
@@ -21,30 +21,53 @@ older missed slots while keeping the original cadence, and `backfill` creates
 one task per overdue slot before resuming the next scheduled run. Long backfill
 windows are processed in bounded batches so restarts remain responsive.
 
-## Run Locally
+## Start The Dev Server
+
+The fastest path is the Nix dev shell:
+
+```bash
+nix develop
+hivemind-dev
+```
+
+`nix develop` prepares the local `.data` directory, points
+`HIVEMIND_DB_PATH` at `.data/hivemind.db`, and prints the local app URL.
+`hivemind-dev` starts the FastAPI server with reload enabled and opts that
+server process into `HIVEMIND_DEVELOPMENT_MODE=true` for plain HTTP login.
+Override `HIVEMIND_HOST`, `HIVEMIND_PORT`, or `HIVEMIND_DB_PATH` before
+running it if you need a different local target.
+
+If you are outside the Nix shell, use the same environment explicitly:
 
 ```bash
 pip install -e ".[dev]"
-uvicorn hivemind.api:create_app --factory --reload
+mkdir -p .data
+export HIVEMIND_DEVELOPMENT_MODE=true
+export HIVEMIND_DB_PATH="$PWD/.data/hivemind.db"
+uvicorn hivemind.api:create_app --factory --reload --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://localhost:8000/`.
 
-For plain HTTP local development, set `HIVEMIND_DEVELOPMENT_MODE=true` before
-launching the app. Outside explicit development mode, Hivemind marks auth
-session cookies `Secure`, so setup/login require HTTPS.
+`HIVEMIND_DEVELOPMENT_MODE=true` is required for plain HTTP local development.
+Outside explicit development mode, Hivemind marks auth session cookies `Secure`,
+so browser setup and login require HTTPS.
 
 The API docs are available at `http://localhost:8000/docs`.
 
 ## Nix Dev Shell
 
-The repository flake is primarily used to keep the swarm loops and repo agent
-runs aligned on a repeatable CLI set:
+The repository flake is the source of truth for the local development toolchain.
+It provides Python, pytest, uvicorn, GitHub CLI, ripgrep, and the
+`hivemind-dev` launcher:
 
 ```bash
 nix flake check
 nix develop
 ```
+
+After the shell opens, run `hivemind-dev` to start the reload server or
+`pytest` to run the backend tests.
 
 If `nix flake check` passes but `nix develop` fails with `Problem with the SSL
 CA cert (path? access rights?)`, the repo flake is usually fine and the local
@@ -70,12 +93,33 @@ If the repair does not hold or `/etc/static` still points at a missing store
 path, repair or reinstall the macOS multi-user Nix daemon installation. This is
 a machine-local problem, not a Hivemind flake problem.
 
-## Login
+## Continuous Integration
+
+GitHub Actions runs the repo-owned baseline on pushes and pull requests to
+`main`: `nix flake check --no-write-lock-file`,
+`nix develop --command pytest -q`, shell script syntax checks,
+`nix develop --command bash .agents/verify-swarm.sh`, and a tracked-file check
+for unresolved merge conflict markers, including diff3 markers. Repository
+maintainers should require the `CI / Repository hygiene` and
+`CI / Nix and tests` status checks before merging changes into `main`.
+
+`qlty check` remains a local handoff gate because `qlty` is currently listed as
+host-managed in `.agents/TOOLS.md` instead of being provided by `flake.nix`.
+The pre-commit hooks remain contributor opt-in for the same reason; promote
+selected hooks into the required CI baseline only after their tools are added
+to the Nix dev shell.
+
+## Dev Server Login
 
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
 The setup form starts blank and requires an operator-entered password. After
 setup completes, use the same username and password on the login screen.
+
+To start over during local development, stop the dev server and point
+`HIVEMIND_DB_PATH` at a new file before restarting. The dev shell defaults the
+database to `.data/hivemind.db`; the quickstart above uses
+`.data/hivemind-dev.db` so local browser testing is isolated.
 
 Optional intent reviewer configuration:
 
@@ -89,7 +133,25 @@ These values are visible to operators through `/config`, with the credential
 reference redacted. The current policy engine still uses deterministic local
 checks for agent scope, action scope, TTL, and intent length.
 
-Optional Codex subscription OAuth configuration:
+Optional agent provider configuration:
+
+```bash
+export HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL=anthropic/claude-sonnet-4
+export HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID=cred_provider_openrouter
+```
+
+`/config` exposes a provider catalog for the deterministic local provider plus
+OpenAI, Codex, Claude, Gemini, OpenRouter, Bedrock, Hugging Face, and Ollama.
+Agents select a provider and model on their agent record. Task execution goes
+through the provider adapter registry, which currently ships only the
+deterministic local adapter; remote providers fail closed until an adapter is
+registered in code.
+Provider credentials must be credential records managed by the broker. The
+provider config points at a credential ID; the underlying secret reference stays
+on the credential record, is redacted in public views, and is authorized through
+a short-lived broker lease before adapter handoff.
+
+Optional broker secret storage and Codex subscription OAuth configuration:
 
 ```bash
 export HIVEMIND_SECRETS_KEY="<set-a-long-random-secret-key>"
@@ -102,27 +164,84 @@ export HIVEMIND_OAUTH_CODEX_CLIENT_SECRET="<set-client-secret-if-needed>"
 export HIVEMIND_OAUTH_CODEX_SCOPES="openid profile email offline_access"
 ```
 
-With those variables set, the credentials console exposes a dedicated Codex
-subscription OAuth flow. The browser callback stores the token bundle in
-broker-owned encrypted storage and creates an `oauth://codex/...` credential
-reference, while public API responses continue to expose only redacted refs.
+With those variables set, the credentials console can either store a secret in
+broker-owned encrypted storage or bootstrap a Codex subscription OAuth
+credential. Broker-managed secrets are persisted as ciphertext and exposed only
+as redacted `secret://...` references in public views. The OAuth browser
+callback stores the token bundle in the same encrypted broker store and creates
+an `oauth://codex/...` credential reference, while public API responses
+continue to expose only redacted refs.
 
 ## Container
 
 ```bash
 docker build -t hivemind .
-docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
+docker run --rm \
+  -p 8000:8000 \
+  -v hivemind-data:/data \
+  -e HIVEMIND_DEVELOPMENT_MODE=true \
+  hivemind
 ```
 
-Run the container behind TLS or another HTTPS terminator in normal deployments.
-Auth session cookies are `Secure` by default. Use
-`HIVEMIND_DEVELOPMENT_MODE=true` only for local HTTP development.
+This is the local container smoke-test path. Open `http://localhost:8000/`,
+complete the first-run admin setup if the `hivemind-data` volume is empty, and
+then log in with that same username/password on later starts.
+
+For the actual self-hosted container, keep the same `/data` volume but run the
+app behind TLS or another HTTPS terminator and leave
+`HIVEMIND_DEVELOPMENT_MODE` unset:
+
+```bash
+docker run -d \
+  --name hivemind \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -v hivemind-data:/data \
+  hivemind
+```
+
+Auth session cookies are `Secure` by default in this mode, so use the HTTPS
+URL from your reverse proxy when completing setup or logging in. The first
+username/password entered for an empty `/data` volume becomes the local admin;
+there are no default container credentials.
 
 GitHub Actions also builds this image on pull requests and publishes it to
 GitHub Container Registry from `main` and version tags as
 `ghcr.io/<owner>/hivemind`.
 
+## Backup And Restore
+
+Use the packaged CLI for operator-managed logical backups of the SQLite-backed
+runtime state:
+
+```bash
+hivemind backup ./hivemind-backup.json
+hivemind restore ./hivemind-backup.json
+```
+
+Inside a container, the default database path is `/data/hivemind.db` unless you
+override `HIVEMIND_DB_PATH`. A typical volume-backed flow looks like:
+
+```bash
+docker exec hivemind hivemind backup /data/backups/hivemind-backup.json
+docker exec hivemind hivemind restore /data/backups/hivemind-backup.json
+```
+
+The logical bundle is versioned and restore rejects incompatible backup format
+versions. The bundle includes durable operator state such as users, password
+hashes, agents, tasks, schedules, audit history, and credential secret refs for
+`env://`, `file://`, and `vault://` credentials. It intentionally excludes
+active sessions, live leases, pending OAuth states, and broker-owned OAuth
+token material, so reconnect OAuth-backed credentials after a restore and treat
+the backup file itself as a sensitive operator artifact. Tasks and schedules
+that pointed at an excluded OAuth credential are restored with that credential
+link cleared so operators can reconnect the capability deliberately. Run
+restore while the instance is stopped or otherwise quiesced so you do not race
+live API traffic while replacing persisted state.
+
 ## Security Model
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 Agents never receive raw credentials. They request a capability from the
 credentials service with an explicit action and intent. The service validates
