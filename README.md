@@ -121,5 +121,9 @@ that request against credential policy, creates a narrow lease when allowed,
 and rejects any later action that does not match the lease.
 
 The current policy engine is deterministic so the core can be tested locally.
-The intended next step is to add provider-backed intent review using the user's
-configured AI model while preserving the same JIT credential lease boundary.
+When `HIVEMIND_INTENT_REVIEWER_PROVIDER` is set to a non-local value, lease
+requests flow through a fail-closed provider reviewer interface after the same
+deterministic policy checks. Provider adapters can be registered in code so
+the broker can keep secrets and credential refs out of agents, the frontend,
+and public API responses while preserving the local deterministic reviewer for
+offline and self-hosted operation.

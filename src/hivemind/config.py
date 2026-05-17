@@ -7,6 +7,12 @@ from typing import Any
 from hivemind.secret_refs import preview_secret_ref
 
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+LOCAL_INTENT_REVIEWER_PROVIDER = "local"
+INTENT_REVIEWER_PROVIDER_ALIASES = {
+    "hugging-face": "huggingface",
+    "subscription": "oauth",
+    "subscription-backed": "oauth",
+}
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:
@@ -16,11 +22,19 @@ def env_flag(name: str, *, default: bool = False) -> bool:
     return value.strip().lower() in TRUTHY_ENV_VALUES
 
 
+def normalize_intent_reviewer_provider(provider: str | None) -> str:
+    normalized = (provider or LOCAL_INTENT_REVIEWER_PROVIDER).strip().lower().replace("_", "-").replace(" ", "-")
+    return INTENT_REVIEWER_PROVIDER_ALIASES.get(normalized, normalized or LOCAL_INTENT_REVIEWER_PROVIDER)
+
+
 @dataclass(frozen=True)
 class IntentReviewerConfig:
-    provider: str = "local"
+    provider: str = LOCAL_INTENT_REVIEWER_PROVIDER
     model: str = "deterministic-policy"
     credential_ref: str | None = None
+
+    def provider_id(self) -> str:
+        return normalize_intent_reviewer_provider(self.provider)
 
     def public_view(self) -> dict[str, Any]:
         return {
@@ -40,9 +54,9 @@ class HivemindConfig:
         return cls(
             development_mode=env_flag("HIVEMIND_DEVELOPMENT_MODE", default=False),
             intent_reviewer=IntentReviewerConfig(
-                provider=os.getenv("HIVEMIND_INTENT_REVIEWER_PROVIDER", "local"),
-                model=os.getenv("HIVEMIND_INTENT_REVIEWER_MODEL", "deterministic-policy"),
-                credential_ref=os.getenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF"),
+                provider=os.getenv("HIVEMIND_INTENT_REVIEWER_PROVIDER") or LOCAL_INTENT_REVIEWER_PROVIDER,
+                model=os.getenv("HIVEMIND_INTENT_REVIEWER_MODEL") or "deterministic-policy",
+                credential_ref=os.getenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF") or None,
             )
         )
 

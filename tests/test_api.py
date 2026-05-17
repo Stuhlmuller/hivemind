@@ -12,9 +12,22 @@ import httpx
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
+from hivemind.config import HivemindConfig, IntentReviewerConfig
+from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest
 from hivemind.store import HivemindStore, StoreError, hash_password
 
 TEST_PASSWORD = "operator-not-secret"
+
+
+class RecordingProviderReviewer:
+    def __init__(self, *, allowed: bool = True, reason: str = "provider reviewer approved the request") -> None:
+        self.allowed = allowed
+        self.reason = reason
+        self.requests: list[ProviderIntentReviewRequest] = []
+
+    def review(self, request: ProviderIntentReviewRequest) -> ProviderIntentReviewDecision:
+        self.requests.append(request)
+        return ProviderIntentReviewDecision(allowed=self.allowed, reason=self.reason)
 
 
 def client_for(tmp_path: Path, *, base_url: str = "https://testserver") -> TestClient:
@@ -240,6 +253,23 @@ def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(t
     assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text
 
 
+def test_config_exposes_redacted_provider_backed_reviewer_settings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_PROVIDER", "openrouter")
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    client = client_for(tmp_path)
+
+    setup(client)
+    response = client.get("/config")
+    reviewer = response.json()["intent_reviewer"]
+
+    require_equal(response.status_code, 200, "config should return after setup")
+    require_equal(reviewer["provider"], "openrouter", "config should expose the configured provider")
+    require_equal(reviewer["model"], "anthropic/claude-sonnet-4", "config should expose the configured model")
+    require_equal(reviewer["credential_ref_preview"], "env://OPE...", "config should redact the reviewer credential ref")
+    require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose the raw reviewer credential ref")
+
+
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -267,6 +297,85 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+
+
+def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
+    reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": reviewer},
+    )
+    client = TestClient(create_app(store, start_scheduler=False))
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 201, "provider-backed reviewer should allow a valid lease")
+    require_true(bool(reviewer.requests), "provider-backed reviewer should receive the lease request")
+    provider_request = reviewer.requests[0]
+    require_equal(provider_request.reviewer_provider, "openrouter", "reviewer should receive the configured provider")
+    require_equal(provider_request.reviewer_model, "anthropic/claude-sonnet-4", "reviewer should receive the configured model")
+    require_equal(
+        provider_request.reviewer_credential_ref,
+        "env://OPENROUTER_API_KEY",
+        "reviewer should receive the broker-owned credential reference",
+    )
+    require_equal(provider_request.credential_provider, "github", "reviewer should receive the leased credential provider")
+    require_equal(provider_request.action, "read_repo", "reviewer should receive the normalized action")
+    require_equal(response.json()["action"], "read_repo", "lease response should preserve the normalized action")
+
+
+def test_unknown_provider_backed_reviewer_fails_closed_for_store_backed_lease_requests(tmp_path: Path) -> None:
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+    )
+    client = TestClient(create_app(store, start_scheduler=False))
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 403, "unknown provider-backed reviewers should fail closed")
+    require_true(
+        "intent reviewer provider is not configured" in response.json()["detail"],
+        "lease denial should explain that the provider adapter is missing",
+    )
+
 
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)

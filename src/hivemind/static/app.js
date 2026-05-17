@@ -513,7 +513,12 @@ function renderCredentialAudit() {
 
 function renderConfig() {
   const reviewer = state.config?.intent_reviewer;
-  $("#reviewer-config").textContent = reviewer ? `${reviewer.provider} / ${reviewer.model}` : "No reviewer configured";
+  if (!reviewer) {
+    $("#reviewer-config").textContent = "No reviewer configured";
+    return;
+  }
+  const credentialRef = reviewer.credential_ref_preview || "no credential ref";
+  $("#reviewer-config").textContent = `${reviewer.provider} / ${reviewer.model} / ${credentialRef}`;
 }
 
 function render() {
