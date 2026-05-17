@@ -113,6 +113,34 @@ GitHub Actions also builds this image on pull requests and publishes it to
 GitHub Container Registry from `main` and version tags as
 `ghcr.io/<owner>/hivemind`.
 
+## Backup And Restore
+
+Use the packaged CLI for operator-managed logical backups of the SQLite-backed
+runtime state:
+
+```bash
+hivemind backup ./hivemind-backup.json
+hivemind restore ./hivemind-backup.json
+```
+
+Inside a container, the default database path is `/data/hivemind.db` unless you
+override `HIVEMIND_DB_PATH`. A typical volume-backed flow looks like:
+
+```bash
+docker exec hivemind hivemind backup /data/backups/hivemind-backup.json
+docker exec hivemind hivemind restore /data/backups/hivemind-backup.json
+```
+
+The logical bundle is versioned and restore rejects incompatible backup format
+versions. The bundle includes durable operator state such as users, password
+hashes, agents, tasks, schedules, audit history, and credential secret refs for
+`env://`, `file://`, and `vault://` credentials. It intentionally excludes
+active sessions, live leases, pending OAuth states, and broker-owned OAuth
+token material, so reconnect OAuth-backed credentials after a restore and treat
+the backup file itself as a sensitive operator artifact. Run restore while the
+instance is stopped or otherwise quiesced so you do not race live API traffic
+while replacing persisted state.
+
 ## Security Model
 
 Agents never receive raw credentials. They request a capability from the

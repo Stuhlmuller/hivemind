@@ -79,6 +79,120 @@ class StoreValidationError(StoreError):
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
+BACKUP_FORMAT = "hivemind-logical-backup"
+BACKUP_FORMAT_VERSION = 1
+BACKUP_TABLE_QUERIES: dict[str, str] = {
+    "users": "SELECT * FROM users ORDER BY id",
+    "agents": "SELECT * FROM agents ORDER BY id",
+    "credentials": "SELECT * FROM credentials WHERE secret_ref NOT LIKE 'oauth://%' ORDER BY id",
+    "tasks": "SELECT * FROM tasks ORDER BY id",
+    "schedules": "SELECT * FROM schedules ORDER BY id",
+    "heartbeat_events": "SELECT * FROM heartbeat_events ORDER BY id",
+    "audit_events": "SELECT * FROM audit_events ORDER BY id",
+}
+BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "users": ("id", "username", "password_hash", "role", "created_at"),
+    "agents": ("id", "name", "role", "provider", "model", "status", "system_prompt", "created_at", "updated_at"),
+    "credentials": (
+        "id",
+        "name",
+        "provider",
+        "secret_ref",
+        "allowed_agents",
+        "allowed_actions",
+        "approval_required_actions",
+        "max_ttl_seconds",
+        "require_intent",
+        "metadata",
+        "created_at",
+        "updated_at",
+    ),
+    "tasks": (
+        "id",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "heartbeat_seconds",
+        "next_heartbeat_at",
+        "created_at",
+        "updated_at",
+    ),
+    "schedules": (
+        "id",
+        "name",
+        "enabled",
+        "interval_seconds",
+        "task_title",
+        "task_description",
+        "priority",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "next_run_at",
+        "last_run_at",
+        "created_at",
+        "updated_at",
+    ),
+    "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
+    "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
+}
+BACKUP_INSERT_STATEMENTS: dict[str, str] = {
+    "users": (
+        "INSERT INTO users (id, username, password_hash, role, created_at) "
+        "VALUES (:id, :username, :password_hash, :role, :created_at)"
+    ),
+    "agents": (
+        "INSERT INTO agents (id, name, role, provider, model, status, system_prompt, created_at, updated_at) "
+        "VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :created_at, :updated_at)"
+    ),
+    "credentials": (
+        "INSERT INTO credentials (id, name, provider, secret_ref, allowed_agents, allowed_actions, "
+        "approval_required_actions, "
+        "max_ttl_seconds, require_intent, metadata, created_at, updated_at) "
+        "VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, "
+        ":approval_required_actions, "
+        ":max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)"
+    ),
+    "tasks": (
+        "INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, credential_id, "
+        "action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at) "
+        "VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, "
+        ":action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)"
+    ),
+    "schedules": (
+        "INSERT INTO schedules (id, name, enabled, interval_seconds, task_title, task_description, priority, "
+        "assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at) "
+        "VALUES (:id, :name, :enabled, :interval_seconds, :task_title, :task_description, :priority, "
+        ":assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)"
+    ),
+    "heartbeat_events": (
+        "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) "
+        "VALUES (:id, :task_id, :agent_id, :note, :created_at)"
+    ),
+    "audit_events": (
+        "INSERT INTO audit_events (id, type, actor_id, target_id, decision, reason, metadata, created_at) "
+        "VALUES (:id, :type, :actor_id, :target_id, :decision, :reason, :metadata, :created_at)"
+    ),
+}
+BACKUP_DELETE_STATEMENTS = (
+    "DELETE FROM oauth_states",
+    "DELETE FROM sessions",
+    "DELETE FROM leases",
+    "DELETE FROM oauth_connections",
+    "DELETE FROM heartbeat_events",
+    "DELETE FROM schedules",
+    "DELETE FROM tasks",
+    "DELETE FROM audit_events",
+    "DELETE FROM credentials",
+    "DELETE FROM agents",
+    "DELETE FROM users",
+)
 
 
 @dataclass(frozen=True)
@@ -329,6 +443,99 @@ class HivemindStore:
             if issued_at is not None and expires_at is not None:
                 ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
             conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
+
+    def export_backup_bundle(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            tables = {
+                table: [dict(row) for row in conn.execute(query)]
+                for table, query in BACKUP_TABLE_QUERIES.items()
+            }
+        return {
+            "format": BACKUP_FORMAT,
+            "format_version": BACKUP_FORMAT_VERSION,
+            "created_at": iso(),
+            "excluded": {
+                "tables": ["sessions", "leases", "oauth_states", "oauth_connections"],
+                "credentials": "oauth-backed broker credentials are excluded and must be reconnected after restore",
+            },
+            "summary": {table: len(rows) for table, rows in tables.items()},
+            "tables": tables,
+        }
+
+    def validate_backup_credential_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        if str(row["secret_ref"]).startswith("oauth://"):
+            raise StoreValidationError("backup bundle cannot restore oauth-backed broker credentials")
+        try:
+            row["secret_ref"] = validate_secret_ref(str(row["secret_ref"]))
+        except ValueError as exc:
+            raise StoreValidationError(str(exc)) from exc
+        return row
+
+    def validate_backup_rows(
+        self,
+        *,
+        table: str,
+        rows: Any,
+        columns: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(rows, list):
+            raise StoreValidationError(f"backup table {table} must be a JSON array")
+        allowed_columns = set(columns)
+        normalized_rows: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise StoreValidationError(f"backup table {table} row {index} must be a JSON object")
+            row_dict = dict(row)
+            row_columns = set(row_dict)
+            extra_columns = sorted(row_columns - allowed_columns)
+            if extra_columns:
+                extras = ", ".join(extra_columns)
+                raise StoreValidationError(f"backup table {table} contains unsupported columns: {extras}")
+            missing_columns = [column for column in columns if column not in row_dict]
+            if missing_columns:
+                missing = ", ".join(missing_columns)
+                raise StoreValidationError(f"backup table {table} row {index} is missing columns: {missing}")
+            if table == "credentials":
+                row_dict = self.validate_backup_credential_row(row_dict)
+            normalized_rows.append(row_dict)
+        return normalized_rows
+
+    def validate_backup_bundle(
+        self,
+        bundle: Mapping[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        if bundle.get("format") != BACKUP_FORMAT:
+            raise StoreValidationError(f"unsupported backup format: {bundle.get('format')!r}")
+        if bundle.get("format_version") != BACKUP_FORMAT_VERSION:
+            raise StoreValidationError(
+                "unsupported backup format version: "
+                f"{bundle.get('format_version')!r}; expected {BACKUP_FORMAT_VERSION}"
+            )
+        tables = bundle.get("tables")
+        if not isinstance(tables, Mapping):
+            raise StoreValidationError("backup bundle tables must be a JSON object")
+
+        missing_tables = [table for table in BACKUP_TABLE_QUERIES if table not in tables]
+        if missing_tables:
+            missing = ", ".join(missing_tables)
+            raise StoreValidationError(f"backup bundle is missing required tables: {missing}")
+
+        return {
+            table: self.validate_backup_rows(table=table, rows=tables[table], columns=BACKUP_TABLE_COLUMNS[table])
+            for table in BACKUP_TABLE_QUERIES
+        }
+
+    def restore_backup_bundle(self, bundle: Mapping[str, Any]) -> dict[str, int]:
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            tables = self.validate_backup_bundle(bundle)
+            for statement in BACKUP_DELETE_STATEMENTS:
+                conn.execute(statement)
+            for table, rows in tables.items():
+                if not rows:
+                    continue
+                conn.executemany(BACKUP_INSERT_STATEMENTS[table], rows)
+        return {table: len(rows) for table, rows in tables.items()}
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
