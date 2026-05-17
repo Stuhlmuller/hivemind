@@ -617,6 +617,8 @@ class HivemindStore:
 
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
+        if row["secret_ref"].startswith(f"{BROKER_SECRET_SCHEME}://"):
+            raise StoreError("secret:// refs are broker-generated; provide secret_value for broker-managed storage")
         with self.connect() as conn:
             conn.execute(CREDENTIAL_INSERT_SQL, row)
         return self.public_credential(row)

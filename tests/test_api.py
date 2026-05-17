@@ -801,6 +801,50 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
     assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, oauth://, or secret://"
 
 
+def test_create_credential_rejects_client_supplied_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Forged Broker Secret",
+            "provider": "openrouter",
+            "secret_ref": "secret://cred_existing",
+            "allowed_actions": ["review_intent"],
+        },
+    )
+
+    require_equal(response.status_code, 400, "client-supplied secret:// refs should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "secret:// refs are broker-generated; provide secret_value for broker-managed storage",
+        "client-supplied secret:// refs should explain how to use managed storage",
+    )
+
+
+def test_store_rejects_client_supplied_broker_secret_ref(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    try:
+        store.create_credential(
+            {
+                "name": "Forged Broker Secret",
+                "provider": "openrouter",
+                "secret_ref": "secret://cred_existing",
+                "allowed_actions": ["review_intent"],
+            }
+        )
+    except StoreError as exc:
+        require_equal(
+            str(exc),
+            "secret:// refs are broker-generated; provide secret_value for broker-managed storage",
+            "store should preserve broker-managed secret_ref invariant",
+        )
+    else:
+        raise AssertionError("client-supplied secret:// credential was accepted")
+
+
 def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
