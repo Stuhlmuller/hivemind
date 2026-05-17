@@ -276,6 +276,7 @@ class HivemindStore:
             self._migrate_users_to_username(conn)
             self._migrate_credentials_to_approval_actions(conn)
             self._migrate_leases_to_store_ttl(conn)
+            self._migrate_terminal_task_heartbeats(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -340,6 +341,18 @@ class HivemindStore:
             if issued_at is not None and expires_at is not None:
                 ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
             conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
+
+    def _migrate_terminal_task_heartbeats(self, conn: sqlite3.Connection) -> None:
+        terminal_statuses = tuple(sorted(TERMINAL_TASK_STATUS_VALUES))
+        conn.execute(
+            """
+            UPDATE tasks
+            SET next_heartbeat_at = NULL
+            WHERE status IN (?, ?, ?)
+              AND next_heartbeat_at IS NOT NULL
+            """,
+            terminal_statuses,
+        )
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:

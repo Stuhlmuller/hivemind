@@ -1398,6 +1398,42 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     assert edited_done_task.json()["next_heartbeat_at"] is None
 
 
+def test_terminal_task_heartbeat_deadlines_are_cleared_during_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "terminal-heartbeat-migration.db"
+    store = HivemindStore(db_path)
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+    stale_at = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc).isoformat()
+    rows = [
+        ("task_done", "done task", "done", stale_at, created_at, created_at),
+        ("task_failed", "failed task", "failed", stale_at, created_at, created_at),
+        ("task_cancelled", "cancelled task", "cancelled", stale_at, created_at, created_at),
+        ("task_queued", "queued task", "queued", stale_at, created_at, created_at),
+    ]
+    with store.connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO tasks
+            (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
+            VALUES (?, ?, '', ?, 'normal', NULL, NULL, '', '', 60, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    HivemindStore(db_path)
+
+    with store.connect() as conn:
+        migrated_rows = {
+            row["id"]: dict(row)
+            for row in conn.execute("SELECT id, next_heartbeat_at, updated_at FROM tasks")
+        }
+
+    assert migrated_rows["task_done"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_failed"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_cancelled"]["next_heartbeat_at"] is None
+    assert migrated_rows["task_queued"]["next_heartbeat_at"] == stale_at
+    assert {row["updated_at"] for row in migrated_rows.values()} == {created_at}
+
+
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
