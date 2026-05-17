@@ -305,7 +305,7 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "metadata": {"credential_kind": "generic_reference"},
         },
     )
-    assert credential_response.status_code == 201
+    require_equal(credential_response.status_code, 201, "credential creation should succeed before restart")
     credential = credential_response.json()
 
     task_response = client.post(
@@ -317,7 +317,7 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "heartbeat_seconds": 60,
         },
     )
-    assert task_response.status_code == 201
+    require_equal(task_response.status_code, 201, "task creation should succeed before restart")
     task = task_response.json()
 
     schedule_response = client.post(
@@ -329,7 +329,7 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
             "assigned_agent_id": agent["id"],
         },
     )
-    assert schedule_response.status_code == 201
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed before restart")
     schedule = schedule_response.json()
 
     status_response = client.patch(
@@ -431,22 +431,107 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
     assert create_response.status_code == 201
     agent = create_response.json()
 
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    assert credential_response.status_code == 201
+    credential = credential_response.json()
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Inspect repo state",
+            "description": "Check the assigned issue branch and report the next action.",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    assert task_response.status_code == 201
+    task = task_response.json()
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Hourly repo scan",
+            "interval_seconds": 60,
+            "task_title": "Scheduled repo scan",
+            "assigned_agent_id": agent["id"],
+        },
+    )
+    assert schedule_response.status_code == 201
+    schedule = schedule_response.json()
+
     update_response = client.patch(
         f"/agents/{agent['id']}/status",
         json={"status": "running"},
     )
-    assert update_response.status_code == 200
+    require_equal(update_response.status_code, 200, "agent status update should succeed before restart")
 
     restarted_client = client_for(tmp_path)
     login_response = restarted_client.post(
         "/auth/login",
         json={"username": "admin", "password": TEST_PASSWORD},
     )
-    assert login_response.status_code == 200
+    require_equal(login_response.status_code, 200, "login should succeed after restart")
 
     agents = {item["id"]: item for item in restarted_client.get("/agents").json()}
-    assert agents[agent["id"]]["name"] == "Operator"
-    assert agents[agent["id"]]["status"] == "running"
+    require_equal(agents[agent["id"]]["name"], "Operator", "agent name should persist across restart")
+    require_equal(agents[agent["id"]]["status"], "running", "agent status should persist across restart")
+    require_equal(agents[agent["id"]]["assigned_task_count"], 1, "assigned task count should persist across restart")
+    require_equal(agents[agent["id"]]["active_task_count"], 1, "active task count should persist across restart")
+    require_equal(agents[agent["id"]]["assigned_schedule_count"], 1, "assigned schedule count should persist across restart")
+    require_equal(agents[agent["id"]]["credential_policy_count"], 1, "credential policy count should persist across restart")
+    require_equal(
+        agents[agent["id"]]["assigned_tasks"],
+        [
+        {
+            "id": task["id"],
+            "title": "Inspect repo state",
+            "status": "queued",
+            "priority": "normal",
+            "updated_at": task["updated_at"],
+        }
+        ],
+        "assigned task rollups should persist across restart",
+    )
+    require_equal(
+        agents[agent["id"]]["assigned_schedules"],
+        [
+        {
+            "id": schedule["id"],
+            "name": "Hourly repo scan",
+            "enabled": True,
+            "interval_seconds": 60,
+            "next_run_at": schedule["next_run_at"],
+            "task_title": "Scheduled repo scan",
+        }
+        ],
+        "assigned schedule rollups should persist across restart",
+    )
+    require_equal(
+        agents[agent["id"]]["credential_policies"],
+        [
+        {
+            "id": credential["id"],
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+        }
+        ],
+        "credential policy rollups should persist across restart",
+    )
 
 
 def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
