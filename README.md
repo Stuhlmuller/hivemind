@@ -10,7 +10,7 @@ The current implementation includes:
 - Local username/password setup and login.
 - Redacted intent reviewer configuration exposed through `/config`.
 - SQLite persistence.
-- A credential broker that stores secret references instead of secret values.
+- A credential broker that stores secret references plus optional broker-encrypted secret material.
 - Short-lived, scoped leases after policy and intent validation.
 - Tasks, schedules with explicit catch-up policies, heartbeats, and an audit trail.
 - A FastAPI HTTP surface that runs as a single container.
@@ -89,7 +89,7 @@ These values are visible to operators through `/config`, with the credential
 reference redacted. The current policy engine still uses deterministic local
 checks for agent scope, action scope, TTL, and intent length.
 
-Optional Codex subscription OAuth configuration:
+Optional broker secret storage and Codex subscription OAuth configuration:
 
 ```bash
 export HIVEMIND_SECRETS_KEY="<set-a-long-random-secret-key>"
@@ -102,10 +102,13 @@ export HIVEMIND_OAUTH_CODEX_CLIENT_SECRET="<set-client-secret-if-needed>"
 export HIVEMIND_OAUTH_CODEX_SCOPES="openid profile email offline_access"
 ```
 
-With those variables set, the credentials console exposes a dedicated Codex
-subscription OAuth flow. The browser callback stores the token bundle in
-broker-owned encrypted storage and creates an `oauth://codex/...` credential
-reference, while public API responses continue to expose only redacted refs.
+With those variables set, the credentials console can either store a secret in
+broker-owned encrypted storage or bootstrap a Codex subscription OAuth
+credential. Broker-managed secrets are persisted as ciphertext and exposed only
+as redacted `secret://...` references in public views. The OAuth browser
+callback stores the token bundle in the same encrypted broker store and creates
+an `oauth://codex/...` credential reference, while public API responses
+continue to expose only redacted refs.
 
 ## Container
 
