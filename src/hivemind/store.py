@@ -1235,9 +1235,32 @@ class HivemindStore:
         *,
         audit_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
-        self.get_agent(agent_id)
-        credential = self.get_credential(credential_id)
+        normalized_action = action.strip().lower()
         base_audit_metadata = dict(audit_metadata or {})
+        try:
+            self.get_agent(agent_id)
+        except StoreError as exc:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                str(exc),
+                {"action": normalized_action, **base_audit_metadata},
+            )
+            raise
+        try:
+            credential = self.get_credential(credential_id)
+        except StoreError as exc:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                str(exc),
+                {"action": normalized_action, **base_audit_metadata},
+            )
+            raise
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
         review = self._policy_engine.review_request(
             PolicyReviewInput(
@@ -1514,6 +1537,13 @@ class HivemindStore:
             "token_preview": row["token_preview"] if status not in {"pending", "denied"} else "not issued",
         }
 
+    def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
+        normalized_note = note.strip()
+        return {
+            "note_present": bool(normalized_note),
+            "note_length": len(normalized_note),
+        }
+
     def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
         row = conn.execute(TASK_BY_ID_QUERY, (task_id,)).fetchone()
         if row is None:
@@ -1616,7 +1646,7 @@ class HivemindStore:
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
             conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
-        self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
+        self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {"status": status})
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
@@ -1963,7 +1993,14 @@ class HivemindStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("agent_id references unknown agent") from exc
             conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
-        self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
+        self.audit(
+            "task.heartbeat",
+            event["agent_id"] or "user",
+            task_id,
+            "allowed",
+            "heartbeat recorded",
+            self.heartbeat_audit_metadata(note),
+        )
         return event
 
     def list_heartbeats(self, task_id: str | None = None) -> list[dict[str, Any]]:

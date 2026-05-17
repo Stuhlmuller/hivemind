@@ -617,6 +617,7 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
+    payload_secret = f"demo-{secrets.token_hex(8)}"
 
     assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]
     lease_response = client.post(
@@ -635,10 +636,111 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
 
     action_response = client.post(
         "/credential-actions",
-        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+        json={
+            "lease_token": lease["lease_token"],
+            "action": "read_repo",
+            "payload": {"repo": "hivemind", "token": payload_secret},
+        },
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+    audit_events = client.get("/audit-events").json()
+    performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
+    assert performed_event["actor_id"] == agent["id"]
+    assert performed_event["target_id"] == credential["id"]
+    assert performed_event["metadata"] == {"action": "read_repo", "payload_keys": ["repo", "token"]}
+    assert payload_secret not in str(audit_events)
+
+
+def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    payload_secret = f"demo-{secrets.token_hex(8)}"
+
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    assert lease_response.status_code == 201
+    lease = lease_response.json()
+
+    action_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": lease["lease_token"],
+            "action": "delete_repo",
+            "payload": {"repo": "hivemind", "token": payload_secret},
+        },
+    )
+    assert action_response.status_code == 403
+    assert action_response.json()["detail"] == "credential lease does not allow this action"
+
+    audit_events = client.get("/audit-events").json()
+    denied_event = next(event for event in audit_events if event["type"] == "credential.action.denied")
+    assert denied_event["decision"] == "denied"
+    assert denied_event["actor_id"] == agent["id"]
+    assert denied_event["target_id"] == credential["id"]
+    assert denied_event["metadata"] == {"action": "delete_repo", "payload_keys": ["repo", "token"]}
+    assert payload_secret not in str(audit_events)
+
+
+def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    missing_agent_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": "cred_missing",
+            "agent_id": "agent_missing",
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    assert missing_agent_response.status_code == 403
+    assert missing_agent_response.json()["detail"] == "unknown agent: agent_missing"
+
+    missing_credential_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": "cred_missing",
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    assert missing_credential_response.status_code == 403
+    assert missing_credential_response.json()["detail"] == "unknown credential: cred_missing"
+
+    audit_events = client.get("/audit-events").json()
+    assert any(
+        event["type"] == "credential.lease.denied"
+        and event["actor_id"] == "agent_missing"
+        and event["target_id"] == "cred_missing"
+        and event["reason"] == "unknown agent: agent_missing"
+        and event["metadata"] == {"action": "read_repo"}
+        for event in audit_events
+    )
+    assert any(
+        event["type"] == "credential.lease.denied"
+        and event["actor_id"] == agent["id"]
+        and event["target_id"] == "cred_missing"
+        and event["reason"] == "unknown credential: cred_missing"
+        and event["metadata"] == {"action": "read_repo"}
+        for event in audit_events
+    )
+
 
     replay_response = client.post(
         "/credential-actions",
@@ -2317,6 +2419,7 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     setup(client)
     agent = client.get("/agents").json()[0]
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
+    heartbeat_note = f"token={secrets.token_hex(8)}"
 
     task_response = client.post(
         "/tasks",
@@ -2331,9 +2434,14 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     assert task_response.status_code == 201
     task = task_response.json()
 
-    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": "policy review started"})
+    status_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
+    assert status_response.status_code == 200
+
+    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": heartbeat_note})
     assert heartbeat.status_code == 201
-    assert client.get("/heartbeats").json()[0]["task_id"] == task["id"]
+    heartbeats = client.get("/heartbeats").json()
+    assert heartbeats[0]["task_id"] == task["id"]
+    assert heartbeats[0]["note"] == heartbeat_note
 
     schedule_response = client.post(
         "/schedules",
@@ -2400,6 +2508,46 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_equal(schedule_run_event["target_id"], schedule["id"], "schedule audit should target the schedule id")
     require_equal(schedule_run_event["decision"], "allowed", "schedule audit should record an allowed decision")
     require_equal(schedule_run_event["reason"], "scheduled task created", "schedule audit should describe the created task")
+    audit_events = client.get("/audit-events")
+    require_equal(audit_events.status_code, 200, "audit event listing should succeed")
+    audit_event_list = audit_events.json()
+    require_true(
+        any(
+            event["type"] == "task.created"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"status": "queued"}
+            for event in audit_event_list
+        ),
+        "task creation should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "task.status.updated"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"status": "running"}
+            for event in audit_event_list
+        ),
+        "task status update should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "task.heartbeat"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_event_list
+        ),
+        "heartbeat audit should include only structured note metadata",
+    )
+    require_true(
+        any(
+            event["type"] == "schedule.created"
+            and event["target_id"] == schedule["id"]
+            and event["metadata"] == {"interval_seconds": 60, "catch_up_policy": "run_once"}
+            for event in audit_event_list
+        ),
+        "schedule creation should be audited",
+    )
+    require_true(heartbeat_note not in str(audit_event_list), "raw heartbeat note should not appear in audit events")
 
 
 def test_due_schedule_run_is_atomic_across_overlapping_store_instances(tmp_path: Path) -> None:
