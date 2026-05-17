@@ -22,7 +22,6 @@ worker_priority_labels() {
   local item
   local label
   local labels=""
-  local allowed_label_pattern='^[[:alnum:] ._:/+-]+$'
 
   if [[ "${HIVEMIND_WORKER_PRIORITY_LABELS+x}" == "x" ]]; then
     raw="$HIVEMIND_WORKER_PRIORITY_LABELS"
@@ -53,11 +52,6 @@ worker_priority_labels() {
 
     label="$(trim_swarm_label "$item")"
     if [[ -n "$label" ]]; then
-      if [[ ! "$label" =~ $allowed_label_pattern ]]; then
-        echo "[swarm] invalid label in HIVEMIND_WORKER_PRIORITY_LABELS: $label" >&2
-        return 1
-      fi
-
       if [[ -n "$labels" ]]; then
         labels="${labels}, "
       fi

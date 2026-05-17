@@ -20,8 +20,8 @@ Before doing any other work:
 
 ## Mission
 
-1. Inspect open pull requests with `gh pr list --state open --limit 100 --json number,title,createdAt,updatedAt,isDraft,headRefName,baseRefName,url,author,mergeStateStatus,reviewDecision,statusCheckRollup`.
-2. Sort open PRs oldest-first by `createdAt`, with stale PRs that have not moved recently ahead of newer work. Start with the oldest PR that is not visibly owned by an active worker worktree.
+1. Fetch the full open pull request queue with GitHub pagination before sorting. Use paginated `gh api graphql` over open PRs, or an equivalent API query, and include number, title, createdAt, updatedAt, draft state, head/base refs, URL, author, merge state, review decision, and status checks.
+2. Sort the full open PR queue oldest-first by `createdAt`, with stale PRs that have not moved recently ahead of newer work. Start with the oldest PR that is not visibly owned by an active worker worktree. Do not rely on a capped `gh pr list` result before enforcing oldest-first ordering.
 3. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
 4. Merge ready PRs whose checks are passing and whose scope matches exactly one issue.
 5. For PRs with failing CI:

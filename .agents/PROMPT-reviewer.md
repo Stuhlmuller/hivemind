@@ -22,8 +22,8 @@ Before doing any other work:
 
 1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
-   - Run `gh pr list --state open --limit 100 --json number,title,createdAt,updatedAt,isDraft,headRefName,baseRefName,url,author,mergeStateStatus,reviewDecision,statusCheckRollup`
-2. Audit open PRs oldest-first by `createdAt`, especially stale PRs that have not moved recently, before reviewing newer PRs.
+   - Fetch the full open PR queue with paginated `gh api graphql`, or an equivalent API query, including number, title, createdAt, updatedAt, draft state, head/base refs, URL, author, merge state, review decision, and status checks
+2. Audit the full open PR queue oldest-first by `createdAt`, especially stale PRs that have not moved recently, before reviewing newer PRs. Do not rely on a capped `gh pr list` result before enforcing oldest-first ordering.
 3. Audit PR scope, touched codepaths, nearby tests, release safety, docs, and CI expectations.
 4. When an old PR appears obsolete, duplicated by merged work, detached from any open issue or accepted direction, or no longer compatible with current architecture, leave a clear close recommendation for the beekeeper with the evidence. The reviewer loop does not close or merge PRs itself.
 5. Treat issue creation as exceptional when there is already an actionable open backlog. Prefer updating, de-duplicating, ranking, or commenting on existing issues.
