@@ -16,13 +16,13 @@ const state = {
 
 const credentialTemplates = {
   github_oauth_app: {
-    label: "GitHub OAuth App",
+    label: "GitHub OAuth Secret Ref",
     provider: "github",
-    summary: "Capture the public client ID plus a host-side ref for the client secret.",
-    note: "Use this when Hivemind needs to broker OAuth exchange or refresh actions for a GitHub OAuth app.",
+    summary: "Store the public client ID plus a host-side ref for the client secret.",
+    note: "Creates a credential policy record. OAuth exchange and refresh adapters are not implemented yet.",
     defaults: {
-      name: "GitHub OAuth App",
-      allowedActions: "exchange_oauth_code,refresh_oauth_token",
+      name: "GitHub OAuth Secret Ref",
+      allowedActions: "read_repo",
       maxTtlSeconds: 300,
       requireIntent: true,
     },
@@ -51,10 +51,10 @@ const credentialTemplates = {
     label: "GitHub App",
     provider: "github",
     summary: "Store app identifiers in metadata and keep the PEM private key behind a host-side ref.",
-    note: "Use this for GitHub App installation flows where Hivemind needs the app ID, installation ID, and private key reference.",
+    note: "Creates a credential policy record. Installation-token issuance requires a broker adapter.",
     defaults: {
       name: "GitHub App Installation",
-      allowedActions: "issue_installation_token,read_repo",
+      allowedActions: "read_repo",
       maxTtlSeconds: 300,
       requireIntent: true,
     },
@@ -116,7 +116,7 @@ const credentialTemplates = {
 };
 
 const credentialKindLabels = {
-  github_oauth_app: "GitHub OAuth App",
+  github_oauth_app: "GitHub OAuth Secret Ref",
   github_app: "GitHub App",
   generic_reference: "Generic Ref",
 };
@@ -495,7 +495,7 @@ function renderAudit() {
       (event) =>
         `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}<br>${escapeHtml(event.created_at)}</div></article>`,
     )
-    .join("") || '<p class="meta">No broker activity yet.</p>';
+    .join("") || '<p class="meta">No audit events yet.</p>';
 }
 
 function renderCredentialAudit() {
@@ -514,11 +514,13 @@ function renderCredentialAudit() {
 function renderConfig() {
   const reviewer = state.config?.intent_reviewer;
   if (!reviewer) {
-    $("#reviewer-config").textContent = "No reviewer configured";
+    $("#reviewer-config").textContent = "local / deterministic-policy / no credential ref";
     return;
   }
+  const provider = reviewer.provider || "local";
+  const model = reviewer.model || "deterministic-policy";
   const credentialRef = reviewer.credential_ref_preview || "no credential ref";
-  $("#reviewer-config").textContent = `${reviewer.provider} / ${reviewer.model} / ${credentialRef}`;
+  $("#reviewer-config").textContent = `${provider} / ${model} / ${credentialRef}`;
 }
 
 function render() {
@@ -647,7 +649,7 @@ $("#spawn-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
   await refresh();
-  toast("Agent joined the swarm.");
+  toast("Agent registered.");
 });
 
 $("#credential-form").addEventListener("submit", async (event) => {
@@ -719,7 +721,7 @@ $("#action-form").addEventListener("submit", async (event) => {
     const result = await api("/credential-actions", { method: "POST", body: JSON.stringify(payload) });
     $("#action-result").textContent = JSON.stringify(result, null, 2);
     await refresh();
-    toast("Broker accepted the action.");
+    toast("Lease matched action.");
   } catch (error) {
     $("#action-result").textContent = error.message;
     await refresh();
