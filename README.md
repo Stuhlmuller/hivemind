@@ -117,6 +117,21 @@ These values are visible to operators through `/config`, with the credential
 reference redacted. The current policy engine still uses deterministic local
 checks for agent scope, action scope, TTL, and intent length.
 
+Optional agent provider configuration:
+
+```bash
+export HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL=anthropic/claude-sonnet-4
+export HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF=env://OPENROUTER_API_KEY
+```
+
+`/config` exposes a redacted provider catalog for OpenAI, Codex, Claude,
+Gemini, OpenRouter, Bedrock, Hugging Face, and Ollama. Agents select a
+provider and model on their agent record. Task execution goes through the
+provider adapter registry, which currently ships only the deterministic local
+adapter; remote providers fail closed until an adapter is registered in code.
+Provider credentials are configured as secret references, not raw keys, and
+public responses do not include the full reference.
+
 Optional broker secret storage and Codex subscription OAuth configuration:
 
 ```bash
