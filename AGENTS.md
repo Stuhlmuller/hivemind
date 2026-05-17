@@ -90,3 +90,12 @@ must require working `gh`, run with GitHub-capable network access, move work
 onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
 reuse the primary checkout or repurpose a worktree via local issue-branch
 checkout, and fail when the wrapper cannot verify those rules.
+
+Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
+changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
+`.agents/role-loop.sh`, `.agents/scout-loop.sh`,
+`.agents/worker-loop-a.sh`, `.agents/worker-loop-b.sh`,
+`.agents/pr-shepherd.sh`, or the `PROMPT-*.md` loop prompts. The GitHub swarm
+must keep dedicated worktrees per role, split development workers across
+deterministic issue lanes, and reserve PR merging and cross-branch CI cleanup
+for the PR shepherd loop.
