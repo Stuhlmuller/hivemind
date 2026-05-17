@@ -77,7 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary = store.restore_backup_bundle(bundle)
             emit_summary("restored", args.path, summary)
             return 0
-    except (OSError, StoreError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, StoreError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
