@@ -16,6 +16,8 @@ max_runs="${RALPH_MAX_RUNS:-0}"
 sleep_seconds="${RALPH_SLEEP_SECONDS:-0}"
 review_prompt="${RALPH_REVIEW_PROMPT:-Review the current uncommitted changes. Prioritize correctness bugs, regressions, and missing tests.}"
 iteration=1
+completed_runs=0
+recovery_prompt=""
 
 trap 'printf "\n[ralph] stopping\n"; exit 0' INT TERM
 
@@ -102,6 +104,71 @@ ensure_github_ready() {
   if ! gh issue list --state all --limit 1 >/dev/null 2>&1; then
     echo "[ralph] gh must be able to read repository issues before Ralph can run" >&2
     exit 1
+  fi
+}
+
+compose_prompt_text() {
+  local prompt_text
+
+  prompt_text="$(<"$prompt_file")"
+  if [[ -z "$recovery_prompt" ]]; then
+    printf '%s' "$prompt_text"
+    return
+  fi
+
+  cat <<EOF
+$prompt_text
+
+## Ralph Recovery Instruction
+
+The previous Ralph attempt hit a recoverable failure.
+
+$recovery_prompt
+
+Fix the blocking issue first, then restart the normal Ralph workflow from the top in this same run:
+- verify the current repo and tool state
+- inspect the next repository issue to work on
+- use exactly one issue branch
+- continue through PR creation and follow-up
+Do not stop after diagnosing the problem. Restore the issue-driven flow and keep moving.
+EOF
+}
+
+set_recovery_prompt() {
+  local stage="$1"
+  local exit_code="$2"
+
+  case "$stage" in
+    codex_exec)
+      recovery_prompt="$(cat <<EOF
+Failure stage: codex exec
+Exit status: $exit_code
+
+Inspect the repo state, identify what blocked the previous Codex run, fix that blocker, and then resume the normal GitHub-driven issue workflow.
+EOF
+)"
+      ;;
+    auto_review)
+      recovery_prompt="$(cat <<EOF
+Failure stage: codex review
+Exit status: $exit_code
+
+Review the current working tree, address the problems that caused the auto-review failure, add any missing verification, and then resume the normal GitHub-driven issue workflow.
+EOF
+)"
+      ;;
+    *)
+      echo "[ralph] unknown recovery stage '$stage'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+advance_iteration() {
+  iteration=$((iteration + 1))
+
+  if [[ "$sleep_seconds" != "0" ]]; then
+    sleep "$sleep_seconds"
   fi
 }
 
@@ -195,7 +262,7 @@ run_codex_exec() {
   local prompt_text
   local -a cmd
 
-  prompt_text="$(<"$prompt_file")"
+  prompt_text="$(compose_prompt_text)"
   # Ralph must be able to read issues, open PRs, and merge them via `gh`,
   # which requires network access inside the spawned Codex run.
   cmd=(codex exec -C "$repo_root" -s danger-full-access)
@@ -238,20 +305,36 @@ while :; do
   ensure_github_ready
   ensure_branch_context_before_run
   echo "[ralph] starting Codex run $iteration"
-  run_codex_exec "$@"
+  if run_codex_exec "$@"; then
+    :
+  else
+    codex_exit_code="$?"
+    set_recovery_prompt "codex_exec" "$codex_exit_code"
+    echo "[ralph] Codex run $iteration failed with status $codex_exit_code; retrying with recovery instructions"
+    advance_iteration
+    continue
+  fi
+
   ensure_issue_branch_activity_after_run "$local_start_branch" "$local_start_reflog_count"
 
   echo "[ralph] starting auto-review for run $iteration"
-  run_auto_review
+  if run_auto_review; then
+    :
+  else
+    review_exit_code="$?"
+    set_recovery_prompt "auto_review" "$review_exit_code"
+    echo "[ralph] auto-review for run $iteration failed with status $review_exit_code; retrying with recovery instructions"
+    advance_iteration
+    continue
+  fi
 
-  if [[ "$max_runs" -gt 0 && "$iteration" -ge "$max_runs" ]]; then
+  recovery_prompt=""
+  completed_runs=$((completed_runs + 1))
+
+  if [[ "$max_runs" -gt 0 && "$completed_runs" -ge "$max_runs" ]]; then
     echo "[ralph] reached RALPH_MAX_RUNS=$max_runs"
     break
   fi
 
-  iteration=$((iteration + 1))
-
-  if [[ "$sleep_seconds" != "0" ]]; then
-    sleep "$sleep_seconds"
-  fi
+  advance_iteration
 done
