@@ -93,6 +93,17 @@ class CreateTaskRequest(BaseModel):
     heartbeat_seconds: int | None = Field(default=None, ge=30)
 
 
+class UpdateTaskRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    priority: TaskPriority | None = None
+    assigned_agent_id: str | None = None
+    credential_id: str | None = None
+    action: str | None = None
+    intent: str | None = None
+    heartbeat_seconds: int | None = Field(default=None, ge=30)
+
+
 class UpdateTaskStatusRequest(BaseModel):
     status: TaskStatus
 
@@ -409,6 +420,15 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return db.create_task(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/tasks/{task_id}")
+    def update_task(task_id: str, request: UpdateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_task(task_id, request.model_dump(exclude_unset=True), actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/tasks/{task_id}/status")
     def update_task_status(task_id: str, request: UpdateTaskStatusRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:

@@ -807,6 +807,101 @@ def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_pat
     }
 
 
+def test_task_management_allows_non_status_updates_via_task_api(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    created_task = client.post(
+        "/tasks",
+        json={
+            "title": "Original task",
+            "description": "Original description",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Capture the initial task payload.",
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+
+    update_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={
+            "title": "Updated task",
+            "description": "Updated description",
+            "priority": "high",
+            "assigned_agent_id": "",
+            "credential_id": "",
+            "action": "review_code",
+            "intent": "Verify the task update contract.",
+            "heartbeat_seconds": 120,
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_task = update_response.json()
+    assert updated_task["id"] == created_task["id"]
+    assert updated_task["title"] == "Updated task"
+    assert updated_task["description"] == "Updated description"
+    assert updated_task["status"] == "queued"
+    assert updated_task["priority"] == "high"
+    assert updated_task["assigned_agent_id"] is None
+    assert updated_task["credential_id"] is None
+    assert updated_task["action"] == "review_code"
+    assert updated_task["intent"] == "Verify the task update contract."
+    assert updated_task["heartbeat_seconds"] == 120
+    assert updated_task["next_heartbeat_at"] is not None
+    assert updated_task["created_at"] == created_task["created_at"]
+    assert updated_task["updated_at"] != created_task["updated_at"]
+
+    listed_tasks = client.get("/tasks")
+    assert listed_tasks.status_code == 200
+    assert listed_tasks.json() == [updated_task]
+
+
+def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    created_task = client.post(
+        "/tasks",
+        json={
+            "title": "Mutable task",
+            "description": "Needs cleanup",
+            "action": "read_repo",
+            "intent": "Review the mutable task path.",
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+
+    null_title_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={"title": None},
+    )
+    assert null_title_response.status_code == 400
+    assert null_title_response.json()["detail"] == "title must not be null"
+
+    cleared_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={
+            "description": None,
+            "action": None,
+            "intent": None,
+            "heartbeat_seconds": None,
+        },
+    )
+    assert cleared_response.status_code == 200
+    cleared_task = cleared_response.json()
+    assert cleared_task["description"] == ""
+    assert cleared_task["action"] == ""
+    assert cleared_task["intent"] == ""
+    assert cleared_task["heartbeat_seconds"] is None
+    assert cleared_task["next_heartbeat_at"] is None
+
+
 def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "task-persistence.db"
     first_client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
@@ -929,6 +1024,59 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     )
     assert terminal_heartbeat.status_code == 400
     assert terminal_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: done"
+
+    blocked_task = client.post(
+        "/tasks",
+        json={
+            "title": "Blocked transition guard",
+            "status": "blocked",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+    blocked_to_queued = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "queued"})
+    assert blocked_to_queued.status_code == 200
+    assert blocked_to_queued.json()["status"] == "queued"
+    queued_to_running = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "running"})
+    assert queued_to_running.status_code == 200
+    assert queued_to_running.json()["status"] == "running"
+
+    failed_task = client.post(
+        "/tasks",
+        json={
+            "title": "Failed transition guard",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    failed_response = client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
+    assert failed_response.status_code == 200
+    assert failed_response.json()["status"] == "failed"
+    failed_heartbeat = client.post(
+        f"/tasks/{failed_task['id']}/heartbeats",
+        json={"note": "should be rejected"},
+    )
+    assert failed_heartbeat.status_code == 400
+    assert failed_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: failed"
+
+    cancelled_task = client.post(
+        "/tasks",
+        json={
+            "title": "Cancelled transition guard",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    running_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "running"})
+    assert running_response.status_code == 200
+    cancelled_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "cancelled"})
+    assert cancelled_response.status_code == 200
+    assert cancelled_response.json()["status"] == "cancelled"
+    cancelled_heartbeat = client.post(
+        f"/tasks/{cancelled_task['id']}/heartbeats",
+        json={"note": "should be rejected"},
+    )
+    assert cancelled_heartbeat.status_code == 400
+    assert cancelled_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: cancelled"
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:

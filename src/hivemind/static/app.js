@@ -11,6 +11,7 @@ const state = {
   schedules: [],
   heartbeats: [],
   auditEvents: [],
+  editingTaskIds: new Set(),
   selectedCredentialTemplate: "github_oauth_app",
 };
 
@@ -184,6 +185,15 @@ function splitCsv(value) {
     .filter(Boolean);
 }
 
+function normalizeTaskPayload(payload) {
+  return {
+    ...payload,
+    assigned_agent_id: payload.assigned_agent_id || null,
+    credential_id: payload.credential_id || null,
+    heartbeat_seconds: payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null,
+  };
+}
+
 function credentialKindLabel(kind) {
   return credentialKindLabels[kind] || "Credential Ref";
 }
@@ -272,8 +282,23 @@ function item(title, meta, pills = [], actions = "") {
 }
 
 function optionList(items, labelKey = "name", includeEmpty = false) {
-  const empty = includeEmpty ? '<option value="">None</option>' : "";
-  return empty + items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item[labelKey])}</option>`).join("");
+  return optionListWithSelected(items, null, labelKey, includeEmpty);
+}
+
+function optionListWithSelected(items, selectedValue, labelKey = "name", includeEmpty = false) {
+  const emptySelected = selectedValue === null || selectedValue === undefined || selectedValue === "";
+  const empty = includeEmpty ? `<option value=""${emptySelected ? " selected" : ""}>None</option>` : "";
+  return empty + items.map((item) => {
+    const selected = selectedValue === item.id ? " selected" : "";
+    return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(item[labelKey])}</option>`;
+  }).join("");
+}
+
+function scalarOptionList(values, selectedValue) {
+  return values.map((value) => {
+    const selected = selectedValue === value ? " selected" : "";
+    return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+  }).join("");
 }
 
 function currentPage() {
@@ -320,12 +345,55 @@ function latestHeartbeatsByTask() {
   return latest;
 }
 
+function toggleTaskEdit(taskId) {
+  if (state.editingTaskIds.has(taskId)) {
+    state.editingTaskIds.delete(taskId);
+  } else {
+    state.editingTaskIds.add(taskId);
+  }
+  renderTasks();
+}
+
 function renderTaskStatusButtons(task) {
   const visibleStatuses = [task.status, ...(TASK_TRANSITIONS[task.status] || [])];
   return visibleStatuses.map((status) => {
     const current = status === task.status;
     return `<button class="status-button${current ? " is-current" : ""}" ${current ? "disabled" : ""} data-task-status="${escapeHtml(task.id)}" data-status="${escapeHtml(status)}" type="button">${escapeHtml(status)}</button>`;
   }).join("");
+}
+
+function renderTaskEditForm(task) {
+  if (!state.editingTaskIds.has(task.id)) {
+    return "";
+  }
+  return `
+    <form class="task-edit-form stack" data-task-edit-form="${escapeHtml(task.id)}">
+      <div class="inline-heading task-edit-header">
+        <div>
+          <h3>edit task</h3>
+          <p>status stays on explicit transition buttons</p>
+        </div>
+        <code>${escapeHtml(task.id)}</code>
+      </div>
+      <div class="two-col">
+        <label>title<input name="title" value="${escapeHtml(task.title)}" autocomplete="off" required /></label>
+        <label>priority<select name="priority">${scalarOptionList(["low", "normal", "high", "urgent"], task.priority)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>agent<select name="assigned_agent_id">${optionListWithSelected(state.agents, task.assigned_agent_id, "name", true)}</select></label>
+        <label>credential<select name="credential_id">${optionListWithSelected(state.credentials, task.credential_id, "name", true)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>action<input name="action" value="${escapeHtml(task.action || "")}" autocomplete="off" /></label>
+        <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="${escapeHtml(task.heartbeat_seconds ?? "")}" /></label>
+      </div>
+      <label>description<textarea name="description" rows="3">${escapeHtml(task.description || "")}</textarea></label>
+      <label>intent<textarea name="intent" rows="3">${escapeHtml(task.intent || "")}</textarea></label>
+      <div class="button-row">
+        <button type="submit">save edit</button>
+        <button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">close</button>
+      </div>
+    </form>`;
 }
 
 function renderTaskHealth() {
@@ -502,6 +570,7 @@ function renderTasks() {
     .map((task) => {
       const heartbeatState = taskHeartbeatState(task);
       const lastHeartbeat = heartbeatsByTask.get(task.id);
+      const editAction = `<button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">${state.editingTaskIds.has(task.id) ? "close edit" : "edit task"}</button>`;
       const heartbeatAction = CLOSED_TASK_STATUSES.has(task.status)
         ? '<span class="meta">Heartbeat closed</span>'
         : `<button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>`;
@@ -511,12 +580,14 @@ function renderTasks() {
             ${renderTaskStatusButtons(task)}
           </div>
           <div class="button-row">
+            ${editAction}
             ${heartbeatAction}
           </div>
+          ${renderTaskEditForm(task)}
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Updated: ${escapeHtml(task.updated_at)}`,
         [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${heartbeatState}`],
         actions,
       );
@@ -773,8 +844,7 @@ $("#action-form").addEventListener("submit", async (event) => {
 
 $("#task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
-  payload.heartbeat_seconds = payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null;
+  const payload = normalizeTaskPayload(readForm(event.currentTarget));
   await api("/tasks", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Task created.");
@@ -784,6 +854,10 @@ $("#tasks-list").addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
   try {
+    if (target.dataset.taskEditToggle) {
+      toggleTaskEdit(target.dataset.taskEditToggle);
+      return;
+    }
     if (target.dataset.taskStatus) {
       await api(`/tasks/${target.dataset.taskStatus}/status`, {
         method: "PATCH",
@@ -801,6 +875,25 @@ $("#tasks-list").addEventListener("click", async (event) => {
       toast("Heartbeat recorded.");
     }
   } catch (error) {
+    await refresh();
+    toast(error.message);
+  }
+});
+
+$("#tasks-list").addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const taskId = form.dataset.taskEditForm;
+  if (!taskId) return;
+  event.preventDefault();
+  try {
+    const payload = normalizeTaskPayload(readForm(form));
+    await api(`/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    state.editingTaskIds.delete(taskId);
+    await refresh();
+    toast("Task details updated.");
+  } catch (error) {
+    state.editingTaskIds.add(taskId);
     await refresh();
     toast(error.message);
   }

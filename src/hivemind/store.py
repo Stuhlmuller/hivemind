@@ -87,6 +87,16 @@ VALID_TASK_PRIORITIES = frozenset(priority.value for priority in TaskPriority)
 VALID_TASK_STATUSES = frozenset(status.value for status in TaskStatus)
 VALID_INITIAL_TASK_STATUSES = frozenset(status.value for status in INITIAL_TASK_STATUSES)
 TERMINAL_TASK_STATUS_VALUES = frozenset(status.value for status in TERMINAL_TASK_STATUSES)
+EDITABLE_TASK_FIELDS = (
+    "title",
+    "description",
+    "priority",
+    "assigned_agent_id",
+    "credential_id",
+    "action",
+    "intent",
+    "heartbeat_seconds",
+)
 VALID_TASK_STATUS_TRANSITIONS = {
     status.value: frozenset(next_status.value for next_status in next_statuses)
     for status, next_statuses in TASK_STATUS_TRANSITIONS.items()
@@ -858,6 +868,53 @@ class HivemindStore:
         if allowed_statuses is None or next_status not in allowed_statuses:
             raise StoreValidationError(f"cannot transition task from {current_status} to {next_status}")
 
+    def validate_task_update_data(self, conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+        if "priority" in data:
+            if data["priority"] is None:
+                raise StoreValidationError("priority must not be null")
+            self.validate_task_priority(str(data["priority"]))
+        if "assigned_agent_id" in data:
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="assigned_agent_id",
+                value=data["assigned_agent_id"] or None,
+            )
+        if "credential_id" in data:
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="credential_id",
+                value=data["credential_id"] or None,
+            )
+
+    def normalize_task_update_value(self, field: str, value: Any) -> Any:
+        if field == "title" and value is None:
+            raise StoreValidationError("title must not be null")
+        if field in {"description", "action", "intent"} and value is None:
+            return ""
+        if field in {"assigned_agent_id", "credential_id"}:
+            return value or None
+        return value
+
+    def apply_task_update_field(
+        self,
+        row: sqlite3.Row,
+        updated: dict[str, Any],
+        *,
+        field: str,
+        next_value: Any,
+        now: datetime,
+    ) -> bool:
+        if field == "heartbeat_seconds":
+            if next_value == row[field]:
+                return False
+            updated[field] = next_value
+            updated["next_heartbeat_at"] = iso(now + timedelta(seconds=int(next_value))) if next_value else None
+            return True
+        if next_value == row[field]:
+            return False
+        updated[field] = next_value
+        return True
+
     def create_task(self, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
         now = utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
@@ -922,6 +979,56 @@ class HivemindStore:
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
+
+    def update_task(self, task_id: str, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        requested_fields = tuple(field for field in EDITABLE_TASK_FIELDS if field in data)
+        if not requested_fields:
+            return self.get_task(task_id)
+        now = utcnow()
+        with self.connect() as conn:
+            row = self.get_task_row(conn, task_id)
+            updated = dict(row)
+            changes: list[str] = []
+            self.validate_task_update_data(conn, data)
+
+            for field in requested_fields:
+                next_value = self.normalize_task_update_value(field, data[field])
+                if self.apply_task_update_field(row, updated, field=field, next_value=next_value, now=now):
+                    changes.append(field)
+
+            if not changes:
+                return dict(row)
+
+            updated["updated_at"] = iso(now)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET title = ?, description = ?, priority = ?, assigned_agent_id = ?, credential_id = ?, action = ?, intent = ?, heartbeat_seconds = ?, next_heartbeat_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updated["title"],
+                    updated["description"],
+                    updated["priority"],
+                    updated["assigned_agent_id"],
+                    updated["credential_id"],
+                    updated["action"],
+                    updated["intent"],
+                    updated["heartbeat_seconds"],
+                    updated["next_heartbeat_at"],
+                    updated["updated_at"],
+                    task_id,
+                ),
+            )
+        self.audit(
+            "task.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            "task details updated",
+            {"fields": changes},
+        )
+        return self.get_task(task_id)
 
     def update_task_status(self, task_id: str, status: str, *, actor_id: str) -> dict[str, Any]:
         now = iso()

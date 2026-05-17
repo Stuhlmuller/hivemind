@@ -605,6 +605,28 @@ select[multiple] {
   gap: 8px;
 }
 
+.task-edit-form {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.task-edit-header {
+  align-items: center;
+}
+
+.task-edit-header code {
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.task-edit-form input,
+.task-edit-form textarea,
+.task-edit-form select {
+  background: #060a10;
+}
+
 .status-row {
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   margin-top: 10px;
