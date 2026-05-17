@@ -26,6 +26,7 @@ max_runs="${HIVEMIND_LOOP_MAX_RUNS:-0}"
 review_prompt="${HIVEMIND_LOOP_REVIEW_PROMPT:-}"
 iteration=1
 shared_prompt_file="$script_dir/PROMPT-subagents.md"
+prompt_preamble="${HIVEMIND_LOOP_PROMPT_PREAMBLE:-}"
 
 trap 'printf "\n[%s] stopping\n" "$loop_label"; exit 0' INT TERM
 
@@ -53,7 +54,13 @@ ensure_github_ready "$loop_label"
 while :; do
   ensure_github_ready "$loop_label"
   echo "[$loop_label] starting Codex run $iteration in $run_root"
-  run_codex_exec "$run_root" "$prompt_file" "$shared_prompt_file" "$@"
+  if [[ -n "$prompt_preamble" ]]; then
+    run_codex_exec "$run_root" <(
+      printf '%s\n\n%s\n' "$prompt_preamble" "$(<"$prompt_file")"
+    ) "$shared_prompt_file" "$@"
+  else
+    run_codex_exec "$run_root" "$prompt_file" "$shared_prompt_file" "$@"
+  fi
 
   if [[ -n "$review_prompt" ]]; then
     echo "[$loop_label] starting auto-review for run $iteration in $run_root"
