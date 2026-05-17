@@ -16,7 +16,8 @@ push unsigned commits.
 2. Review `git status --short` so unrelated files do not get swept into the commit.
 3. Run the narrowest meaningful verification for the touched files.
 4. Create a signed commit. If signing fails, stop and fix signing instead of using an unsigned fallback.
-5. Before push or PR creation, verify the new commit is signed and the worktree is in the expected state.
+5. Before push or PR creation, use `hivemind-pr-sync` so the branch contains the latest `origin/main` and any conflicts are resolved locally.
+6. After sync, verify the new tip commit is signed and the worktree is in the expected state.
 
 For multi-step implementation branches, use `hivemind-branch-checkpoints`
 earlier in the loop so you do not accumulate a large uncommitted pile before
@@ -28,6 +29,7 @@ you reach this workflow.
 - Do not use unsigned local-only checkpoints as a workaround for policy checks.
 - If the environment blocks signing, surface that as a blocker immediately.
 - Keep one issue per branch and one task per PR.
+- If rebasing during PR sync rewrites commits, re-check signatures before push.
 
 ## Verification
 

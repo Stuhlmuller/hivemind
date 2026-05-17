@@ -10,15 +10,13 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `codex` | `external` | Run the Codex agent and `codex review` loops from the repository automation wrappers |
 | `gh` | `gh` | Inspect GitHub issues and pull requests, create backlog issues, and merge or update PRs from the automation loops |
 | `git` | `git` | Inspect repository state and history |
+| `launchctl` / `plutil` | `external` | Install, inspect, and lint the optional macOS LaunchAgent that keeps the swarm running across laptop sessions |
 | `nix` | `external` | Evaluate `flake.nix` and verify whether the repo dev shell is usable in the local environment |
-| `python` / `python3` / `python3.12` | `python312` | Run the application test suite, skill validation, and repo-local verification commands |
-| `pytest` | `python312Packages.pytest` | Execute focused regression coverage for the changed API and store paths |
-| `uvicorn` | `python312Packages.uvicorn` | Start the local FastAPI dev server from the repo checkout |
 | `qlty` | `external` | Run the required code-quality checks before finishing repository changes |
 | `rg` | `ripgrep` | Search the codebase quickly |
 | `find` | `findutils` | Discover files and repo structure |
 | `sed` | `gnused` | Read targeted file sections |
-| `cat` / `chmod` / `cp` / `kill` / `ls` / `mkdir` / `mktemp` / `nohup` / `pwd` / `rm` / `sleep` / `tail` / `tr` / `wc` | `coreutils` | Basic shell utilities for navigation, temp files, background loop management, log inspection, and focused script verification |
+| `cat` / `chmod` / `cp` / `id` / `kill` / `ls` / `mkdir` / `mktemp` / `nohup` / `pwd` / `rm` / `sleep` / `tail` / `tr` / `uname` / `wc` | `coreutils` | Basic shell utilities for navigation, temp files, background loop management, login-session detection, log inspection, and focused script verification |
 
 ## Update rule
 

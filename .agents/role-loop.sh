@@ -7,7 +7,9 @@ fi
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "$script_dir/loop-common.sh"
+repo_root="${repo_root:-}"
 
 if [[ "$#" -lt 2 ]]; then
   echo "usage: $0 <run-root> <prompt-file> [codex-exec-args...]" >&2
@@ -23,6 +25,7 @@ sleep_seconds="${HIVEMIND_LOOP_SLEEP_SECONDS:-0}"
 max_runs="${HIVEMIND_LOOP_MAX_RUNS:-0}"
 review_prompt="${HIVEMIND_LOOP_REVIEW_PROMPT:-}"
 iteration=1
+shared_prompt_file="$script_dir/PROMPT-subagents.md"
 
 trap 'printf "\n[%s] stopping\n" "$loop_label"; exit 0' INT TERM
 
@@ -36,6 +39,11 @@ if [[ ! -f "$prompt_file" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$shared_prompt_file" ]]; then
+  echo "[$loop_label] missing shared prompt file: $shared_prompt_file" >&2
+  exit 1
+fi
+
 ensure_not_nested_codex "$loop_label"
 ensure_git_ready "$loop_label"
 ensure_codex_ready "$loop_label"
@@ -45,7 +53,7 @@ ensure_github_ready "$loop_label"
 while :; do
   ensure_github_ready "$loop_label"
   echo "[$loop_label] starting Codex run $iteration in $run_root"
-  run_codex_exec "$run_root" "$prompt_file" "$@"
+  run_codex_exec "$run_root" "$prompt_file" "$shared_prompt_file" "$@"
 
   if [[ -n "$review_prompt" ]]; then
     echo "[$loop_label] starting auto-review for run $iteration in $run_root"

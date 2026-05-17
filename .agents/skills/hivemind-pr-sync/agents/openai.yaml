@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hivemind PR Sync"
+  short_description: "Keep PR branches current with main."
+  default_prompt: "Use this skill before opening or updating a Hivemind pull request so the branch contains the latest origin/main, conflicts are resolved locally, and verification is rerun before handoff."

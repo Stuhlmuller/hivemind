@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
-from hivemind.store import HivemindStore, hash_password
+from hivemind.store import HivemindStore, StoreError, hash_password
 
 TEST_PASSWORD = "operator-not-secret"
 
@@ -16,12 +18,57 @@ def client_for(tmp_path: Path) -> TestClient:
     return TestClient(create_app(store, start_scheduler=False))
 
 
+def require_equal(actual: object, expected: object, message: str) -> None:
+    if actual != expected:
+        raise AssertionError(f"{message}: expected {expected!r}, got {actual!r}")
+
+
+def require_true(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 def setup(client: TestClient) -> None:
     response = client.post(
         "/auth/setup",
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> None:
+    db_path = tmp_path / "bootstrap-race.db"
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
+    start = Barrier(3)
+
+    def create_admin(store: HivemindStore, username: str) -> tuple[str, str]:
+        start.wait()
+        try:
+            user = store.setup_admin(username, TEST_PASSWORD)
+            return ("ok", user["username"])
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(create_admin, stores[0], "admin"),
+            executor.submit(create_admin, stores[1], "operator"),
+        ]
+        start.wait()
+        results = [future.result() for future in futures]
+
+    assert sum(1 for status, _ in results if status == "ok") == 1
+    assert [detail for status, detail in results if status == "error"] == ["setup is already complete"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
+        usernames = [row[0] for row in conn.execute("SELECT username FROM users")]
+    finally:
+        conn.close()
+
+    assert admin_count == 1
+    assert len(usernames) == 1
 
 
 def test_frontend_is_served(tmp_path: Path) -> None:
@@ -57,6 +104,44 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert "credential broker" in response.text
     assert 'id="credential-template-picker"' in response.text
     assert 'id="credential-template-fields"' in response.text
+
+
+def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    frontend = client.get("/")
+    setup_response = client.post(
+        "/auth/setup",
+        json={"username": "OperatorAdmin", "password": TEST_PASSWORD},
+    )
+    logout_response = client.post("/auth/logout")
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "OPERATORADMIN", "password": TEST_PASSWORD},
+    )
+    me_response = client.get("/me")
+
+    require_equal(frontend.status_code, 200, "frontend should render")
+    require_true('name="username"' in frontend.text, "frontend should render a username field")
+    require_true('name="email"' not in frontend.text, "frontend should not render an email field")
+    require_true("auth: username/password" in frontend.text, "frontend should describe username/password auth")
+
+    require_equal(setup_response.status_code, 201, "setup should create the first admin")
+    require_equal(setup_response.json()["user"]["username"], "operatoradmin", "setup should normalize the username")
+    require_equal(setup_response.json()["user"]["role"], "admin", "first user should become admin")
+    require_true("email" not in setup_response.json()["user"], "setup response should not expose an email field")
+
+    require_equal(logout_response.status_code, 200, "logout should succeed after setup")
+
+    require_equal(login_response.status_code, 200, "login should accept username and password")
+    require_equal(login_response.json()["user"]["username"], "operatoradmin", "login should return the username")
+    require_equal(login_response.json()["user"]["role"], "admin", "login should preserve the admin role")
+    require_true("email" not in login_response.json()["user"], "login response should not expose an email field")
+
+    require_equal(me_response.status_code, 200, "me should return the current session user")
+    require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
+    require_equal(me_response.json()["role"], "admin", "me should expose the role")
+    require_true("email" not in me_response.json(), "me should not expose an email field")
 
 
 def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
@@ -138,6 +223,107 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert credential["policy"]["allowed_agents"] == [agent["id"]]
     assert credential["secret_ref_preview"].startswith("file://")
     assert "github-app.pem" not in response.text
+
+
+def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    protected_requests = [
+        ("GET", "/me", None),
+        ("GET", "/config", None),
+        ("GET", "/agents", None),
+        (
+            "POST",
+            "/agents",
+            {
+                "name": "forager",
+                "role": "Find the next useful task.",
+                "provider": "local",
+                "model": "deterministic-policy",
+                "system_prompt": "Respond briefly.",
+            },
+        ),
+        ("GET", "/credentials", None),
+        (
+            "POST",
+            "/credentials",
+            {
+                "name": "Repo reader",
+                "provider": "github",
+                "secret_ref": "env://GITHUB_TOKEN",
+                "allowed_agents": [],
+                "allowed_actions": ["read_repo"],
+                "max_ttl_seconds": 60,
+                "require_intent": True,
+                "metadata": {},
+            },
+        ),
+        ("GET", "/credential-leases", None),
+        (
+            "POST",
+            "/credential-leases",
+            {
+                "credential_id": "cred_demo",
+                "agent_id": "agent_demo",
+                "action": "read_repo",
+                "intent": "Read repository metadata for triage.",
+                "ttl_seconds": 30,
+            },
+        ),
+        (
+            "POST",
+            "/credential-actions",
+            {
+                "lease_token": "hvl_demo",
+                "action": "read_repo",
+                "payload": {"repo": "hivemind"},
+            },
+        ),
+        ("GET", "/tasks", None),
+        (
+            "POST",
+            "/tasks",
+            {
+                "title": "Review credential policy",
+                "description": "Check unauthenticated access handling.",
+                "priority": "normal",
+                "assigned_agent_id": None,
+                "credential_id": None,
+                "action": "",
+                "intent": "",
+                "heartbeat_seconds": None,
+            },
+        ),
+        ("PATCH", "/tasks/task_demo/status", {"status": "running"}),
+        ("POST", "/tasks/task_demo/heartbeats", {"note": "still working"}),
+        ("GET", "/heartbeats", None),
+        ("GET", "/schedules", None),
+        (
+            "POST",
+            "/schedules",
+            {
+                "name": "Policy review cadence",
+                "enabled": True,
+                "interval_seconds": 60,
+                "task_title": "Scheduled review",
+                "task_description": "Check auth boundaries.",
+                "priority": "normal",
+                "assigned_agent_id": None,
+                "credential_id": None,
+                "action": "",
+                "intent": "",
+                "next_run_at": None,
+            },
+        ),
+        ("POST", "/schedules/run-due", None),
+        ("GET", "/audit-events", None),
+    ]
+
+    for method, path, payload in protected_requests:
+        response = client.request(method, path, json=payload)
+
+        require_equal(response.status_code, 401, f"{method} {path} should require authentication")
+        require_equal(response.json(), {"detail": "authentication required"}, f"{method} {path} should return a consistent auth error")
 
 
 def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:

@@ -247,21 +247,22 @@ class HivemindStore:
             return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
     def setup_admin(self, username: str, password: str) -> dict[str, Any]:
-        if self.is_setup_complete():
-            raise StoreError("setup is already complete")
-        if len(password) < 12:
-            raise StoreError("admin password must be at least 12 characters")
         normalized_username = username.strip().lower()
         if len(normalized_username) < 3:
             raise StoreError("username must be at least 3 characters")
-        user = {
-            "id": f"user_{secrets.token_urlsafe(10)}",
-            "username": normalized_username,
-            "password_hash": hash_password(password),
-            "role": "admin",
-            "created_at": iso(),
-        }
+        if len(password) < 12:
+            raise StoreError("admin password must be at least 12 characters")
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
+                raise StoreError("setup is already complete")
+            user = {
+                "id": f"user_{secrets.token_urlsafe(10)}",
+                "username": normalized_username,
+                "password_hash": hash_password(password),
+                "role": "admin",
+                "created_at": iso(),
+            }
             conn.execute(
                 "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (:id, :username, :password_hash, :role, :created_at)",
                 user,

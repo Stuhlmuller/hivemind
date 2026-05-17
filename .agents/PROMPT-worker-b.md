@@ -41,6 +41,14 @@ Before doing any other work:
 9. Leave merging to the PR shepherd loop even if the checks are already green.
 10. If the PR already exists and checks are failing for a code change you can clearly fix from this worktree, fix it and push another update.
 
+## Subagent Workflow
+
+1. For any non-trivial issue run, spawn at least one bounded subagent before you settle into implementation if delegation is available.
+2. Prefer an explorer-style subagent first to trace the relevant codepaths, tests, and likely file ownership.
+3. After the main loop owns the issue branch and plan, you may spawn one worker-style subagent for a disjoint slice such as tests, docs, or a separate file group.
+4. Keep the top-level worker loop as the sole owner of issue selection, branch and worktree state, commits, pushes, and PR updates.
+5. Do not allow two subagents to write the same files, and do not let subagents merge or retarget the PR.
+
 ## Non-goals
 
 - Do not pick odd-numbered issues.
