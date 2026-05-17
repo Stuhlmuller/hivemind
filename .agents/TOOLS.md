@@ -10,6 +10,8 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `codex` | `external` | Run the Codex agent and `codex review` loop from `.agents/ralph.sh` |
 | `gh` | `gh` | Inspect and create GitHub issues from the repository |
 | `git` | `git` | Inspect repository state and history |
+| `nix` | `external` | Evaluate `flake.nix` and verify whether the repo dev shell is usable in the local environment |
+| `qlty` | `external` | Run the required code-quality checks before finishing repository changes |
 | `rg` | `ripgrep` | Search the codebase quickly |
 | `find` | `findutils` | Discover files and repo structure |
 | `sed` | `gnused` | Read targeted file sections |
