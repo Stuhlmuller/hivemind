@@ -13,23 +13,22 @@ Before doing any other work:
 
 ## GitHub CLI prerequisite
 
-1. Check `gh auth status` before relying on any GitHub CLI workflow.
-2. If `gh` is unavailable or authentication is invalid:
-   - Do not attempt `gh issue`, `gh pr`, or other GitHub CLI operations.
-   - Skip issue and PR automation for this run.
-   - Continue with local repository work.
-   - Report the GitHub CLI blocker clearly in the final handoff.
+1. GitHub CLI is required for this workflow.
+2. Check `gh auth status` before relying on any GitHub CLI workflow.
+3. Verify issue access with `gh issue list --state all --limit 1`.
+4. If any required `gh` command fails, stop the run immediately.
+5. Do not skip issue or PR automation, and do not continue with a local-only fallback when GitHub CLI is broken.
 
 ## Issue workflow
 
-1. If GitHub CLI auth is working, inspect the repository issues before proposing work:
+1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
 2. If issues already exist:
    - Read them first.
    - Avoid creating duplicates.
    - Use the existing issues to guide prioritization.
    - Pick up exactly one issue at a time.
-3. If the repository has no issues and GitHub CLI auth is working:
+3. If the repository has no issues:
    - Audit the project critically.
    - Create exactly 8 issues for application improvements.
    - Create exactly 2 issues for new feature requests.
@@ -46,16 +45,15 @@ Before doing any other work:
 2. Create the branch before making code changes.
 3. Use one branch for one issue only.
 4. Name branches from the issue number and task, for example `issue-123-short-slug`.
-5. If GitHub CLI is unavailable for the run, use a descriptive local branch name without an issue number.
-6. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
+5. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
 
 ## PR workflow
 
 1. Each pull request must cover exactly one task.
 2. Do not bundle multiple unrelated fixes or features into the same PR.
-3. If GitHub CLI auth is working, create a PR for every issue branch that Ralph picks up from the issue list.
-4. If GitHub CLI auth is working, reference the issue in the PR body so the relationship is explicit.
-5. If a task needs separate follow-up work, open separate issues and separate PRs when GitHub CLI auth is working.
+3. Create a PR for every issue branch that Ralph picks up from the issue list.
+4. Reference the issue in the PR body so the relationship is explicit.
+5. If a task needs separate follow-up work, open separate issues and separate PRs.
 6. After opening a PR, check its status with GitHub CLI.
 7. If checks are passing, merge the PR.
 8. Do not mark an issue completed until its associated PR is merged.

@@ -88,43 +88,28 @@ ensure_flake_file() {
 EOF
 }
 
-github_runtime_constraints() {
+ensure_github_ready() {
   if ! command -v gh >/dev/null 2>&1; then
-    echo "[ralph] gh is not available; GitHub issue and PR workflow will be skipped for this run" >&2
-    cat <<'EOF'
-## Runtime constraints
-
-- GitHub CLI `gh` is not available in this environment.
-- Do not attempt `gh issue`, `gh pr`, or other GitHub CLI operations in this run.
-- Skip the GitHub issue and PR workflow. Continue with local repository work and report the blocker in the final handoff.
-EOF
-    return
+    echo "[ralph] gh is required in PATH" >&2
+    exit 1
   fi
 
-  if gh auth status >/dev/null 2>&1; then
-    return
+  if ! gh auth status; then
+    echo "[ralph] gh authentication is required for Ralph; run 'gh auth login -h github.com' and retry" >&2
+    exit 1
   fi
 
-  echo "[ralph] gh auth is unavailable; GitHub issue and PR workflow will be skipped for this run" >&2
-  cat <<'EOF'
-## Runtime constraints
-
-- GitHub CLI authentication is not usable in this environment.
-- Do not attempt `gh issue`, `gh pr`, or other GitHub CLI operations in this run.
-- Skip the GitHub issue and PR workflow. Continue with local repository work and report the blocker in the final handoff.
-EOF
+  if ! gh issue list --state all --limit 1 >/dev/null 2>&1; then
+    echo "[ralph] gh must be able to read repository issues before Ralph can run" >&2
+    exit 1
+  fi
 }
 
 run_codex_exec() {
   local prompt_text
   local -a cmd
-  local github_constraints
 
   prompt_text="$(<"$prompt_file")"
-  github_constraints="$(github_runtime_constraints)"
-  if [[ -n "$github_constraints" ]]; then
-    prompt_text+=$'\n\n'"$github_constraints"
-  fi
   cmd=(codex exec -C "$repo_root" -s workspace-write)
 
   if [[ "$#" -gt 0 ]]; then
@@ -156,8 +141,10 @@ fi
 ensure_not_nested_codex
 ensure_tools_file
 ensure_flake_file
+ensure_github_ready
 
 while :; do
+  ensure_github_ready
   echo "[ralph] starting Codex run $iteration"
   run_codex_exec "$@"
 
