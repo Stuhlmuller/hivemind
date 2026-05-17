@@ -14,6 +14,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
+from hivemind.secret_refs import preview_secret_ref
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -434,7 +436,7 @@ class HivemindStore:
             "id": row["id"],
             "name": row["name"],
             "provider": row["provider"],
-            "secret_ref_preview": self.preview_secret_ref(row["secret_ref"]),
+            "secret_ref_preview": preview_secret_ref(row["secret_ref"]),
             "policy": {
                 "allowed_agents": loads(row["allowed_agents"], []),
                 "allowed_actions": loads(row["allowed_actions"], []),
@@ -445,10 +447,6 @@ class HivemindStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
-
-    def preview_secret_ref(self, secret_ref: str) -> str:
-        scheme, _, rest = secret_ref.partition("://")
-        return f"{scheme}://{rest[:3]}..." if rest else f"{scheme}://..."
 
     def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str, dict[str, Any]]:
         self.get_agent(agent_id)
