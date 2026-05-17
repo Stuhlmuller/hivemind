@@ -14,7 +14,7 @@ import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from hivemind.oauth import (
     OAuthConfigurationError,
@@ -22,6 +22,7 @@ from hivemind.oauth import (
     build_pkce_pair,
     load_oauth_providers_from_env,
 )
+from hivemind.models import TaskPriority, TaskStatus
 from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError
 
 
@@ -181,7 +182,8 @@ class PerformCredentialActionRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     title: str = Field(min_length=1)
     description: str = ""
-    priority: str = "normal"
+    status: TaskStatus = TaskStatus.QUEUED
+    priority: TaskPriority = TaskPriority.NORMAL
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
@@ -189,8 +191,21 @@ class CreateTaskRequest(BaseModel):
     heartbeat_seconds: int | None = Field(default=None, ge=30)
 
 
+class UpdateTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    priority: TaskPriority | None = None
+    assigned_agent_id: str | None = None
+    credential_id: str | None = None
+    action: str | None = None
+    intent: str | None = None
+    heartbeat_seconds: int | None = Field(default=None, ge=30)
+
+
 class UpdateTaskStatusRequest(BaseModel):
-    status: str = Field(pattern="^(queued|running|blocked|done|failed|cancelled)$")
+    status: TaskStatus
 
 
 class HeartbeatRequest(BaseModel):
@@ -209,7 +224,7 @@ class CreateScheduleRequest(BaseModel):
     catch_up_policy: Literal["skip_missed", "run_once", "backfill"] = "run_once"
     task_title: str = Field(min_length=1)
     task_description: str = ""
-    priority: str = "normal"
+    priority: TaskPriority = TaskPriority.NORMAL
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
@@ -549,15 +564,26 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/tasks", status_code=201)
     def create_task(request: CreateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.create_task(request.model_dump())
+            return db.create_task(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/tasks/{task_id}")
+    def update_task(task_id: str, request: UpdateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_task(task_id, request.model_dump(exclude_unset=True), actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/tasks/{task_id}/status")
     def update_task_status(task_id: str, request: UpdateTaskStatusRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.update_task_status(task_id, request.status)
-        except StoreError as exc:
+            return db.update_task_status(task_id, request.status, actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/tasks/{task_id}/run", status_code=201)
@@ -574,7 +600,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/tasks/{task_id}/heartbeats", status_code=201)
     def record_heartbeat(task_id: str, request: HeartbeatRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.record_heartbeat(task_id, request.agent_id, request.note)
+            return db.record_heartbeat(task_id, request.agent_id, request.note, actor_id=user.id)
         except StoreValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except StoreNotFoundError as exc:
@@ -591,7 +617,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/schedules", status_code=201)
     def create_schedule(request: CreateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.create_schedule(request.model_dump())
+            return db.create_schedule(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -607,7 +633,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/schedules/run-due")
     def run_due_schedules(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return {"created_tasks": db.run_due_schedules_once()}
+            return {"created_tasks": db.run_due_schedules_once(actor_id=user.id)}
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
