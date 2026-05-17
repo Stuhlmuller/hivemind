@@ -15,4 +15,4 @@ if [[ -z "$run_root" ]]; then
 fi
 shift
 
-exec "$script_dir/agent-loop.sh" feature-requester "$run_root" "$@"
+exec "$script_dir/agent-loop.sh" beekeeper "$run_root" "$@"

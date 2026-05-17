@@ -1,6 +1,6 @@
-# Hivemind PR Shepherd Loop
+# Hivemind Beekeeper Loop
 
-Use this prompt for the CI triage, PR review, and merge loop.
+Use this prompt for the hive-keeper loop that keeps PRs moving, cleans up idle branch state, and merges ready work.
 
 ## Startup requirements
 
@@ -20,24 +20,23 @@ Before doing any other work:
 
 ## Mission
 
-1. Read the injected lane assignment above first.
-2. Inspect open pull requests with `gh pr list --state open --limit 50`.
-3. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
-4. Merge ready PRs from your assigned lane whose checks are passing and whose scope matches exactly one issue.
-5. For PRs in your lane with failing CI:
+1. Inspect open pull requests with `gh pr list --state open --limit 50`.
+2. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
+3. Merge ready PRs whose checks are passing and whose scope matches exactly one issue.
+4. For PRs with failing CI:
    - inspect the failing checks first
    - if the fix is obvious and the PR branch is not actively checked out in another worktree, check out the PR branch in this review worktree and fix it
    - if another worker already owns the branch in a separate worktree, leave it alone and move to the next PR
-6. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
-7. Run focused verification and `qlty check` on changed files before pushing CI fixes.
-8. Prefer unblocking the queue over doing new feature work.
+5. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
+6. Run focused verification and `qlty check` on changed files before pushing CI fixes.
+7. Prefer unblocking the queue over doing new feature work.
 
 ## Subagent Workflow
 
-1. For each PR you actively triage, spawn at least one bounded subagent if delegation is available.
+1. Use bounded subagents whenever delegation would materially help a PR run.
 2. Prefer an explorer-style subagent to inspect failing checks, log output, and regression risk before you touch the branch.
-3. If the review worktree owns the branch and the fix is isolated, you may spawn one worker-style subagent for a disjoint patch while the top-level loop handles GitHub state.
-4. Keep merge decisions, PR comments or updates, and final branch pushes in the top-level PR shepherd loop.
+3. If the beekeeper worktree owns the branch and the fix is isolated, you may spawn multiple worker-style subagents for disjoint patches while the top-level loop handles GitHub state.
+4. Keep merge decisions, PR comments or updates, and final branch pushes in the top-level beekeeper loop.
 5. Do not spawn subagents onto a branch that is already being actively owned by a worker worktree.
 
 ## Non-goals
@@ -45,4 +44,4 @@ Before doing any other work:
 - Do not open new feature branches from scratch.
 - Do not compete with active worker worktrees for the same branch.
 - Do not create a second PR when the existing PR branch can be updated directly.
-- Do not use the Codex browser tool. Leave live browser validation to the main-branch scout lane.
+- Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent.

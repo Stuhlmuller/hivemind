@@ -1,3 +1,3 @@
 display_name: Hivemind GitHub Swarm Loop
-short_description: Maintain the multi-loop GitHub automation.
-default_prompt: Use this skill to keep the scout, reviewer, worker, feature-requester, and PR shepherd loops aligned around dedicated worktrees, configurable lane counts, deterministic ownership, and safe PR handling.
+short_description: Maintain the GitHub swarm automation.
+default_prompt: Use this skill to keep the reviewer, feature-requester, worker, scout, and beekeeper roles aligned around dedicated worktrees, compatibility aliases, bounded delegation, and safe PR handling.
