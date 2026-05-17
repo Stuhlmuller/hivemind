@@ -5,6 +5,7 @@ const state = {
   config: null,
   agents: [],
   credentials: [],
+  oauthProviders: [],
   leases: [],
   tasks: [],
   schedules: [],
@@ -177,6 +178,10 @@ function credentialKindLabel(kind) {
   return credentialKindLabels[kind] || "Credential Ref";
 }
 
+function credentialTypeLabel(credential) {
+  return credential.metadata?.auth_type === "oauth" ? "OAuth Broker Credential" : credentialKindLabel(credential.metadata?.credential_kind);
+}
+
 function credentialAgentScope(credential) {
   return credential.policy.allowed_agents.length
     ? credential.policy.allowed_agents.map((agentId) => agentName(agentId)).join(", ")
@@ -187,7 +192,7 @@ function credentialDetailRows(credential) {
   const metadata = credential.metadata || {};
   const rows = [
     `ID: ${escapeHtml(credential.id)}`,
-    `Type: ${escapeHtml(credentialKindLabel(metadata.credential_kind))}`,
+    `Type: ${escapeHtml(credentialTypeLabel(credential))}`,
     `Provider: ${escapeHtml(credential.provider)}`,
     `Primary ref: ${escapeHtml(credential.secret_ref_preview)}`,
   ];
@@ -199,6 +204,15 @@ function credentialDetailRows(credential) {
   }
   if (metadata.installation_id) {
     rows.push(`Installation ID: ${escapeHtml(metadata.installation_id)}`);
+  }
+  if (Array.isArray(metadata.oauth_scopes) && metadata.oauth_scopes.length) {
+    rows.push(`OAuth scopes: ${escapeHtml(metadata.oauth_scopes.join(" "))}`);
+  }
+  if (metadata.oauth_connected_at) {
+    rows.push(`OAuth connected: ${escapeHtml(metadata.oauth_connected_at)}`);
+  }
+  if (metadata.oauth_token_expires_at) {
+    rows.push(`Token expiry: ${escapeHtml(metadata.oauth_token_expires_at)}`);
   }
   rows.push(`Allowed agents: ${escapeHtml(credentialAgentScope(credential))}`);
   rows.push(`Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s`);
@@ -311,6 +325,7 @@ function renderSelectors() {
   for (const selector of [
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
+    '#codex-oauth-form select[name="allowed_agents"]',
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
   ]) {
@@ -341,21 +356,43 @@ function renderAgents() {
 function renderCredentials() {
   $("#credential-count").textContent = state.credentials.length;
   $("#credentials-list").innerHTML = state.credentials
-    .map((credential) =>
-      item(
-        credential.name,
-        credentialDetailRows(credential),
-        [
-          credentialKindLabel(credential.metadata?.credential_kind),
-          credential.provider,
-          `TTL ${credential.policy.max_ttl_seconds}s`,
-          credential.policy.require_intent ? "intent required" : "intent optional",
-          ...credential.policy.allowed_actions,
-        ],
-      ),
-    )
+    .map((credential) => {
+      const metadata = credential.metadata || {};
+      const pills = [
+        metadata.auth_type === "oauth" ? "oauth" : credentialTypeLabel(credential),
+        credential.provider,
+        `TTL ${credential.policy.max_ttl_seconds}s`,
+        credential.policy.require_intent ? "intent required" : "intent optional",
+        ...credential.policy.allowed_actions,
+      ];
+      if (credential.metadata?.auth_type === "oauth") {
+        pills.push(credential.metadata?.oauth_refreshable ? "refreshable" : "access-only");
+      }
+      return item(credential.name, credentialDetailRows(credential), pills);
+    })
     .join("") || '<p class="meta">No credentials yet.</p>';
   $("#credential-page-count").textContent = state.credentials.length;
+}
+
+function renderOAuthProviders() {
+  const provider = state.oauthProviders.find((item) => item.id === "codex");
+  const stateNode = $("#oauth-provider-state");
+  const detailNode = $("#oauth-provider-detail");
+  const button = $("#codex-oauth-button");
+  if (!provider) {
+    stateNode.textContent = "missing";
+    stateNode.dataset.state = "error";
+    detailNode.textContent = "Codex OAuth profile is unavailable in this build.";
+    button.disabled = true;
+    return;
+  }
+  stateNode.textContent = provider.available ? "ready" : "blocked";
+  stateNode.dataset.state = provider.available ? "ready" : "error";
+  button.disabled = !provider.available;
+  button.textContent = provider.available ? "connect via oauth" : "oauth unavailable";
+  detailNode.textContent = provider.available
+    ? `Scopes: ${provider.scopes.join(" ")}`
+    : provider.reason;
 }
 
 function renderLeases() {
@@ -438,6 +475,7 @@ function render() {
   if (!state.me) return;
   renderConfig();
   renderSelectors();
+  renderOAuthProviders();
   renderAgents();
   renderCredentials();
   renderLeases();
@@ -445,6 +483,19 @@ function render() {
   renderSchedules();
   renderAudit();
   renderCredentialAudit();
+}
+
+function consumeOAuthStatus() {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("oauth");
+  if (!status) return;
+  const detail = params.get("detail") || (status === "connected" ? "OAuth connected." : "OAuth flow failed.");
+  toast(detail);
+  params.delete("oauth");
+  params.delete("detail");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, "", nextUrl);
 }
 
 async function loadSetupState() {
@@ -461,18 +512,20 @@ async function refresh() {
     render();
     return;
   }
-  const [config, agents, credentials, leases, tasks, schedules, heartbeats, auditEvents] = await Promise.all([
+  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = await Promise.all([
     api("/config"),
     api("/agents"),
     api("/credentials"),
+    api("/oauth/providers"),
     api("/credential-leases"),
     api("/tasks"),
     api("/schedules"),
     api("/heartbeats"),
     api("/audit-events"),
   ]);
-  Object.assign(state, { config, agents, credentials, leases, tasks, schedules, heartbeats, auditEvents });
+  Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents });
   render();
+  consumeOAuthStatus();
 }
 
 $("#auth-form").addEventListener("submit", async (event) => {
@@ -565,6 +618,24 @@ $("#credential-form").addEventListener("submit", async (event) => {
     renderSelectors();
     await refresh();
     toast("Credential policy created.");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#codex-oauth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = readForm(form);
+  payload.provider = "codex";
+  payload.allowed_agents = selectedValues(form.elements.allowed_agents);
+  payload.allowed_actions = splitCsv(payload.allowed_actions);
+  payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
+  payload.require_intent = form.elements.require_intent.checked;
+  payload.metadata = {};
+  try {
+    const result = await api("/oauth/credentials/start", { method: "POST", body: JSON.stringify(payload) });
+    window.location.assign(result.authorize_url);
   } catch (error) {
     toast(error.message);
   }

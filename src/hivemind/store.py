@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import hashlib
 import hmac
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
+from hivemind.oauth import SecretBox
 from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
 
@@ -150,6 +152,27 @@ class HivemindStore:
                   max_ttl_seconds INTEGER NOT NULL,
                   require_intent INTEGER NOT NULL,
                   metadata TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS oauth_states (
+                  id TEXT PRIMARY KEY,
+                  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  provider TEXT NOT NULL,
+                  pkce_verifier TEXT NOT NULL,
+                  credential_payload TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS oauth_connections (
+                  credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+                  provider TEXT NOT NULL,
+                  scopes TEXT NOT NULL,
+                  token_ciphertext TEXT NOT NULL,
+                  token_expires_at TEXT,
+                  has_refresh_token INTEGER NOT NULL,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -440,7 +463,7 @@ class HivemindStore:
             )
         return normalized
 
-    def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_credential_row(self, data: dict[str, Any]) -> dict[str, Any]:
         now = iso()
         actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
         agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
@@ -471,6 +494,10 @@ class HivemindStore:
             row["secret_ref"] = validate_secret_ref(row["secret_ref"])
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
+        return row
+
+    def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
+        row = self._prepare_credential_row(data)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -481,6 +508,136 @@ class HivemindStore:
                 row,
             )
         return self.public_credential(row)
+
+    def create_oauth_state(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        pkce_verifier: str,
+        credential_payload: dict[str, Any],
+    ) -> str:
+        now = utcnow()
+        row = {
+            "id": f"oauth_state_{secrets.token_urlsafe(18)}",
+            "user_id": user_id,
+            "provider": provider,
+            "pkce_verifier": pkce_verifier,
+            "credential_payload": dumps(credential_payload),
+            "created_at": iso(now),
+            "expires_at": iso(now + timedelta(minutes=10)),
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO oauth_states (id, user_id, provider, pkce_verifier, credential_payload, created_at, expires_at)
+                VALUES (:id, :user_id, :provider, :pkce_verifier, :credential_payload, :created_at, :expires_at)
+                """,
+                row,
+            )
+        return row["id"]
+
+    def consume_oauth_state(self, *, state_id: str, provider: str, user_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM oauth_states WHERE id = ? AND provider = ? AND user_id = ?",
+                (state_id, provider, user_id),
+            ).fetchone()
+            if row is None:
+                raise StoreNotFoundError("unknown oauth state")
+            conn.execute("DELETE FROM oauth_states WHERE id = ?", (state_id,))
+        if parse_dt(row["expires_at"]) <= utcnow():
+            raise StoreError("oauth state is expired")
+        return {
+            "id": row["id"],
+            "provider": row["provider"],
+            "pkce_verifier": row["pkce_verifier"],
+            "credential_payload": loads(row["credential_payload"], {}),
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+        }
+
+    def create_oauth_credential(
+        self,
+        *,
+        provider: str,
+        token_payload: Any,
+        requested_credential: dict[str, Any],
+        secret_box: SecretBox,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(token_payload, Mapping):
+            raise StoreError("oauth token response must be a JSON object")
+        token_payload = dict(token_payload)
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            raise StoreError("oauth token response did not include access_token")
+        now = utcnow()
+        expires_in = token_payload.get("expires_in")
+        token_expires_at = None
+        if expires_in not in (None, ""):
+            token_expires_at = iso(now + timedelta(seconds=int(expires_in)))
+        scope_values = tuple(part for part in str(token_payload.get("scope") or "").split() if part)
+        scopes = sorted(set(scope_values))
+        metadata = {
+            **(requested_credential.get("metadata") or {}),
+            "auth_type": "oauth",
+            "oauth_provider": provider,
+            "oauth_scopes": scopes,
+            "oauth_refreshable": bool(token_payload.get("refresh_token")),
+            "oauth_connected_at": iso(now),
+            "oauth_token_expires_at": token_expires_at,
+        }
+        credential_id = f"cred_{secrets.token_urlsafe(8)}"
+        credential_row = self._prepare_credential_row(
+            {
+                **requested_credential,
+                "id": credential_id,
+                "provider": provider,
+                "secret_ref": f"oauth://{provider}/{credential_id}",
+                "metadata": metadata,
+            }
+        )
+        oauth_row = {
+            "credential_id": credential_id,
+            "provider": provider,
+            "scopes": dumps(scopes),
+            "token_ciphertext": secret_box.encrypt_json(token_payload),
+            "token_expires_at": token_expires_at,
+            "has_refresh_token": 1 if token_payload.get("refresh_token") else 0,
+            "created_at": credential_row["created_at"],
+            "updated_at": credential_row["updated_at"],
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO credentials
+                (id, name, provider, secret_ref, allowed_agents, allowed_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
+                VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+                """,
+                credential_row,
+            )
+            conn.execute(
+                """
+                INSERT INTO oauth_connections
+                (credential_id, provider, scopes, token_ciphertext, token_expires_at, has_refresh_token, created_at, updated_at)
+                VALUES (:credential_id, :provider, :scopes, :token_ciphertext, :token_expires_at, :has_refresh_token, :created_at, :updated_at)
+                """,
+                oauth_row,
+            )
+        self.audit(
+            "credential.oauth.connected",
+            actor_id,
+            credential_id,
+            "allowed",
+            "oauth credential connected",
+            {
+                "provider": provider,
+                "scopes": scopes,
+                "refreshable": bool(token_payload.get("refresh_token")),
+            },
+        )
+        return self.public_credential(credential_row)
 
     def get_credential(self, credential_id: str) -> dict[str, Any]:
         with self.connect() as conn:
