@@ -19,6 +19,7 @@ Before doing any other work:
    - Read them first.
    - Avoid creating duplicates.
    - Use the existing issues to guide prioritization.
+   - Pick up exactly one issue at a time.
 3. If the repository has no issues:
    - Audit the project critically.
    - Create exactly 8 issues for application improvements.
@@ -30,15 +31,25 @@ Before doing any other work:
      - the expected outcome
      - any evidence from the codebase
 
+## Task branch workflow
+
+1. Every issue picked up for implementation must get its own fresh branch.
+2. Create the branch before making code changes.
+3. Use one branch for one issue only.
+4. Name branches from the issue number and task, for example `issue-123-short-slug`.
+5. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
+
 ## PR workflow
 
 1. Each pull request must cover exactly one task.
 2. Do not bundle multiple unrelated fixes or features into the same PR.
-3. If a task needs separate follow-up work, open separate issues and separate PRs.
-4. After opening a PR, check its status with GitHub CLI.
-5. If checks are passing, merge the PR.
-6. Do not mark an issue completed until its associated PR is merged.
-7. If the PR is abandoned, closed, or canceled, update the issue state accordingly instead of marking it completed.
+3. Create a PR for every issue branch that Ralph picks up from the issue list.
+4. Reference the issue in the PR body so the relationship is explicit.
+5. If a task needs separate follow-up work, open separate issues and separate PRs.
+6. After opening a PR, check its status with GitHub CLI.
+7. If checks are passing, merge the PR.
+8. Do not mark an issue completed until its associated PR is merged.
+9. If the PR is abandoned, closed, or canceled, update the issue state accordingly instead of marking it completed.
 
 ## Quality bar
 
