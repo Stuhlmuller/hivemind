@@ -681,6 +681,15 @@ class HivemindStore:
             raise StoreValidationError(str(exc)) from exc
         return row
 
+    def validate_backup_schedule_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            row["next_run_at"] = iso(require_aware_utc(row["next_run_at"], field_name="next_run_at"))
+            if row.get("last_run_at") is not None:
+                row["last_run_at"] = iso(require_aware_utc(row["last_run_at"], field_name="last_run_at"))
+        except ValueError as exc:
+            raise StoreValidationError(str(exc)) from exc
+        return row
+
     def validate_backup_rows(
         self,
         *,
@@ -707,6 +716,8 @@ class HivemindStore:
                 raise StoreValidationError(f"backup table {table} row {index} is missing columns: {missing}")
             if table == "credentials":
                 row_dict = self.validate_backup_credential_row(row_dict)
+            if table == "schedules":
+                row_dict = self.validate_backup_schedule_row(row_dict)
             normalized_rows.append(row_dict)
         return normalized_rows
 
@@ -2035,21 +2046,19 @@ class HivemindStore:
         created: list[dict[str, Any]] = []
         with self._lock:
             with self.connect() as conn:
-                rows = list(
-                    conn.execute(
-                        "SELECT * FROM schedules WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC",
-                        (iso(now),),
-                    )
-                )
-            for row in rows:
+                enabled_rows = list(conn.execute("SELECT * FROM schedules WHERE enabled = 1"))
+            due_rows: list[tuple[datetime, sqlite3.Row]] = []
+            for row in enabled_rows:
+                next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
+                if next_run_at <= now:
+                    due_rows.append((next_run_at, row))
+            due_rows.sort(key=lambda item: item[0])
+            for next_run_at, row in due_rows:
                 interval_seconds = int(row["interval_seconds"])
                 interval = timedelta(seconds=interval_seconds)
                 catch_up_policy = row["catch_up_policy"] or "run_once"
                 if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
                     raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
-                next_run_at = require_aware_utc(row["next_run_at"], field_name="next_run_at")
-                if next_run_at > now:
-                    continue
                 missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
                 if catch_up_policy == "backfill":
                     run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
