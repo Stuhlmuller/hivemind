@@ -157,14 +157,18 @@ def _credential_config(row: sqlite3.Row) -> dict[str, Any]:
         "name": row["name"],
         "provider": row["provider"],
         "secret_ref": row["secret_ref"],
-        "policy": {
-            "allowed_agents": loads(row["allowed_agents"], []),
-            "allowed_actions": loads(row["allowed_actions"], []),
-            "approval_required_actions": loads(row["approval_required_actions"], []),
-            "max_ttl_seconds": row["max_ttl_seconds"],
-            "require_intent": bool(row["require_intent"]),
-        },
+        "policy": _credential_policy_config(row),
         "metadata": _export_metadata(loads(row["metadata"], {})),
+    }
+
+
+def _credential_policy_config(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "allowed_agents": loads(row["allowed_agents"], []),
+        "allowed_actions": loads(row["allowed_actions"], []),
+        "approval_required_actions": loads(row["approval_required_actions"], []),
+        "max_ttl_seconds": row["max_ttl_seconds"],
+        "require_intent": bool(row["require_intent"]),
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import secrets
 import sqlite3
 import warnings
@@ -2179,6 +2180,29 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
     require_true(
         all(item["id"] != agent["id"] for item in target.get("/agents").json()),
         "dry-run import should not create agents",
+    )
+
+    preexisting_config = deepcopy(exported)
+    preexisting_credential = next(
+        item for item in preexisting_config["credentials"] if item["id"] == credential["id"]
+    )
+    preexisting_credential["policy"]["approval_required_actions"] = []
+    preexisting_import_response = target.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": preexisting_config},
+    )
+    require_equal(
+        preexisting_import_response.status_code,
+        200,
+        "preexisting credential fixture should import",
+    )
+    preexisting_imported_credential = next(
+        item for item in target.get("/credentials").json() if item["id"] == credential["id"]
+    )
+    require_equal(
+        preexisting_imported_credential["policy"]["approval_required_actions"],
+        [],
+        "preexisting credential fixture should start without approval gates",
     )
 
     import_response = target.post(
