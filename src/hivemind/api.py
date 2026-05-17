@@ -118,6 +118,10 @@ class CreateScheduleRequest(BaseModel):
     next_run_at: str | None = None
 
 
+class UpdateScheduleRequest(BaseModel):
+    enabled: bool
+
+
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
     config = HivemindConfig.from_env()
     db = store or HivemindStore.from_env()
@@ -143,12 +147,15 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             raise HTTPException(status_code=401, detail="authentication required")
         return user
 
+    def session_cookie_secure() -> bool:
+        return not config.development_mode
+
     def set_session_cookie(response: Response, token: str) -> None:
         response.set_cookie(
             SESSION_COOKIE,
             token,
             httponly=True,
-            secure=os.getenv("HIVEMIND_COOKIE_SECURE", "false").lower() == "true",
+            secure=session_cookie_secure(),
             samesite="lax",
             max_age=12 * 60 * 60,
             path="/",
@@ -219,7 +226,13 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/auth/logout")
     def logout(response: Response, session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> dict[str, bool]:
         db.logout(session)
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(
+            SESSION_COOKIE,
+            path="/",
+            secure=session_cookie_secure(),
+            httponly=True,
+            samesite="lax",
+        )
         return {"ok": True}
 
     @app.get("/me")
@@ -453,6 +466,15 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def create_schedule(request: CreateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
             return db.create_schedule(request.model_dump())
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/schedules/{schedule_id}")
+    def update_schedule(schedule_id: str, request: UpdateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_schedule_enabled(schedule_id, request.enabled)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

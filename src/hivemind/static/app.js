@@ -484,13 +484,20 @@ function renderTasks() {
 function renderSchedules() {
   $("#schedule-count").textContent = state.schedules.length;
   $("#schedules-list").innerHTML = state.schedules
-    .map((schedule) =>
-      item(
+    .map((schedule) => {
+      const actions = `
+        <div class="button-row">
+          <button data-schedule-enabled="${escapeHtml(schedule.id)}" data-enabled="${schedule.enabled ? "false" : "true"}" type="button">
+            ${schedule.enabled ? "Pause" : "Enable"}
+          </button>
+        </div>`;
+      return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Task: ${escapeHtml(schedule.task_title)}`,
+        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
         [schedule.enabled ? "enabled" : "paused"],
-      ),
-    )
+        actions,
+      );
+    })
     .join("") || '<p class="meta">No schedules yet.</p>';
 }
 
@@ -780,6 +787,18 @@ $("#schedule-form").addEventListener("submit", async (event) => {
   await api("/schedules", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Schedule created.");
+});
+
+$("#schedules-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) return;
+  if (!target.dataset.scheduleEnabled) return;
+  await api(`/schedules/${target.dataset.scheduleEnabled}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: target.dataset.enabled === "true" }),
+  });
+  await refresh();
+  toast(target.dataset.enabled === "true" ? "Schedule enabled." : "Schedule paused.");
 });
 
 $("#run-due-button").addEventListener("click", async () => {

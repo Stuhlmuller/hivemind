@@ -25,6 +25,10 @@ uvicorn hivemind.api:create_app --factory --reload
 
 Then open `http://localhost:8000/`.
 
+For plain HTTP local development, set `HIVEMIND_DEVELOPMENT_MODE=true` before
+launching the app. Outside explicit development mode, Hivemind marks auth
+session cookies `Secure`, so setup/login require HTTPS.
+
 The API docs are available at `http://localhost:8000/docs`.
 
 ## Nix Dev Shell
@@ -100,6 +104,10 @@ reference, while public API responses continue to expose only redacted refs.
 docker build -t hivemind .
 docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
 ```
+
+Run the container behind TLS or another HTTPS terminator in normal deployments.
+Auth session cookies are `Secure` by default. Use
+`HIVEMIND_DEVELOPMENT_MODE=true` only for local HTTP development.
 
 GitHub Actions also builds this image on pull requests and publishes it to
 GitHub Container Registry from `main` and version tags as
