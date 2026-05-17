@@ -11,9 +11,17 @@ Before doing any other work:
 3. If you introduce a new CLI during the run, update `flake.nix` immediately. If the flake cannot be made usable in the current environment, record the tool in `.agents/TOOLS.md` before continuing.
 4. Prefer working from the nix shell when available so the toolchain is consistent across agent spawns.
 
+## GitHub CLI prerequisite
+
+1. GitHub CLI is required for this workflow.
+2. Check `gh auth status` before relying on any GitHub CLI workflow.
+3. Verify issue access with `gh issue list --state all --limit 1`.
+4. If any required `gh` command fails, stop the run immediately.
+5. Do not skip issue or PR automation, and do not continue with a local-only fallback when GitHub CLI is broken.
+
 ## Issue workflow
 
-1. Inspect the repository issues with the GitHub CLI before proposing work:
+1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
 2. If issues already exist:
    - Read them first.

@@ -19,6 +19,16 @@ iteration=1
 
 trap 'printf "\n[ralph] stopping\n"; exit 0' INT TERM
 
+ensure_not_nested_codex() {
+  if [[ -z "${CODEX_SANDBOX:-}" ]]; then
+    return
+  fi
+
+  echo "[ralph] nested Codex runs are not supported inside a Codex sandbox (${CODEX_SANDBOX})." >&2
+  echo "[ralph] run .agents/ralph.sh from a normal terminal session instead." >&2
+  exit 1
+}
+
 ensure_tools_file() {
   if [[ -f "$tools_file" ]]; then
     return
@@ -78,6 +88,23 @@ ensure_flake_file() {
 EOF
 }
 
+ensure_github_ready() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "[ralph] gh is required in PATH" >&2
+    exit 1
+  fi
+
+  if ! gh auth status; then
+    echo "[ralph] gh authentication is required for Ralph; run 'gh auth login -h github.com' and retry" >&2
+    exit 1
+  fi
+
+  if ! gh issue list --state all --limit 1 >/dev/null 2>&1; then
+    echo "[ralph] gh must be able to read repository issues before Ralph can run" >&2
+    exit 1
+  fi
+}
+
 run_codex_exec() {
   local prompt_text
   local -a cmd
@@ -96,7 +123,8 @@ run_codex_exec() {
 run_auto_review() {
   (
     cd "$repo_root"
-    codex review --uncommitted "$review_prompt"
+    # Codex CLI 0.130.0 rejects `--uncommitted` when a custom prompt is present.
+    codex review "$review_prompt"
   )
 }
 
@@ -110,10 +138,13 @@ if [[ ! -f "$prompt_file" ]]; then
   exit 1
 fi
 
+ensure_not_nested_codex
 ensure_tools_file
 ensure_flake_file
+ensure_github_ready
 
 while :; do
+  ensure_github_ready
   echo "[ralph] starting Codex run $iteration"
   run_codex_exec "$@"
 
