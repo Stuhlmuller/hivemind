@@ -264,6 +264,12 @@ first_new_issue_worktree_path() {
   return 1
 }
 
+worktree_has_uncommitted_changes() {
+  local repo_root="$1"
+
+  [[ -n "$(git -C "$repo_root" status --short --untracked-files=all)" ]]
+}
+
 ensure_branch_context_before_run() {
   local repo_root="$1"
   current_branch_name "$repo_root" >/dev/null
@@ -325,6 +331,10 @@ ensure_issue_branch_activity_after_run() {
     fi
 
     if [[ -n "$new_issue_worktree_path" ]]; then
+      if worktree_has_uncommitted_changes "$repo_root"; then
+        echo "[ralph] Codex run created issue worktree '$new_issue_worktree_path' but left uncommitted changes in the primary checkout at '$repo_root'; Ralph must keep the primary checkout clean before switching issue work into a dedicated git worktree" >&2
+        exit 1
+      fi
       printf '%s\n' "$new_issue_worktree_path"
       return
     fi

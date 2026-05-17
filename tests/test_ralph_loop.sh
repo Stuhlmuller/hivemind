@@ -120,6 +120,10 @@ case "${RALPH_TEST_SCENARIO:?}" in
   direct_worktree)
     git -C "$run_root" worktree add -q -b issue-52-demo "${RALPH_TEST_TMPDIR:?}/issue-52-demo" main >/dev/null
     ;;
+  dirty_primary_then_worktree)
+    printf '\n# dirty primary checkout\n' >>"$run_root/flake.nix"
+    git -C "$run_root" worktree add -q -b issue-52-demo "${RALPH_TEST_TMPDIR:?}/issue-52-demo" main >/dev/null
+    ;;
   local_checkout_then_worktree)
     git -C "$run_root" checkout -q -b issue-52-demo
     git -C "$run_root" checkout -q main
@@ -208,6 +212,29 @@ test_rejects_local_issue_checkout_before_worktree_creation() {
   assert_file_contains "$stderr_log" "checked out an issue branch in the primary checkout"
 }
 
+test_rejects_new_issue_worktree_when_primary_checkout_is_dirty() {
+  local repo
+  local bin_dir
+  IFS=$'\t' read -r repo bin_dir <<<"$(setup_fixture_repo dirty-primary)"
+
+  local fixture_root="$tmp_root/dirty-primary"
+  local stdout_log="$fixture_root/stdout.log"
+  local stderr_log="$fixture_root/stderr.log"
+  local review_log="$fixture_root/review.log"
+  local sandbox_log="$fixture_root/sandbox.log"
+  local scenario_tmp="$fixture_root/runtime"
+
+  if run_ralph "$repo/.agents/ralph.sh" "$bin_dir" "dirty_primary_then_worktree" "$scenario_tmp" "$review_log" "$sandbox_log" "$stdout_log" "$stderr_log"; then
+    fail "expected Ralph to reject switching to a new issue worktree while the primary checkout is dirty"
+  fi
+
+  if [[ -e "$review_log" ]]; then
+    fail "auto-review should not run after a dirty-primary worktree transition failure"
+  fi
+
+  assert_file_contains "$stderr_log" "left uncommitted changes in the primary checkout"
+}
+
 test_accepts_existing_issue_worktree_without_branch_switching() {
   local repo
   local bin_dir
@@ -256,6 +283,7 @@ test_rejects_repurposing_issue_worktree_with_new_branch_checkout() {
 
 test_accepts_direct_issue_worktree_creation
 test_rejects_local_issue_checkout_before_worktree_creation
+test_rejects_new_issue_worktree_when_primary_checkout_is_dirty
 test_accepts_existing_issue_worktree_without_branch_switching
 test_rejects_repurposing_issue_worktree_with_new_branch_checkout
 
