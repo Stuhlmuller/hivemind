@@ -213,26 +213,28 @@ wait_for_line_count() {
 wait_for_process_exit() {
   local pid="$1"
   local watchdog_pid
+  local timeout_flag="${case_root:?missing}/process-timeout-$pid"
+
+  rm -f "$timeout_flag"
 
   (
     sleep 5
     if kill -0 "$pid" >/dev/null 2>&1; then
       echo "timed out waiting for process $pid to exit" >&2
+      : >"$timeout_flag"
       kill "$pid" >/dev/null 2>&1 || true
     fi
   ) &
   watchdog_pid="$!"
 
-  if wait "$pid"; then
-    kill "$watchdog_pid" >/dev/null 2>&1 || true
-    wait "$watchdog_pid" >/dev/null 2>&1 || true
-    return
-  fi
-
+  wait "$pid" >/dev/null 2>&1 || true
   kill "$watchdog_pid" >/dev/null 2>&1 || true
   wait "$watchdog_pid" >/dev/null 2>&1 || true
-  echo "process $pid exited unexpectedly" >&2
-  exit 1
+
+  if [[ -f "$timeout_flag" ]]; then
+    rm -f "$timeout_flag"
+    exit 1
+  fi
 }
 
 assert_file_equals() {
@@ -399,6 +401,23 @@ for role in reviewer worker feature-requester scout beekeeper; do
 done
 
 swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
+printf 'legacy worker line\n' >"$runtime_root/logs/worker-1.log"
+sleep 30 &
+legacy_worker_pid="$!"
+printf '%s\n' "$legacy_worker_pid" >"$runtime_root/pids/worker-1.pid"
+
+legacy_status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status worker-1)"
+assert_text_includes "$legacy_status_output" "worker-1"
+
+legacy_logs_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" logs worker-1)"
+assert_text_includes "$legacy_logs_output" "legacy worker line"
+
+legacy_start_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" start worker 2>&1 || true)"
+assert_text_includes "$legacy_start_output" "worker-1"
+
+swarm_env bash "$repo_root/.agents/swarm.sh" stop worker-1 >/dev/null
+wait_for_process_exit "$legacy_worker_pid"
 
 rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 

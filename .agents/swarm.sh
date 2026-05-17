@@ -104,6 +104,110 @@ role_pid_path() {
   printf '%s\n' "$pids_root/$1.pid"
 }
 
+runtime_label_exists() {
+  local label="$1"
+
+  [[ -f "$(role_pid_path "$label")" || -f "$(role_log_path "$label")" || -d "$(role_worktree "$label")" ]]
+}
+
+runtime_labels_for_role() {
+  local role="$1"
+  local seen_labels=" "
+  local path
+  local label
+  local canonical_label=""
+
+  printf '%s\n' "$role"
+  seen_labels="${seen_labels}${role} "
+
+  for path in "$pids_root"/*.pid; do
+    [[ -e "$path" ]] || continue
+    label="$(basename "$path" .pid)"
+    [[ "$label" == "$role" ]] && continue
+    canonical_label="$(canonical_swarm_role "$label" 2>/dev/null || true)"
+    [[ "$canonical_label" == "$role" ]] || continue
+    case "$seen_labels" in
+      *" $label "*) ;;
+      *)
+        seen_labels="${seen_labels}${label} "
+        printf '%s\n' "$label"
+        ;;
+    esac
+  done
+
+  for path in "$logs_root"/*.log; do
+    [[ -e "$path" ]] || continue
+    label="$(basename "$path" .log)"
+    [[ "$label" == "$role" ]] && continue
+    canonical_label="$(canonical_swarm_role "$label" 2>/dev/null || true)"
+    [[ "$canonical_label" == "$role" ]] || continue
+    case "$seen_labels" in
+      *" $label "*) ;;
+      *)
+        seen_labels="${seen_labels}${label} "
+        printf '%s\n' "$label"
+        ;;
+    esac
+  done
+
+  for path in "$worktree_root"/*; do
+    [[ -e "$path" ]] || continue
+    label="$(basename "$path")"
+    [[ "$label" == "$role" ]] && continue
+    canonical_label="$(canonical_swarm_role "$label" 2>/dev/null || true)"
+    [[ "$canonical_label" == "$role" ]] || continue
+    case "$seen_labels" in
+      *" $label "*) ;;
+      *)
+        seen_labels="${seen_labels}${label} "
+        printf '%s\n' "$label"
+        ;;
+    esac
+  done
+}
+
+active_runtime_label_for_role() {
+  local role="$1"
+  local label
+  local pid_file
+  local pid=""
+
+  while IFS= read -r label; do
+    pid_file="$(role_pid_path "$label")"
+    cleanup_stale_pid "$pid_file"
+    if [[ ! -f "$pid_file" ]]; then
+      continue
+    fi
+
+    pid="$(<"$pid_file")"
+    if pid_is_running "$pid"; then
+      printf '%s\n' "$label"
+      return 0
+    fi
+  done < <(runtime_labels_for_role "$role")
+
+  return 1
+}
+
+resolve_runtime_label() {
+  local requested_role="$1"
+  local canonical_role=""
+
+  canonical_role="$(canonical_swarm_role "$requested_role")" || return 1
+
+  if [[ "$requested_role" != "$canonical_role" ]] && runtime_label_exists "$requested_role"; then
+    printf '%s\n' "$requested_role"
+    return 0
+  fi
+
+  if active_runtime_label_for_role "$canonical_role" >/dev/null 2>&1; then
+    active_runtime_label_for_role "$canonical_role"
+    return 0
+  fi
+
+  printf '%s\n' "$canonical_role"
+}
+
 selected_roles() {
   local requested_role=""
   local requested_count=""
@@ -157,6 +261,69 @@ selected_roles() {
   done
 }
 
+selected_role_targets() {
+  local requested_role=""
+  local requested_count=""
+  local role=""
+  local seen_roles=" "
+
+  if [[ "$#" -eq 0 ]]; then
+    while IFS= read -r role; do
+      role="$(resolve_runtime_label "$role")" || exit 1
+      case "$seen_roles" in
+        *" $role "*) ;;
+        *)
+          seen_roles="${seen_roles}${role} "
+          printf '%s\n' "$role"
+          ;;
+      esac
+    done < <(printf '%s\n' "${roles[@]}")
+    return
+  fi
+
+  while [[ "$#" -gt 0 ]]; do
+    requested_role="$1"
+    shift
+
+    case "$requested_role" in
+      --reviewers|--workers|--feature-requesters|--scouts|--pr-shepherds|--beekeepers)
+        requested_count="${1:-}"
+        if [[ -z "$requested_count" ]]; then
+          echo "[swarm] missing count for $requested_role" >&2
+          exit 1
+        fi
+        case "$requested_count" in
+          ''|*[!0-9]*)
+            echo "[swarm] invalid count for $requested_role: $requested_count" >&2
+            exit 1
+            ;;
+        esac
+        shift
+        if [[ "$requested_count" -eq 0 ]]; then
+          continue
+        fi
+        role="$(legacy_flag_role "$requested_role")" || exit 1
+        role="$(resolve_runtime_label "$role")" || exit 1
+        ;;
+      --*)
+        echo "[swarm] unknown option: $requested_role" >&2
+        exit 1
+        ;;
+      *)
+        role="$(resolve_runtime_label "$requested_role")" || exit 1
+        ;;
+    esac
+
+    case "$seen_roles" in
+      *" $role "*) ;;
+      *)
+        seen_roles="${seen_roles}${role} "
+        printf '%s\n' "$role"
+        ;;
+    esac
+  done
+}
+
 role_color_code() {
   swarm_role_color_code "$1" 2>/dev/null || printf '%s\n' "37"
 }
@@ -193,18 +360,8 @@ ensure_runtime_dirs() {
 
 role_is_running() {
   local role="$1"
-  local pid_file
-  local pid=""
 
-  pid_file="$(role_pid_path "$role")"
-  cleanup_stale_pid "$pid_file"
-
-  if [[ ! -f "$pid_file" ]]; then
-    return 1
-  fi
-
-  pid="$(<"$pid_file")"
-  pid_is_running "$pid"
+  active_runtime_label_for_role "$role" >/dev/null 2>&1
 }
 
 cleanup_stale_pid() {
@@ -229,15 +386,17 @@ start_role() {
   local log_path
   local run_root
   local pid
+  local running_label=""
 
   pid_file="$(role_pid_path "$role")"
   log_path="$(role_log_path "$role")"
   run_root="$(role_worktree "$role")"
 
   cleanup_stale_pid "$pid_file"
-  if [[ -f "$pid_file" ]]; then
+  if running_label="$(active_runtime_label_for_role "$role")"; then
+    pid_file="$(role_pid_path "$running_label")"
     pid="$(<"$pid_file")"
-    echo "[swarm] $role is already running with pid $pid"
+    echo "[swarm] $role is already running as $running_label with pid $pid"
     return
   fi
 
@@ -372,16 +531,8 @@ show_logs() {
 
 role_from_log_path() {
   local log_path="$1"
-  local role
 
-  for role in "${roles[@]}"; do
-    if [[ "$(role_log_path "$role")" == "$log_path" ]]; then
-      printf '%s\n' "$role"
-      return 0
-    fi
-  done
-
-  return 1
+  basename "$log_path" .log
 }
 
 follow_logs() {
@@ -397,7 +548,7 @@ follow_logs() {
     log_path="$(role_log_path "$role")"
     : >>"$log_path"
     log_paths+=("$log_path")
-  done < <(selected_roles "$@")
+  done < <(selected_role_targets "$@")
 
   while IFS= read -r line; do
     case "$line" in
@@ -454,13 +605,13 @@ show_logs_command() {
   if [[ "${#target_roles[@]}" -gt 0 ]]; then
     while IFS= read -r role; do
       show_logs "$role"
-    done < <(selected_roles "${target_roles[@]}")
+    done < <(selected_role_targets "${target_roles[@]}")
     return
   fi
 
   while IFS= read -r role; do
     show_logs "$role"
-  done < <(selected_roles)
+  done < <(selected_role_targets)
 }
 
 main() {
@@ -498,7 +649,7 @@ main() {
       ensure_git_ready "swarm"
       while IFS= read -r role; do
         print_status "$role"
-      done < <(selected_roles "$@")
+      done < <(selected_role_targets "$@")
       ;;
     logs)
       show_logs_command "$@"
@@ -506,7 +657,7 @@ main() {
     stop)
       while IFS= read -r role; do
         stop_role "$role"
-      done < <(selected_roles "$@")
+      done < <(selected_role_targets "$@")
       ;;
     *)
       usage >&2
