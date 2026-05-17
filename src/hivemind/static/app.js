@@ -180,9 +180,39 @@ async function api(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body.detail || `Request failed: ${response.status}`);
+    throw new Error(formatApiError(body, response.status));
   }
   return body;
+}
+
+function formatApiError(body, status) {
+  return formatErrorValue(body.detail ?? body.message ?? body.error) || `Request failed: ${status}`;
+}
+
+function formatErrorValue(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(formatErrorItem).filter(Boolean).join("; ");
+  }
+  if (value && typeof value === "object") {
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.error === "string") return value.error;
+    return "";
+  }
+  return value == null ? "" : String(value);
+}
+
+function formatErrorItem(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return String(item ?? "");
+  const message = formatErrorValue(item.msg ?? item.message ?? item.detail);
+  const location = Array.isArray(item.loc)
+    ? item.loc
+        .filter((part) => !["body", "query", "path"].includes(part))
+        .map((part) => String(part))
+        .join(".")
+    : "";
+  return location && message ? `${location}: ${message}` : message;
 }
 
 function toast(message) {
@@ -514,6 +544,8 @@ function renderAuth() {
   const authForm = $("#auth-form");
   const usernameInput = authForm.elements.username;
   const passwordInput = authForm.elements.password;
+  const passwordConfirmInput = authForm.elements.password_confirm;
+  const isSetup = !state.setupComplete;
 
   if (state.authMode !== authMode) {
     authForm.reset();
@@ -522,13 +554,21 @@ function renderAuth() {
 
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
+  $("#workspace-nav").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
-  usernameInput.placeholder = state.setupComplete ? "username" : "local-admin";
-  passwordInput.placeholder = state.setupComplete ? "password" : "create admin password";
-  passwordInput.autocomplete = state.setupComplete ? "current-password" : "new-password";
-  $("#auth-title").textContent = state.setupComplete ? "Log in" : "Set up admin";
-  $("#auth-mode").textContent = state.setupComplete ? "Use your local Hivemind account." : "First local user becomes admin.";
+  usernameInput.placeholder = isSetup ? "local-admin" : "username";
+  passwordInput.placeholder = isSetup ? "create admin password" : "password";
+  passwordInput.autocomplete = isSetup ? "new-password" : "current-password";
+  passwordConfirmInput.required = isSetup;
+  passwordConfirmInput.disabled = !isSetup;
+  $("#password-confirm-field").hidden = !isSetup;
+  $("#auth-title").textContent = isSetup ? "Set up admin" : "Log in";
+  $("#auth-mode").textContent = isSetup ? "First local admin" : "Local admin console";
+  $("#auth-detail").textContent = isSetup
+    ? "Create the first local operator account for this Hivemind node."
+    : "Sign in with the local username and password configured during setup.";
+  $("#auth-submit").textContent = isSetup ? "create admin" : "sign in";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
   renderNavigation();
 }
@@ -800,12 +840,20 @@ $("#auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const payload = readForm(form);
-  const path = state.setupComplete ? "/auth/login" : "/auth/setup";
+  const isSetup = !state.setupComplete;
+  const path = isSetup ? "/auth/setup" : "/auth/login";
+  if (isSetup && payload.password !== payload.password_confirm) {
+    toast("password confirmation does not match");
+    return;
+  }
+  if (!isSetup) {
+    delete payload.password_confirm;
+  }
   try {
     await api(path, { method: "POST", body: JSON.stringify(payload) });
     form.reset();
     await refresh();
-    toast(state.setupComplete ? "Signed in." : "Admin created.");
+    toast(isSetup ? "Admin created." : "Signed in.");
   } catch (error) {
     toast(error.message);
   }

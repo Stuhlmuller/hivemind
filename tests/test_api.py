@@ -1,23 +1,33 @@
 from __future__ import annotations
 
+import secrets
+import sqlite3
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import secrets
-import sqlite3
-from threading import Barrier
+from threading import Barrier, Event
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi.testclient import TestClient
 
+import hivemind.api as api_module
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
-from hivemind.store import HivemindStore, SCHEDULE_BACKFILL_BATCH_LIMIT, StoreError, hash_password
+from hivemind.providers import AgentProviderError, ProviderRunRequest, ProviderRunResult, ProviderToolRequest
+from hivemind.store import (
+    AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
+    HivemindStore,
+    SCHEDULE_BACKFILL_BATCH_LIMIT,
+    StoreError,
+    hash_password,
+)
 
 TEST_PASSWORD = "operator-not-secret"
+PROVIDER_CREDENTIAL_ID = "cred_provider_openrouter"
 
 
 class RecordingProviderReviewer:
@@ -34,6 +44,83 @@ class RecordingProviderReviewer:
 class FailingProviderReviewer:
     def review(self, request: ProviderIntentReviewRequest) -> ProviderIntentReviewDecision:
         raise ProviderIntentReviewerError(f"upstream failure for {request.reviewer_credential_ref}")
+
+
+class RecordingAgentProviderAdapter:
+    def __init__(self, provider: str = "openrouter") -> None:
+        self.provider = provider
+        self.requests: list[ProviderRunRequest] = []
+
+    def provider_id(self) -> str:
+        return self.provider
+
+    def run(self, request: ProviderRunRequest) -> ProviderRunResult:
+        self.requests.append(request)
+        return ProviderRunResult(
+            provider=request.provider,
+            model=request.model,
+            output_text=f"adapter response for {request.prompt}",
+            tool_requests=tuple(request.tool_requests),
+            metadata={"adapter": "recording"},
+        )
+
+
+class BlockingAgentProviderAdapter:
+    def __init__(self, slow_task_id: str) -> None:
+        self.slow_task_id = slow_task_id
+        self.started = Barrier(2)
+        self.release_slow = Event()
+
+    def provider_id(self) -> str:
+        return "openrouter"
+
+    def run(self, request: ProviderRunRequest) -> ProviderRunResult:
+        self.started.wait(timeout=5)
+        if request.metadata["task_id"] == self.slow_task_id:
+            self.release_slow.wait(timeout=5)
+        return ProviderRunResult(
+            provider=request.provider,
+            model=request.model,
+            output_text=f"adapter response for {request.prompt}",
+        )
+
+
+class LeakingAgentProviderAdapter:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+
+    def provider_id(self) -> str:
+        return "openrouter"
+
+    def run(self, request: ProviderRunRequest) -> ProviderRunResult:
+        if self.fail:
+            raise AgentProviderError("upstream rejected apiKey=raw-provider-token clientSecret=raw-provider-secret")
+        return ProviderRunResult(
+            provider=request.provider,
+            model=request.model,
+            output_text=f"provider used {request.credential_id} with fallback env://SECONDARY_PROVIDER_SECRET",
+            tool_requests=(
+                ProviderToolRequest(
+                    name="debug",
+                    arguments={
+                        "credential_id": request.credential_id,
+                        "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
+                        "notes": ["secondary ref env://SECONDARY_PROVIDER_SECRET"],
+                        "tuple_notes": (
+                            "tuple ref env://SECONDARY_PROVIDER_SECRET",
+                            {"x-api-key": "tuple prefixed api key"},
+                        ),
+                        "token": "placeholder",
+                        "accessToken": "LEAKME_TOKEN",
+                        "apiKey": "raw-api-key",
+                        "clientSecret": "LEAKME_SECRET",
+                        "x-api-key": "test prefixed api key",
+                        "authorization_header": "test authorization header",
+                        "bearer_token": "test bearer token",
+                    },
+                ),
+            ),
+        )
 
 
 def client_for(tmp_path: Path, *, base_url: str = "https://testserver") -> TestClient:
@@ -57,6 +144,133 @@ def setup(client: TestClient) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def test_create_app_uses_lifespan_without_on_event_deprecation(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        create_app(store, start_scheduler=False)
+
+    require_equal(
+        [warning for warning in caught if "on_event is deprecated" in str(warning.message)],
+        [],
+        "create_app should not register deprecated FastAPI on_event handlers",
+    )
+
+
+def test_scheduler_lifespan_respects_explicit_disable(tmp_path: Path) -> None:
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=False)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.get("/health")
+
+    require_equal(response.status_code, 200, "health check should succeed without scheduler startup")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "explicit disable should not start scheduler")
+
+
+def test_scheduler_lifespan_respects_env_disable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SCHEDULER", "false")
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"))
+
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.get("/health")
+
+    require_equal(response.status_code, 200, "health check should succeed when env disables scheduler")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "env disable should not start scheduler")
+
+
+def test_scheduler_lifespan_starts_and_stops_thread(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_SCHEDULER", raising=False)
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        thread = getattr(app.state, "scheduler_thread", None)
+        require_true(thread is not None, "explicit enable should create scheduler thread")
+        require_true(thread.is_alive(), "scheduler thread should run during app lifespan")
+
+    require_true(not thread.is_alive(), "scheduler thread should stop after app lifespan exits")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "scheduler state should be cleared after shutdown")
+
+
+def test_explicit_scheduler_start_overrides_env_disable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SCHEDULER", "false")
+    app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        thread = getattr(app.state, "scheduler_thread", None)
+        require_true(thread is not None, "explicit enable should override env disable")
+        require_true(thread.is_alive(), "scheduler thread should run during app lifespan")
+
+    require_true(not thread.is_alive(), "scheduler thread should stop after app lifespan exits")
+
+
+def test_scheduler_lifespan_replaces_stopping_thread_and_resumes_passes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(api_module, "SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(api_module, "SCHEDULER_INTERVAL_SECONDS", 0.01)
+    store = HivemindStore(tmp_path / "hivemind.db")
+    scheduler_started = Event()
+    release_scheduler = Event()
+    scheduler_resumed = Event()
+    scheduler_calls: list[int] = []
+
+    def blocked_schedule_pass() -> list[dict[str, object]]:
+        scheduler_calls.append(len(scheduler_calls) + 1)
+        if len(scheduler_calls) == 1:
+            scheduler_started.set()
+            release_scheduler.wait(timeout=2)
+        else:
+            scheduler_resumed.set()
+        return []
+
+    store.run_due_schedules_once = blocked_schedule_pass  # type: ignore[method-assign]
+    app = create_app(store, start_scheduler=True)
+
+    with TestClient(app, base_url="https://testserver"):
+        first_thread = getattr(app.state, "scheduler_thread", None)
+        require_true(first_thread is not None, "scheduler should start on first lifespan")
+        require_true(scheduler_started.wait(timeout=1), "scheduler pass should begin")
+
+    require_true(first_thread.is_alive(), "blocked scheduler should still be stopping after shutdown timeout")
+
+    with TestClient(app, base_url="https://testserver"):
+        replacement_thread = getattr(app.state, "scheduler_thread", None)
+        require_true(replacement_thread is not None, "restart should create a replacement scheduler thread")
+        require_true(replacement_thread is not first_thread, "restart should not reuse a stopping scheduler thread")
+        require_true(replacement_thread.is_alive(), "replacement scheduler should run during the active lifespan")
+        require_equal(len(scheduler_calls), 1, "replacement should not overlap the blocked scheduler pass")
+        release_scheduler.set()
+        first_thread.join(timeout=1)
+        require_true(not first_thread.is_alive(), "previous scheduler should stop after its blocked pass drains")
+        require_true(scheduler_resumed.wait(timeout=1), "replacement scheduler should resume passes")
+        require_true(replacement_thread.is_alive(), "replacement scheduler should stay alive during the active lifespan")
+
+    replacement_thread.join(timeout=1)
+    require_true(not replacement_thread.is_alive(), "replacement scheduler should stop after lifespan exit")
+    require_equal(getattr(app.state, "scheduler_thread", None), None, "stopped scheduler should clear state")
+
+
+def create_provider_credential(
+    store: HivemindStore,
+    agent_id: str,
+    *,
+    credential_id: str = PROVIDER_CREDENTIAL_ID,
+) -> dict[str, object]:
+    return store.create_credential(
+        {
+            "id": credential_id,
+            "name": "OpenRouter Provider Credential",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_agents": [agent_id],
+            "allowed_actions": [f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter"],
+            "metadata": {"credential_kind": "generic_reference", "purpose": "agent_provider"},
+        }
+    )
 
 
 def latest_schedule_run_event(client: TestClient, schedule_id: str) -> dict[str, object]:
@@ -113,7 +327,7 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
-    for required in ['name="username"', 'name="password"', 'autocomplete="new-password"']:
+    for required in ['name="username"', 'name="password"', 'name="password_confirm"', 'autocomplete="new-password"']:
         if required not in response.text:
             raise AssertionError(f"missing expected auth form markup: {required}")
     username_input_start = response.text.index('name="username"')
@@ -126,6 +340,25 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         raise AssertionError("username input should not ship with a preset value")
     if 'value="' in password_markup:
         raise AssertionError("password input should not ship with a preset value")
+    require_true(
+        "Create the first local operator account" in response.text,
+        "frontend should describe first-run local account setup",
+    )
+
+
+def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/static/app.js")
+
+    require_equal(response.status_code, 200, "frontend script should be served")
+    require_true("function formatApiError" in response.text, "frontend should format API errors")
+    require_true("function formatErrorItem" in response.text, "frontend should format validation items")
+    require_true(
+        "new Error(formatApiError(body, response.status))" in response.text,
+        "API helper should use formatted error messages",
+    )
+    require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")
 
 
 def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
@@ -195,6 +428,38 @@ def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path)
     require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
     require_equal(me_response.json()["role"], "admin", "me should expose the role")
     require_true("email" not in me_response.json(), "me should not expose an email field")
+
+
+def test_setup_rejects_mismatched_password_confirmation(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    mismatch_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": TEST_PASSWORD,
+            "password_confirm": "no",
+        },
+    )
+    setup_state = client.get("/setup-state")
+    setup_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": TEST_PASSWORD,
+            "password_confirm": TEST_PASSWORD,
+        },
+    )
+
+    require_equal(mismatch_response.status_code, 400, "setup should reject mismatched confirmation")
+    require_equal(
+        mismatch_response.json(),
+        {"detail": "password confirmation does not match"},
+        "setup should return a direct mismatch error",
+    )
+    require_equal(setup_state.json(), {"setup_complete": False}, "mismatch should not complete setup")
+    require_equal(setup_response.status_code, 201, "matching confirmation should create the admin")
+    require_equal(setup_response.json()["user"]["role"], "admin", "first user should be admin")
 
 
 def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:
@@ -304,6 +569,65 @@ def test_config_exposes_redacted_provider_backed_reviewer_settings(tmp_path: Pat
     require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose the raw reviewer credential ref")
 
 
+def test_config_rejects_invalid_reviewer_credential_ref(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "sk-raw-provider-secret")
+
+    try:
+        HivemindConfig.from_env()
+    except ValueError as exc:
+        require_equal(str(exc), "secret_ref must use env://, file://, vault://, oauth://, or secret://", "invalid reviewer refs should fail closed")
+    else:
+        raise AssertionError("invalid reviewer credential_ref was accepted")
+
+
+def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    client = client_for(tmp_path)
+
+    setup(client)
+    response = client.get("/config")
+    providers = {provider["provider"]: provider for provider in response.json()["agent_providers"]}
+    expected_providers = {"openai", "codex", "claude", "gemini", "openrouter", "bedrock", "huggingface", "ollama"}
+
+    require_equal(response.status_code, 200, "config should return after setup")
+    require_true(expected_providers.issubset(providers), "config should list the supported remote agent providers")
+    require_equal(providers["openrouter"]["model"], "anthropic/claude-sonnet-4", "provider config should expose the configured model")
+    require_equal(providers["openrouter"]["credential_id"], PROVIDER_CREDENTIAL_ID, "provider config should expose credential IDs")
+    require_true("credential_ref" not in providers["openrouter"], "provider config should not expose raw credential refs")
+    require_true("credential_ref_preview" not in providers["openrouter"], "provider config should not expose secret ref previews")
+    require_true("OPENROUTER_API_KEY" not in response.text, "config should not expose raw provider credential refs")
+
+
+def test_config_rejects_agent_provider_secret_ref_env(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+
+    try:
+        HivemindConfig.from_env()
+    except ValueError as exc:
+        require_true("CREDENTIAL_ID" in str(exc), "agent provider config should direct operators to credential IDs")
+    else:
+        raise AssertionError("agent provider credential_ref env var was accepted")
+
+
+def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/agents",
+        json={
+            "name": "Provider default runner",
+            "role": "run tasks through configured model",
+            "provider": "openrouter",
+        },
+    )
+
+    require_equal(response.status_code, 201, "agent creation should allow omitted model")
+    require_equal(response.json()["model"], "anthropic/claude-sonnet-4", "remote agents should use provider config model by default")
+
+
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -331,6 +655,28 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
+
+    replay_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
+    require_equal(
+        replay_response.json()["detail"],
+        "credential lease is expired or revoked",
+        "replayed lease use should expose the revoke/expiry reason",
+    )
+
+    stored_lease = client.get("/credential-leases").json()[0]
+    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
+    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
+
+    audit_events = client.get("/audit-events").json()
+    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
+    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
+    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
+    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
+    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
 
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
@@ -475,6 +821,692 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
     )
 
 
+def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "persisted-lease-race.db"
+    setup_store = HivemindStore(db_path)
+    setup_store.setup_admin("admin", TEST_PASSWORD)
+    agent = setup_store.list_agents()[0]
+    credential = setup_store.list_credentials()[0]
+    lease_token, _ = setup_store.request_lease(
+        credential_id=credential["id"],
+        agent_id=agent["id"],
+        action="read_repo",
+        intent="Read repository metadata for safe task triage.",
+        ttl_seconds=30,
+    )
+    if lease_token is None:
+        raise AssertionError("active lease request should issue a token")
+
+    start = Barrier(3)
+    consume = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def _consume_credential_action(self, conn, lease, normalized_action, payload):
+            consume.wait(timeout=5)
+            return super()._consume_credential_action(conn, lease, normalized_action, payload)
+
+    stores = [RacingStore(db_path), RacingStore(db_path)]
+
+    def perform(store: HivemindStore) -> tuple[str, object]:
+        start.wait(timeout=5)
+        try:
+            return (
+                "ok",
+                store.perform_credential_action(
+                    lease_token=lease_token,
+                    action="read_repo",
+                    payload={"repo": "hivemind"},
+                ),
+            )
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(perform, store) for store in stores]
+        start.wait(timeout=5)
+        results = [future.result() for future in futures]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one concurrent action should succeed")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["credential lease is expired or revoked"],
+        "losing concurrent action should fail closed as a replay",
+    )
+    require_equal(setup_store.list_leases()[0]["status"], "revoked", "persisted lease should be consumed")
+
+    action_events = [
+        event for event in setup_store.list_audit_events() if event["type"].startswith("credential.action.")
+    ]
+    require_equal(
+        sorted(event["type"] for event in action_events),
+        ["credential.action.denied", "credential.action.performed"],
+        "race should audit one allowed action and one denial",
+    )
+
+
+def test_local_agent_task_execution_uses_deterministic_adapter_without_network(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Summarize runtime state",
+            "description": "Summarize queued work without calling a remote provider.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={"input": "Use the local deterministic adapter."})
+    tasks = client.get("/tasks").json()
+    updated_task = next(item for item in tasks if item["id"] == task["id"])
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 201, "local task execution should succeed")
+    result = response.json()
+    require_equal(result["task_id"], task["id"], "task run should identify the executed task")
+    require_equal(result["agent_id"], agent["id"], "task run should identify the executing agent")
+    require_equal(result["provider"], "local", "local agent should use the deterministic local provider")
+    require_equal(result["model"], agent["model"], "task run should use the agent-selected model")
+    require_true("Use the local deterministic adapter." in result["output_text"], "local adapter should echo deterministic output")
+    require_true("credential_ref" not in result, "task run response should not expose provider credential refs")
+    require_equal(updated_task["status"], "done", "successful execution should mark the task done")
+    require_true(
+        any(event["type"] == "task.execution.completed" and event["target_id"] == task["id"] for event in audit_events),
+        "task execution should be audited",
+    )
+
+
+def test_registered_agent_provider_adapter_receives_model_and_brokered_credentials(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Provider runner",
+            "role": "run a bounded provider-backed task",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+            "system_prompt": "Keep output short.",
+        },
+    ).json()
+    create_provider_credential(store, agent["id"])
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Repo reader",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Read repository metadata",
+            "description": "Use the provider adapter boundary.",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 201, "registered provider adapter should execute the task")
+    require_true(bool(adapter.requests), "registered adapter should receive a provider run request")
+    provider_request = adapter.requests[0]
+    require_equal(provider_request.provider, "openrouter", "adapter request should use the agent provider")
+    require_equal(provider_request.model, "anthropic/claude-sonnet-4", "adapter request should use the agent model")
+    require_equal(provider_request.system_prompt, "Keep output short.", "adapter request should include the agent system prompt")
+    require_equal(provider_request.credential_id, PROVIDER_CREDENTIAL_ID, "adapter should receive the provider credential id")
+    require_equal(
+        provider_request.credential_action["credential_id"],
+        PROVIDER_CREDENTIAL_ID,
+        "adapter should receive a brokered provider credential action",
+    )
+    require_true(
+        "lease_token" not in provider_request.credential_action,
+        "adapter should not receive raw provider credential lease tokens",
+    )
+    require_equal(provider_request.tool_requests[0].name, "read_repo", "adapter should receive task tool requests")
+    require_equal(
+        provider_request.tool_requests[0].arguments["credential_id"],
+        credential["id"],
+        "tool request should reference credentials by id",
+    )
+    require_equal(
+        provider_request.tool_requests[0].arguments["credential_action"]["credential_id"],
+        credential["id"],
+        "tool request should include a brokered credential action",
+    )
+    require_true(
+        "lease_token" not in provider_request.tool_requests[0].arguments["credential_action"],
+        "adapter should not receive raw tool credential lease tokens",
+    )
+    require_true(
+        any(event["type"] == "task.execution.started" and event["target_id"] == task["id"] for event in audit_events),
+        "task execution start should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "credential.action.performed"
+            and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            for event in audit_events
+        ),
+        "provider credential use should consume a brokered credential action",
+    )
+    require_true(
+        any(
+            event["type"] == "credential.action.performed"
+            and event["target_id"] == credential["id"]
+            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            for event in audit_events
+        ),
+        "task tool credential use should consume a brokered credential action",
+    )
+    require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
+    require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
+
+
+def test_agent_provider_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    allowed_agent = client.get("/agents").json()[0]
+    denied_agent = client.post(
+        "/agents",
+        json={
+            "name": "Provider credential denied runner",
+            "role": "should not receive provider credentials",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, allowed_agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Denied provider credential use",
+            "description": "The agent is outside the provider credential policy.",
+            "assigned_agent_id": denied_agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "provider credential policy denial should fail closed")
+    require_equal(response.json()["detail"], "agent is not allowed to use this credential", "denial reason should match policy")
+    require_equal(adapter.requests, [], "provider adapter should not receive policy-denied provider credential requests")
+    require_equal(updated_task["status"], "failed", "policy-denied provider credential tasks should be marked failed")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            and event["metadata"]["task_id"] == task["id"]
+            and event["metadata"]["capability"] == "agent_provider"
+            for event in audit_events
+        ),
+        "policy-denied provider credential requests should be audited",
+    )
+
+
+def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    allowed_agent = client.get("/agents").json()[0]
+    denied_agent = client.post(
+        "/agents",
+        json={
+            "name": "Denied provider runner",
+            "role": "should not receive credential-scoped tool requests",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, denied_agent["id"])
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Repo reader",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_TOKEN",
+            "allowed_agents": [allowed_agent["id"]],
+            "allowed_actions": ["read_repo"],
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Denied repository metadata read",
+            "description": "The assigned agent is outside the credential policy.",
+            "assigned_agent_id": denied_agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "credential policy denial should fail closed before provider execution")
+    require_equal(response.json()["detail"], "agent is not allowed to use this credential", "denial reason should match policy")
+    require_equal(adapter.requests, [], "provider adapter should not receive policy-denied credential tool requests")
+    require_equal(updated_task["status"], "failed", "policy-denied provider task should be marked failed")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["target_id"] == credential["id"]
+            and event["metadata"]["task_id"] == task["id"]
+            for event in audit_events
+        ),
+        "policy-denied provider tool requests should be audited",
+    )
+
+
+def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Approval gated provider runner",
+            "role": "should not bypass operator approval",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, agent["id"])
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Repo reader",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": ["read_repo"],
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Approval-gated repository metadata read",
+            "description": "The credential action requires operator approval.",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+
+    require_equal(response.status_code, 403, "approval-gated actions should fail closed before provider execution")
+    require_equal(
+        response.json()["detail"],
+        "credential action requires operator-approved lease",
+        "approval-gated task runs should explain that a lease is required",
+    )
+    require_equal(adapter.requests, [], "provider adapter should not receive approval-gated credential tool requests")
+    require_equal(updated_task["status"], "failed", "approval-gated provider task should be marked failed")
+
+
+def test_concurrent_agent_task_execution_claims_queued_task_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    db_path = tmp_path / "task-run-race.db"
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    setup_store = HivemindStore(
+        db_path,
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run one queued task",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    create_provider_credential(setup_store, agent["id"])
+    task = setup_store.create_task(
+        {
+            "title": "Race provider execution",
+            "description": "Only one caller may claim this task.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    read_task = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+            row = super().get_task_row(conn, task_id)
+            if task_id == task["id"] and row["status"] == "queued":
+                read_task.wait(timeout=5)
+            return row
+
+    stores = [
+        RacingStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+        RacingStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+    ]
+
+    def run(store: HivemindStore) -> tuple[str, object]:
+        try:
+            return ("ok", store.run_task(task["id"]))
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result() for future in [executor.submit(run, store) for store in stores]]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one task run should claim execution")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["only queued tasks can be executed"],
+        "losing task run should fail before provider execution",
+    )
+    require_equal(len(adapter.requests), 1, "provider adapter should execute the claimed task exactly once")
+    require_equal(setup_store.get_task(task["id"])["status"], "done", "claimed task should finish successfully")
+
+
+def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    db_path = tmp_path / "same-agent-running-tasks.db"
+    setup_store = HivemindStore(db_path, config=HivemindConfig.from_env())
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run multiple queued tasks",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    create_provider_credential(setup_store, agent["id"])
+    fast_task = setup_store.create_task(
+        {
+            "title": "Fast provider execution",
+            "description": "This task finishes while another task is still running.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    slow_task = setup_store.create_task(
+        {
+            "title": "Slow provider execution",
+            "description": "This task remains running until the first task completes.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    adapter = BlockingAgentProviderAdapter(slow_task["id"])
+    stores = [
+        HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+        HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter}),
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        fast_result = executor.submit(stores[0].run_task, fast_task["id"])
+        slow_result = executor.submit(stores[1].run_task, slow_task["id"])
+        try:
+            require_equal(
+                fast_result.result(timeout=5)["task_id"],
+                fast_task["id"],
+                "fast task should finish first",
+            )
+            require_equal(
+                setup_store.get_task(slow_task["id"])["status"],
+                "running",
+                "slow task should remain running",
+            )
+            require_equal(
+                setup_store.get_agent(agent["id"])["status"],
+                "working",
+                "agent should stay working while another assigned task is running",
+            )
+        finally:
+            adapter.release_slow.set()
+        require_equal(
+            slow_result.result(timeout=5)["task_id"],
+            slow_task["id"],
+            "slow task should finish after release",
+        )
+
+    require_equal(
+        setup_store.get_agent(agent["id"])["status"],
+        "idle",
+        "agent should become idle after all runs finish",
+    )
+
+
+def test_remote_agent_provider_requires_credential_id_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", raising=False)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Missing credential runner",
+            "role": "exercise provider credential fail-closed behavior",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Provider task",
+            "description": "This should fail before adapter execution.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+
+    require_equal(response.status_code, 403, "remote providers without credential ids should fail closed")
+    require_true(
+        "agent provider credential_id is not configured" in response.json()["detail"],
+        "failure should explain that provider credentials are missing",
+    )
+    require_equal(adapter.requests, [], "provider adapter should not run without a configured credential id")
+    require_equal(updated_task["status"], "failed", "credential configuration failures should mark the task failed")
+
+
+def test_unregistered_agent_provider_fails_closed_without_leaking_secret_ref(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    store = HivemindStore(tmp_path / "hivemind.db", config=HivemindConfig.from_env())
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Missing adapter runner",
+            "role": "exercise fail-closed provider execution",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Provider task",
+            "description": "This should fail closed without an adapter.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
+    updated_task = next(item for item in client.get("/tasks").json() if item["id"] == task["id"])
+
+    require_equal(response.status_code, 403, "unregistered remote providers should fail closed")
+    require_true(
+        "agent provider adapter is not configured" in response.json()["detail"],
+        "failure should explain that the provider adapter is missing",
+    )
+    require_true("OPENROUTER_API_KEY" not in response.text, "failure should not expose the provider credential ref")
+    require_true("OPENROUTER_API_KEY" not in str(audit_events), "audit should not expose provider credential refs")
+    require_equal(updated_task["status"], "failed", "failed provider execution should mark the task failed")
+
+
+def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": LeakingAgentProviderAdapter()},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Leaky adapter runner",
+            "role": "exercise provider redaction",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Provider redaction task",
+            "description": "The adapter response includes configured refs.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    result = response.json()
+
+    require_equal(response.status_code, 201, "provider result redaction should still allow successful task runs")
+    require_true("OPENROUTER_API_KEY" not in response.text, "provider result should not expose credential ref targets")
+    require_true("env://OPENROUTER_API_KEY" not in response.text, "provider result should not expose full credential refs")
+    require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "provider result should not expose other secret ref targets")
+    require_true("env://SEC..." in response.text, "provider result should preview other secret refs")
+    require_equal(
+        result["tool_requests"][0]["arguments"]["credential_id"],
+        PROVIDER_CREDENTIAL_ID,
+        "credential ids can be returned without exposing secret refs",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["fallback_ref"],
+        "env://SEC...",
+        "non-sensitive secret-ref arguments should be previewed",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["notes"],
+        ["secondary ref env://SEC..."],
+        "secret refs embedded in free-text provider output should be previewed",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["tuple_notes"],
+        ["tuple ref env://SEC...", {"x-api-key": "[redacted]"}],
+        "tuple provider payloads should be recursively redacted",
+    )
+    require_equal(result["tool_requests"][0]["arguments"]["token"], "[redacted]", "token-like arguments should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["accessToken"], "[redacted]", "camelCase token fields should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["apiKey"], "[redacted]", "camelCase key fields should be redacted")
+    require_equal(result["tool_requests"][0]["arguments"]["clientSecret"], "[redacted]", "camelCase secret fields should be redacted")
+    require_equal(
+        result["tool_requests"][0]["arguments"]["x-api-key"],
+        "[redacted]",
+        "prefixed API key fields should be redacted",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["authorization_header"],
+        "[redacted]",
+        "authorization header fields should be redacted",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["bearer_token"],
+        "[redacted]",
+        "bearer token fields should be redacted",
+    )
+
+
+def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": LeakingAgentProviderAdapter(fail=True)},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Failing adapter runner",
+            "role": "exercise provider error redaction",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_provider_credential(store, agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Provider error task",
+            "description": "The adapter error includes configured refs.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "provider errors should fail closed")
+    require_equal(response.json()["detail"], "agent provider failed closed", "provider error details should be sanitized")
+    require_true("raw-provider-token" not in response.text, "provider error response should not expose adapter token details")
+    require_true("raw-provider-secret" not in str(audit_events), "provider error audit should not expose adapter secret details")
+    require_true("OPENROUTER_API_KEY" not in response.text, "provider error response should not expose credential refs")
+    require_true("OPENROUTER_API_KEY" not in str(audit_events), "provider error audit should not expose credential refs")
+
+
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -508,6 +1540,47 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert credential["policy"]["approval_required_actions"] == []
     assert credential["secret_ref_preview"].startswith("file://")
     assert "github-app.pem" not in response.text
+
+
+def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Metadata",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "metadata": {
+                "credential_kind": "generic_reference",
+                "credential_ref": "env://OPENROUTER_API_KEY",
+                "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
+                "oauth_token_expires_at": "2026-05-17T19:00:00+00:00",
+                "nested": {"apiKey": "LEAKME_KEY", "accessToken": "LEAKME_ACCESS_TOKEN"},
+            },
+        },
+    )
+
+    credential = response.json()
+
+    require_equal(response.status_code, 201, "credential metadata with secret-like values should be accepted")
+    require_equal(credential["metadata"]["credential_ref"], "[redacted]", "metadata credential refs should be redacted by key")
+    require_equal(credential["metadata"]["fallback_ref"], "env://SEC...", "secret refs in metadata values should be previewed")
+    require_equal(
+        credential["metadata"]["oauth_token_expires_at"],
+        "2026-05-17T19:00:00+00:00",
+        "OAuth expiry metadata should remain visible because it is not token material",
+    )
+    require_equal(credential["metadata"]["nested"]["apiKey"], "[redacted]", "nested secret-like metadata keys should be redacted")
+    require_equal(credential["metadata"]["nested"]["accessToken"], "[redacted]", "nested token metadata keys should be redacted")
+    require_true("OPENROUTER_API_KEY" not in response.text, "credential metadata should not expose the primary secret ref target")
+    require_true("SECONDARY_PROVIDER_SECRET" not in response.text, "credential metadata should not expose secondary secret ref targets")
+    require_true("LEAKME_KEY" not in response.text, "credential metadata should not expose token-like metadata values")
+    require_true("LEAKME_ACCESS_TOKEN" not in response.text, "credential metadata should not expose token-like metadata values")
 
 
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
@@ -776,6 +1849,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
             },
         ),
         ("PATCH", "/tasks/task_demo/status", {"status": "running"}),
+        ("POST", "/tasks/task_demo/run", {"input": "run this task"}),
         ("POST", "/tasks/task_demo/heartbeats", {"note": "still working"}),
         ("GET", "/heartbeats", None),
         ("GET", "/schedules", None),
@@ -1523,6 +2597,53 @@ def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
     require_equal(metadata["skipped_run_count"], 0, "backfill should defer rather than skip excess missed slots")
 
 
+def test_due_schedules_normalize_persisted_offset_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    offset_zone = timezone(timedelta(hours=14))
+    due_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
+    offset_due_at = due_at.astimezone(offset_zone)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Offset persisted review",
+            "interval_seconds": 60,
+            "catch_up_policy": "backfill",
+            "task_title": "Offset persisted scheduled review",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    with sqlite3.connect(tmp_path / "hivemind.db") as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", (offset_due_at.isoformat(), schedule["id"]))
+
+    run_response = client.post("/schedules/run-due")
+
+    require_equal(run_response.status_code, 200, "offset persisted due schedules should run")
+    created_tasks = run_response.json()["created_tasks"]
+    require_equal(len(created_tasks), 1, "offset persisted due schedules should create a task")
+    require_equal(
+        created_tasks[0]["title"],
+        "Offset persisted scheduled review",
+        "offset persisted schedule should create the configured task",
+    )
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    require_equal(
+        datetime.fromisoformat(updated_schedule["next_run_at"]).tzinfo,
+        timezone.utc,
+        "running the offset schedule should normalize the next run timestamp to UTC",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(
+        datetime.fromisoformat(metadata["scheduled_for"][0]),
+        due_at,
+        "schedule audit should record the absolute UTC slot, not the input offset string",
+    )
+
+
 def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -1756,12 +2877,32 @@ def test_task_update_rejects_payloads_without_editable_fields(tmp_path: Path) ->
         json={"title": "Strict update task"},
     ).json()
 
+    empty_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={},
+    )
+    require_equal(empty_response.status_code, 400, "empty task updates should be rejected")
+    require_equal(
+        empty_response.json()["detail"],
+        "task update requires at least one editable field",
+        "empty task update errors should identify the missing editable fields",
+    )
+
     wrong_endpoint_response = client.patch(
         f"/tasks/{created_task['id']}",
         json={"status": "running"},
     )
-    assert wrong_endpoint_response.status_code == 400
-    assert wrong_endpoint_response.json()["detail"] == "task update requires at least one editable field"
+    require_equal(wrong_endpoint_response.status_code, 422, "status-only task detail updates should fail validation")
+
+    mixed_payload_response = client.patch(
+        f"/tasks/{created_task['id']}",
+        json={"title": "Ambiguous task update", "status": "done"},
+    )
+    require_equal(mixed_payload_response.status_code, 422, "mixed task detail/status updates should fail validation")
+
+    unchanged_task = client.get("/tasks").json()[0]
+    require_equal(unchanged_task["title"], "Strict update task", "invalid task updates should leave title unchanged")
+    require_equal(unchanged_task["status"], "queued", "invalid task updates should leave status unchanged")
 
 
 def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> None:
@@ -2078,7 +3219,6 @@ def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None
         "schedule timestamp errors should not leak parser internals",
     )
 
-
 def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "legacy-schedule-priority.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
@@ -2139,6 +3279,28 @@ def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_pa
         "from_priority": "legacy-urgent",
         "to_priority": "normal",
     }
+
+
+def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    offset_zone = timezone(timedelta(hours=14))
+    future_at = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=5)).astimezone(offset_zone)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Offset input schedule",
+            "interval_seconds": 60,
+            "task_title": "Offset input scheduled task",
+            "next_run_at": future_at.isoformat(),
+        },
+    )
+
+    require_equal(response.status_code, 201, "schedule creation should accept offset-aware next_run_at")
+    stored_next_run_at = datetime.fromisoformat(response.json()["next_run_at"])
+    require_equal(stored_next_run_at.tzinfo, timezone.utc, "schedule creation should store next_run_at in UTC")
+    require_equal(stored_next_run_at, future_at.astimezone(timezone.utc), "schedule creation should preserve the instant")
 
 
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:

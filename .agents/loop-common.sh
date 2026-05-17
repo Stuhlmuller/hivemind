@@ -271,7 +271,7 @@ default_loop_prompt_preamble() {
 
 You are \`$loop_label\`, reviewer lane $slot_index of $slot_count.
 Primary focus: $focus_area.
-Work this focus first to reduce overlap with the other reviewer lanes. File only grounded bug, regression, reliability, docs, release, or operator issues that are not already covered.
+Work this focus first to reduce overlap with the other reviewer lanes. Prefer refining existing issues; file at most one new grounded bug, regression, reliability, docs, release, or operator issue only when it is not already covered.
 EOF
       ;;
     feature-requester)
@@ -281,7 +281,7 @@ EOF
 
 You are \`$loop_label\`, feature-requester lane $slot_index of $slot_count.
 Primary focus: $focus_area.
-Work this focus first to reduce overlap with the other feature-requester lanes. Draft only concrete feature issues with repo evidence; do not start implementation.
+Work this focus first to reduce overlap with the other feature-requester lanes. Prefer refining existing issues; draft at most one concrete feature issue with repo evidence, and do not start implementation.
 EOF
       ;;
     scout)
@@ -291,7 +291,7 @@ EOF
 
 You are \`$loop_label\`, scout lane $slot_index of $slot_count.
 Primary shipped-behavior focus: $focus_area.
-Use the Codex browser tool only on the default branch and only to validate shipped behavior that can turn into concrete issues. Do not use it for speculative feature ideation.
+Use the Codex browser tool only on the default branch and only to validate shipped behavior that can turn into concrete issues. Prefer refining existing issues; file at most one new issue, and do not use it for speculative feature ideation.
 EOF
       ;;
     worker)
