@@ -110,7 +110,7 @@ CREDENTIAL_INSERT_SQL = """
 BACKUP_FORMAT = "hivemind-logical-backup"
 BACKUP_FORMAT_VERSION = 1
 BACKUP_TABLE_QUERIES: dict[str, str] = {
-    "users": "SELECT * FROM users ORDER BY id",
+    "users": "SELECT id, username, password_hash, role, created_at FROM users ORDER BY id",
     "agents": "SELECT * FROM agents ORDER BY id",
     "credentials": (
         "SELECT * FROM credentials "

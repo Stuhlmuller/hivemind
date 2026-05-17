@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -81,7 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary = store.restore_backup_bundle(bundle)
             emit_summary("restored", args.path, summary)
             return 0
-    except (OSError, json.JSONDecodeError, StoreError) as exc:
+    except (OSError, json.JSONDecodeError, sqlite3.Error, StoreError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

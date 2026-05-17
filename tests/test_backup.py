@@ -356,3 +356,38 @@ def test_cli_backup_rejects_missing_hivemind_db_path_without_creating_database(
     require_true("configured database does not exist" in captured.err, "backup should explain the missing DB path")
     require_true(missing_db.exists() is False, "backup should not create a fresh source database")
     require_true(backup_path.exists() is False, "backup should not write an output bundle after source validation fails")
+
+
+def test_backup_exports_declared_user_columns_from_upgraded_databases(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    with sqlite3.connect(tmp_path / "source.db") as conn:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        conn.execute("UPDATE users SET email = 'legacy@example.invalid'")
+
+    bundle = source.export_backup_bundle()
+
+    require_equal(
+        set(bundle["tables"]["users"][0]),
+        {"id", "username", "password_hash", "role", "created_at"},
+        "backup users should include only restorable columns",
+    )
+    target = HivemindStore(tmp_path / "target.db")
+    require_equal(
+        target.restore_backup_bundle(bundle),
+        bundle["summary"],
+        "backup from upgraded user schema should restore cleanly",
+    )
+
+
+def test_cli_backup_reports_sqlite_failures(monkeypatch, capsys) -> None:
+    def fail_from_env(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("hivemind.__main__.HivemindStore.from_env", fail_from_env)
+
+    require_equal(main(["backup", "-"]), 1, "backup command should report sqlite failures cleanly")
+
+    captured = capsys.readouterr()
+    require_true("database is locked" in captured.err, "backup should print the sqlite failure")
+    require_true("Traceback" not in captured.err, "backup should not emit a raw traceback")
