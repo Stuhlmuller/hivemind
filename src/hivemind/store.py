@@ -1627,6 +1627,8 @@ class HivemindStore:
         due_at = parse_dt(timestamp)
         if due_at is None:
             return 0
+        if due_at.tzinfo is None or due_at.utcoffset() is None:
+            due_at = due_at.replace(tzinfo=timezone.utc)
         return max(int((now - due_at).total_seconds()), 0)
 
     def runtime_schedule_view(self, row: sqlite3.Row | dict[str, Any], now: datetime) -> dict[str, Any]:

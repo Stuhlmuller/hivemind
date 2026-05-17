@@ -2852,11 +2852,13 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
         },
     )
     require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
 
     with store.connect() as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", ("2000-01-01T00:00:00", schedule["id"]))
         conn.execute(
             "UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
-            ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", running_task["id"]),
+            ("2000-01-01T00:00:00", "2000-01-01T00:00:00", running_task["id"]),
         )
 
     response = client.get("/runtime/overview")

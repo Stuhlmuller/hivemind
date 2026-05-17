@@ -379,6 +379,34 @@ function renderHealthList(selector, items, emptyText, renderItem) {
   $(selector).innerHTML = items.length ? items.map(renderItem).join("") : `<p class="meta">${emptyText}</p>`;
 }
 
+function runtimeOverviewFallback(error) {
+  const detail = error && typeof error.message === "string" ? error.message : "runtime overview unavailable";
+  return {
+    status: "degraded",
+    service: "hivemind",
+    checked_at: "unavailable",
+    db: { status: "unknown" },
+    scheduler: { status: "unknown", detail },
+    counts: {
+      active_leases: 0,
+      due_schedules: 0,
+      stale_heartbeats: 0,
+      failed_tasks: 0,
+    },
+    due_schedules: [],
+    stale_heartbeats: [],
+    failed_tasks: [],
+  };
+}
+
+async function loadRuntimeOverview() {
+  try {
+    return await api("/runtime/overview");
+  } catch (error) {
+    return runtimeOverviewFallback(error);
+  }
+}
+
 function credentialName(credentialId) {
   const credential = state.credentials.find((item) => item.id === credentialId);
   return credential ? credential.name : credentialId;
@@ -750,7 +778,7 @@ async function refresh() {
     api("/schedules"),
     api("/heartbeats"),
     api("/audit-events"),
-    api("/runtime/overview"),
+    loadRuntimeOverview(),
   ]);
   Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
   render();
