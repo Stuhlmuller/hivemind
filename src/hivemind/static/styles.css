@@ -311,7 +311,7 @@ main {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px;
 }
 
@@ -346,6 +346,10 @@ main {
 
 .credentials-workspace {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hives-workspace {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
 }
 
 .panel-span-2 {
@@ -674,7 +678,8 @@ select[multiple] {
   .runtime-shell,
   .auth-shell,
   .overview-workspace,
-  .credentials-workspace {
+  .credentials-workspace,
+  .hives-workspace {
     grid-template-columns: 1fr;
   }
 
@@ -693,10 +698,6 @@ select[multiple] {
 
   .panel-span-2 {
     grid-column: auto;
-  }
-
-  .metrics {
-    grid-template-columns: repeat(3, minmax(110px, 1fr));
   }
 
   .template-grid {

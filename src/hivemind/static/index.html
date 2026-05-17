@@ -23,6 +23,7 @@
       <div class="topbar-actions">
         <nav id="workspace-nav" class="page-nav" aria-label="Workspace" hidden>
           <a href="/" data-page-link="overview">overview</a>
+          <a href="/control/hives" data-page-link="hives">hives</a>
           <a href="/control/credentials" data-page-link="credentials">credentials</a>
         </nav>
         <nav aria-label="Primary">
@@ -122,6 +123,7 @@ agents: brokered capabilities</pre>
               </div>
 
               <section class="metrics" aria-label="Runtime summary">
+                <div><span id="hive-count">0</span><p>hives</p></div>
                 <div><span id="agent-count">0</span><p>agents</p></div>
                 <div><span id="credential-count">0</span><p>credentials</p></div>
                 <div><span id="task-count">0</span><p>tasks</p></div>
@@ -139,9 +141,30 @@ agents: brokered capabilities</pre>
                   <form id="spawn-form" class="stack">
                     <label>name<input name="name" value="forager" autocomplete="off" /></label>
                     <label>role<textarea name="role" rows="3">Find the smallest useful context and report the next action.</textarea></label>
+                    <label>hive<select name="hive_id"></select></label>
                     <div class="two-col">
                       <label>provider<input name="provider" value="local" autocomplete="off" /></label>
                       <label>model<input name="model" value="deterministic-policy" autocomplete="off" /></label>
+                    </div>
+                    <div class="two-col">
+                      <label class="check"><input name="can_spawn_subagents" type="checkbox" /> can spawn subagents</label>
+                      <label>max subagents<input name="max_subagents" type="number" min="0" max="64" value="0" /></label>
+                    </div>
+                    <div class="two-col">
+                      <label class="check"><input name="issue_creation_enabled" type="checkbox" /> issue requests enabled</label>
+                      <label>
+                        issue kind
+                        <select name="issue_kind">
+                          <option value="issue">issue</option>
+                          <option value="feature_request">feature_request</option>
+                          <option value="bug">bug</option>
+                          <option value="chore">chore</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="two-col">
+                      <label>issue rate/hour<input name="issue_rate_limit_per_hour" type="number" min="0" max="200" value="0" /></label>
+                      <label>issue labels<input name="issue_labels" value="needs-triage" autocomplete="off" /></label>
                     </div>
                     <label>system prompt<textarea name="system_prompt" rows="3">Communicate in concise, actionable updates.</textarea></label>
                     <button type="submit">spawn</button>
@@ -157,6 +180,7 @@ agents: brokered capabilities</pre>
                   <form id="task-form" class="stack">
                     <label>title<input name="title" value="review credential policy" autocomplete="off" /></label>
                     <label>description<textarea name="description" rows="3">Confirm denied paths and short lease behavior.</textarea></label>
+                    <label>hive<select name="hive_id"></select></label>
                     <div class="two-col">
                       <label>agent<select name="assigned_agent_id"></select></label>
                       <label>credential<select name="credential_id"></select></label>
@@ -178,6 +202,7 @@ agents: brokered capabilities</pre>
                   </div>
                   <form id="schedule-form" class="stack">
                     <label>name<input name="name" value="policy review cadence" autocomplete="off" /></label>
+                    <label>hive<select name="hive_id"></select></label>
                     <div class="two-col">
                       <label>interval seconds<input name="interval_seconds" type="number" min="60" value="3600" /></label>
                       <label>agent<select name="assigned_agent_id"></select></label>
@@ -213,6 +238,97 @@ agents: brokered capabilities</pre>
                   <p>append-only trace</p>
                 </div>
                 <div id="audit-list" class="timeline"></div>
+              </section>
+            </section>
+
+            <section id="hives-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">hives</p>
+                  <h2>project control</h2>
+                </div>
+                <p>project targets, issue tracker binding, agent fan-out limits, and issue request rates.</p>
+              </div>
+
+              <section class="metrics" aria-label="Hive summary">
+                <div><span id="hive-active-count">0</span><p>active</p></div>
+                <div><span id="hive-paused-count">0</span><p>paused</p></div>
+                <div><span id="hive-agent-count">0</span><p>assigned agents</p></div>
+                <div><span id="hive-issue-agent-count">0</span><p>issue agents</p></div>
+                <div><span id="hive-subagent-count">0</span><p>subagent enabled</p></div>
+                <div><span id="hive-open-task-count">0</span><p>open tasks</p></div>
+              </section>
+
+              <section class="workspace hives-workspace">
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>create hive</h2>
+                    <p>project + tracker</p>
+                  </div>
+                  <form id="hive-form" class="stack">
+                    <label>name<input name="name" value="release hive" autocomplete="off" /></label>
+                    <label>project ref<input name="project_ref" value="local://hivemind" autocomplete="off" /></label>
+                    <div class="two-col">
+                      <label>
+                        tracker
+                        <select name="tracker_provider">
+                          <option value="github">github</option>
+                          <option value="linear">linear</option>
+                          <option value="jira">jira</option>
+                          <option value="custom">custom</option>
+                        </select>
+                      </label>
+                      <label>tracker project<input name="tracker_project" value="owner/repo" autocomplete="off" /></label>
+                    </div>
+                    <label>tracker base url<input name="tracker_base_url" placeholder="https://jira.example.test" autocomplete="off" /></label>
+                    <label>tracker credential<select name="tracker_credential_id"></select></label>
+                    <label>guidance<textarea name="guidance" rows="4">Use concise issue titles, cite repo evidence, and keep credential use brokered.</textarea></label>
+                    <label>
+                      status
+                      <select name="status">
+                        <option value="active">active</option>
+                        <option value="paused">paused</option>
+                      </select>
+                    </label>
+                    <button type="submit">create hive</button>
+                  </form>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>issue request</h2>
+                    <p>rate-limited task queue</p>
+                  </div>
+                  <form id="hive-issue-form" class="stack">
+                    <div class="two-col">
+                      <label>hive<select name="hive_id"></select></label>
+                      <label>agent<select name="agent_id"></select></label>
+                    </div>
+                    <div class="two-col">
+                      <label>
+                        kind
+                        <select name="kind">
+                          <option value="issue">issue</option>
+                          <option value="feature_request">feature_request</option>
+                          <option value="bug">bug</option>
+                          <option value="chore">chore</option>
+                        </select>
+                      </label>
+                      <label>labels<input name="labels" value="needs-triage" autocomplete="off" /></label>
+                    </div>
+                    <label>title<input name="title" value="capture verified swarm visibility gap" autocomplete="off" /></label>
+                    <label>description<textarea name="description" rows="4">Describe the observed gap, expected outcome, and concrete repo evidence.</textarea></label>
+                    <button type="submit">queue request</button>
+                  </form>
+                </div>
+
+                <section class="panel panel-span-2">
+                  <div class="panel-heading">
+                    <h2>hive registry</h2>
+                    <p>tracker and workload state</p>
+                  </div>
+                  <div id="hives-list" class="list"></div>
+                </section>
               </section>
             </section>
 
