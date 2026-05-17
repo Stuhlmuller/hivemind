@@ -169,9 +169,39 @@ async function api(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body.detail || `Request failed: ${response.status}`);
+    throw new Error(formatApiError(body, response.status));
   }
   return body;
+}
+
+function formatApiError(body, status) {
+  return formatErrorValue(body.detail ?? body.message ?? body.error) || `Request failed: ${status}`;
+}
+
+function formatErrorValue(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(formatErrorItem).filter(Boolean).join("; ");
+  }
+  if (value && typeof value === "object") {
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.error === "string") return value.error;
+    return "";
+  }
+  return value == null ? "" : String(value);
+}
+
+function formatErrorItem(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return String(item ?? "");
+  const message = formatErrorValue(item.msg ?? item.message ?? item.detail);
+  const location = Array.isArray(item.loc)
+    ? item.loc
+        .filter((part) => !["body", "query", "path"].includes(part))
+        .map((part) => String(part))
+        .join(".")
+    : "";
+  return location && message ? `${location}: ${message}` : message;
 }
 
 function toast(message) {
