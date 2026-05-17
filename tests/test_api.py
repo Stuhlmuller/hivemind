@@ -383,10 +383,10 @@ def test_overview_surface_includes_runtime_health_panel(tmp_path: Path) -> None:
 
     response = client.get("/")
 
-    assert response.status_code == 200
-    assert 'id="runtime-health-panel"' in response.text
-    assert 'id="runtime-stale-heartbeats-count"' in response.text
-    assert 'id="runtime-due-schedules-count"' in response.text
+    require_equal(response.status_code, 200, "overview should be served")
+    require_true('id="runtime-health-panel"' in response.text, "overview should include runtime health panel")
+    require_true('id="runtime-stale-heartbeats-count"' in response.text, "overview should include stale heartbeat count")
+    require_true('id="runtime-due-schedules-count"' in response.text, "overview should include due schedule count")
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
@@ -2751,10 +2751,11 @@ def test_health_reports_db_and_scheduler_state(tmp_path: Path) -> None:
 
     response = client.get("/health")
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    assert response.json()["db"]["status"] == "ok"
-    assert response.json()["scheduler"]["status"] == "disabled"
+    payload = response.json()
+    require_equal(response.status_code, 200, "health should be available")
+    require_equal(payload["status"], "ok", "health should report ok")
+    require_equal(payload["db"]["status"], "ok", "health should report db ok")
+    require_equal(payload["scheduler"]["status"], "disabled", "health should report disabled test scheduler")
 
 
 def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -2769,15 +2770,17 @@ def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch
     with TestClient(app) as client:
         response = client.get("/health")
 
-    assert response.status_code == 503
-    assert response.json()["status"] == "error"
-    assert response.json()["db"]["status"] == "error"
-    assert response.json()["db"]["detail"] == "unable to open database file"
+    payload = response.json()
+    require_equal(response.status_code, 503, "health should report an unavailable database")
+    require_equal(payload["status"], "error", "health status should fail")
+    require_equal(payload["db"]["status"], "error", "db status should fail")
+    require_equal(payload["db"]["detail"], "database unavailable", "db detail should be operator-safe")
+    require_true("unable to open database file" not in response.text, "health response should not leak raw DB errors")
 
 
 def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_and_failed_tasks(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "runtime.db")
-    client = TestClient(create_app(store, start_scheduler=False))
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
@@ -2792,7 +2795,7 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
             "ttl_seconds": 300,
         },
     )
-    assert lease_response.status_code == 201
+    require_equal(lease_response.status_code, 201, "lease creation should succeed")
 
     running_task = client.post(
         "/tasks",
@@ -2821,7 +2824,7 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
             "next_run_at": "2000-01-01T00:00:00+00:00",
         },
     )
-    assert schedule_response.status_code == 201
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
 
     with store.connect() as conn:
         conn.execute(
@@ -2831,21 +2834,42 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
 
     response = client.get("/runtime/overview")
 
-    assert response.status_code == 200
+    require_equal(response.status_code, 200, "runtime overview should be available")
     payload = response.json()
-    assert payload["status"] == "ok"
-    assert payload["counts"] == {
-        "active_leases": 1,
-        "due_schedules": 1,
-        "stale_heartbeats": 1,
-        "failed_tasks": 1,
-    }
-    assert payload["scheduler"]["status"] == "disabled"
-    assert payload["due_schedules"][0]["name"] == "Overdue review"
-    assert payload["due_schedules"][0]["overdue_seconds"] > 0
-    assert payload["stale_heartbeats"][0]["id"] == running_task["id"]
-    assert payload["stale_heartbeats"][0]["overdue_seconds"] > 0
-    assert payload["failed_tasks"][0]["id"] == failed_task["id"]
+    require_equal(payload["status"], "ok", "runtime overview should report ok")
+    require_equal(
+        payload["counts"],
+        {
+            "active_leases": 1,
+            "due_schedules": 1,
+            "stale_heartbeats": 1,
+            "failed_tasks": 1,
+        },
+        "runtime overview should count active and overdue work",
+    )
+    require_equal(payload["scheduler"]["status"], "disabled", "runtime overview should include scheduler status")
+    require_equal(payload["due_schedules"][0]["name"], "Overdue review", "runtime overview should list overdue schedule")
+    require_true(payload["due_schedules"][0]["overdue_seconds"] > 0, "due schedule should include overdue seconds")
+    require_equal(payload["stale_heartbeats"][0]["id"], running_task["id"], "runtime overview should list stale heartbeat")
+    require_true(payload["stale_heartbeats"][0]["overdue_seconds"] > 0, "stale heartbeat should include overdue seconds")
+    require_equal(payload["failed_tasks"][0]["id"], failed_task["id"], "runtime overview should list failed task")
+
+
+def test_runtime_overview_uses_operator_safe_error_detail(tmp_path: Path, monkeypatch) -> None:
+    store = HivemindStore(tmp_path / "runtime-error.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+
+    def broken_runtime_overview() -> dict[str, object]:
+        raise sqlite3.OperationalError("raw database path /tmp/secret.db")
+
+    monkeypatch.setattr(store, "runtime_overview", broken_runtime_overview)
+
+    response = client.get("/runtime/overview")
+
+    require_equal(response.status_code, 503, "runtime overview should report unavailable store state")
+    require_equal(response.json()["detail"], "runtime overview unavailable", "runtime overview detail should be operator-safe")
+    require_true("secret.db" not in response.text, "runtime overview response should not leak raw DB errors")
 
 
 def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, caplog) -> None:
@@ -2867,13 +2891,13 @@ def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, c
 
     records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
 
-    assert records[-1]["event"] == "audit.decision"
-    assert records[-1]["type"] == "credential.lease.issued"
-    assert records[-1]["metadata"]["action"] == "read_repo"
-    assert records[-1]["metadata"]["lease_token"] == "[redacted]"
-    assert records[-1]["metadata"]["secret_ref"] == "[redacted]"
-    assert "hvl_secret_token" not in caplog.text
-    assert "demo-ref" not in caplog.text
+    require_equal(records[-1]["event"], "audit.decision", "audit log should identify decision events")
+    require_equal(records[-1]["type"], "credential.lease.issued", "audit log should include event type")
+    require_equal(records[-1]["metadata"]["action"], "read_repo", "audit log should preserve non-secret action")
+    require_equal(records[-1]["metadata"]["lease_token"], "[redacted]", "audit log should redact lease tokens")
+    require_equal(records[-1]["metadata"]["secret_ref"], "[redacted]", "audit log should redact secret refs")
+    require_true("hvl_secret_token" not in caplog.text, "audit log should not leak lease token values")
+    require_true("demo-ref" not in caplog.text, "audit log should not leak secret ref values")
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
