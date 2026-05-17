@@ -2102,6 +2102,32 @@ def test_declarative_config_export_excludes_broker_managed_secret_refs(
     require_equal(external_response.status_code, 201, "external credential fixture should be created")
     external_credential = external_response.json()
 
+    secret_box = SecretBox.from_env()
+    if secret_box is None:
+        raise AssertionError("OAuth credential fixture needs a broker secret box")
+    oauth_access_token = secrets.token_urlsafe(16)
+    oauth_refresh_token = secrets.token_urlsafe(16)
+    oauth_credential = client.app.state.store.create_oauth_credential(
+        provider="codex",
+        token_payload={
+            "access_token": oauth_access_token,
+            "refresh_token": oauth_refresh_token,
+            "scope": "read_repo",
+            "expires_in": 1800,
+        },
+        requested_credential={
+            "name": "OAuth Broker Credential",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "approval_required_actions": [],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {},
+        },
+        secret_box=secret_box,
+        actor_id="test-operator",
+    )
+
     managed_schedule_response = client.post(
         "/schedules",
         json={
@@ -2138,6 +2164,24 @@ def test_declarative_config_export_excludes_broker_managed_secret_refs(
     require_equal(external_schedule_response.status_code, 201, "external schedule fixture should be created")
     external_schedule = external_schedule_response.json()
 
+    oauth_schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "OAuth-backed schedule",
+            "enabled": True,
+            "interval_seconds": 120,
+            "catch_up_policy": "skip_missed",
+            "task_title": "Use OAuth broker token",
+            "assigned_agent_id": agent["id"],
+            "credential_id": oauth_credential["id"],
+            "action": "read_repo",
+            "intent": "Use a broker-owned OAuth token only on this host.",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(oauth_schedule_response.status_code, 201, "OAuth schedule fixture should be created")
+    oauth_schedule = oauth_schedule_response.json()
+
     export_response = client.get("/declarative-config")
     require_equal(export_response.status_code, 200, "declarative config export should succeed")
     exported = export_response.json()
@@ -2152,10 +2196,21 @@ def test_declarative_config_export_excludes_broker_managed_secret_refs(
         managed_schedule["id"] not in exported_schedule_ids,
         "declarative export should omit schedules that depend on omitted credentials",
     )
+    require_true(
+        oauth_credential["id"] not in exported_credential_ids,
+        "declarative export should omit OAuth-backed credentials",
+    )
+    require_true(
+        oauth_schedule["id"] not in exported_schedule_ids,
+        "declarative export should omit schedules that depend on OAuth-backed credentials",
+    )
     require_true(external_credential["id"] in exported_credential_ids, "portable credentials should still export")
     require_true(external_schedule["id"] in exported_schedule_ids, "portable schedules should still export")
     require_true("secret://" not in export_response.text, "declarative export should not include broker refs")
+    require_true("oauth://" not in export_response.text, "declarative export should not include OAuth refs")
     require_true(managed_value not in export_response.text, "declarative export should not include managed values")
+    require_true(oauth_access_token not in export_response.text, "declarative export should not include OAuth access tokens")
+    require_true(oauth_refresh_token not in export_response.text, "declarative export should not include OAuth refresh tokens")
     validate_response = client.post("/declarative-config/validate", json={"config": exported})
     require_equal(validate_response.status_code, 200, "declarative export should be self-validating")
 
@@ -2591,6 +2646,26 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         broker_response.json()["detail"],
         "credentials[0].secret_ref secret:// refs are broker-generated; provide secret_value for broker-managed storage",
         "declarative config should preserve broker-managed secret ref invariant",
+    )
+
+    oauth_secret_ref = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "oauth://codex/cred_bad",
+            }
+        ],
+    }
+    oauth_response = client.post(
+        "/declarative-config/validate",
+        json={"config": oauth_secret_ref},
+    )
+    require_equal(oauth_response.status_code, 400, "client-supplied OAuth broker ref should fail")
+    require_equal(
+        oauth_response.json()["detail"],
+        "credentials[0].secret_ref oauth:// refs are broker-generated; reconnect OAuth credentials after import",
+        "declarative config should preserve OAuth broker credential boundaries",
     )
 
     bad_metadata = {

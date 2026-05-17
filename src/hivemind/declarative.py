@@ -24,6 +24,8 @@ from hivemind.store import (
 
 CONFIG_VERSION = 1
 CONFIG_TARGET_ID = "declarative-config"
+OAUTH_REF_SCHEME = "oauth"
+OAUTH_REF_ERROR = "oauth:// refs are broker-generated; reconnect OAuth credentials after import"
 FORBIDDEN_METADATA_KEYS = {
     "access_token",
     "api_key",
@@ -175,7 +177,8 @@ def _credential_config(row: sqlite3.Row) -> dict[str, Any]:
 
 def _is_exportable_credential(row: sqlite3.Row) -> bool:
     metadata = loads(row["metadata"], {})
-    if str(row["secret_ref"]).startswith(f"{BROKER_SECRET_REF_SCHEME}://"):
+    scheme, _, _ = str(row["secret_ref"]).partition("://")
+    if scheme in {BROKER_SECRET_REF_SCHEME, OAUTH_REF_SCHEME}:
         return False
     kind = metadata.get("credential_kind")
     if kind is not None and str(kind).strip().lower() == "managed_secret":
@@ -276,6 +279,9 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
             validate_external_secret_ref(secret_ref)
         except ValueError as exc:
             raise DeclarativeConfigError(f"{prefix}.secret_ref {exc}") from exc
+        scheme, _, _ = secret_ref.partition("://")
+        if scheme == OAUTH_REF_SCHEME:
+            raise DeclarativeConfigError(f"{prefix}.secret_ref {OAUTH_REF_ERROR}")
         policy = _mapping(credential.get("policy"), f"{prefix}.policy")
         _reject_unknown_keys(
             policy,

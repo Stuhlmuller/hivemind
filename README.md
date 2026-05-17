@@ -187,7 +187,7 @@ action lists, and schedules with explicit catch-up policies and nested task
 templates. Credential entries include secret references such as
 `env://HIVEMIND_REPO_READER_TOKEN`, not raw tokens or encrypted OAuth payloads.
 Declarative imports accept external secret refs only; broker-generated
-`secret://` refs are not portable config.
+`secret://` refs and broker-backed `oauth://` refs are not portable config.
 Dry-run import validates references, TTLs, interval bounds, schedule catch-up
 policies and task templates, and credential policy compatibility without
 writing to SQLite. Apply with `"dry_run": false` after the operator has
