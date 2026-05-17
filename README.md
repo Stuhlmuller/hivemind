@@ -58,6 +58,10 @@ docker build -t hivemind .
 docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
 ```
 
+GitHub Actions also builds this image on pull requests and publishes it to
+GitHub Container Registry from `main` and version tags as
+`ghcr.io/<owner>/hivemind`.
+
 ## Security Model
 
 Agents never receive raw credentials. They request a capability from the
