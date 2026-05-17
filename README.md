@@ -225,6 +225,8 @@ live API traffic while replacing persisted state.
 
 ## Security Model
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
 Agents never receive raw credentials. They request a capability from the
 credentials service with an explicit action and intent. The service validates
 that request against credential policy, creates a narrow lease when allowed,
