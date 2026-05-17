@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remove AI Slop"
+  short_description: "Remove vague or generic AI output."
+  default_prompt: "Use this skill to tighten Hivemind work so code, UI, docs, and security claims are concrete, tested, and project-specific."
