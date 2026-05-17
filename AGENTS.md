@@ -29,6 +29,10 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
+Signing rule: all Codex-authored commits for this repository must be signed. Do
+not disable Git commit signing; if a commit is created unsigned, amend it with
+`git commit --amend --no-edit -S` before pushing or leaving the branch in
+place.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
