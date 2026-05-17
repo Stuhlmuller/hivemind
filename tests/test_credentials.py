@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 import unittest
 
 from hivemind.credentials import CredentialError, CredentialService, CredentialVault
 from hivemind.models import CredentialPolicy, LeaseStatus
 
 
-def make_service() -> CredentialService:
+def make_service(service_class: type[CredentialService] = CredentialService) -> CredentialService:
     vault = CredentialVault()
     vault.add(
         credential_id="github.main",
@@ -20,7 +21,7 @@ def make_service() -> CredentialService:
             max_ttl_seconds=60,
         ),
     )
-    return CredentialService(vault)
+    return service_class(vault)
 
 
 class CredentialServiceTests(unittest.TestCase):
@@ -129,6 +130,59 @@ class CredentialServiceTests(unittest.TestCase):
         event = service.audit_events()[-1]
         self.assertEqual(event.type, "credential.action.denied")
         self.assertEqual(event.reason, "credential lease is expired or revoked")
+
+    def test_concurrent_successful_action_consumes_lease_once(self) -> None:
+        start_barrier = Barrier(3)
+        lookup_barrier = Barrier(2)
+
+        class RacingCredentialService(CredentialService):
+            def _find_lease_by_token(self, lease_token: str):
+                lease = super()._find_lease_by_token(lease_token)
+                lookup_barrier.wait(timeout=5)
+                return lease
+
+        service = make_service(RacingCredentialService)
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        results: list[dict[str, str | bool]] = []
+        errors: list[str] = []
+
+        def perform() -> None:
+            start_barrier.wait(timeout=5)
+            try:
+                results.append(
+                    service.perform_action(
+                        lease_token=lease.token,
+                        action="read_repo",
+                        payload={"repo": "example"},
+                    )
+                )
+            except CredentialError as exc:
+                errors.append(str(exc))
+
+        threads = [Thread(target=perform) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        start_barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(errors, ["credential lease is expired or revoked"])
+        self.assertEqual(service.list_leases()[0].status, LeaseStatus.REVOKED)
+
+        action_events = [event for event in service.audit_events() if event.type.startswith("credential.action.")]
+        self.assertEqual(len(action_events), 2)
+        self.assertCountEqual(
+            [event.type for event in action_events],
+            ["credential.action.performed", "credential.action.denied"],
+        )
 
     def test_expired_lease_cannot_perform_action(self) -> None:
         service = make_service()

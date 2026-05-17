@@ -162,10 +162,21 @@ class CredentialService:
             raise
 
         if lease.status == LeaseStatus.PENDING:
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason="credential lease is pending approval",
+            )
             raise CredentialError("credential lease is pending approval")
         if lease.status == LeaseStatus.DENIED:
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason="credential lease request was denied",
+            )
             raise CredentialError("credential lease request was denied")
-        if not lease.is_active():
+        consumed_lease = self._consume_active_lease(lease=lease, action=normalized_action)
+        if consumed_lease is None:
             self._record_action_denied(
                 lease=lease,
                 action=normalized_action,
@@ -173,21 +184,19 @@ class CredentialService:
             )
             raise CredentialError("credential lease is expired or revoked")
 
-        if lease.action != normalized_action:
+        if consumed_lease.action != normalized_action:
             self._record_action_denied(
-                lease=lease,
+                lease=consumed_lease,
                 action=normalized_action,
                 reason="credential lease does not allow this action",
             )
             raise CredentialError("credential lease does not allow this action")
 
-        credential = self._vault.get(lease.credential_id)
-        with self._lock:
-            self._leases[lease.id] = replace(lease, status=LeaseStatus.REVOKED)
+        credential = self._vault.get(consumed_lease.credential_id)
         self._record_audit(
             AuditEvent(
                 type="credential.action.performed",
-                actor_id=lease.agent_id,
+                actor_id=consumed_lease.agent_id,
                 target_id=credential.id,
                 decision="allowed",
                 reason="action matched active credential lease",
@@ -277,6 +286,17 @@ class CredentialService:
                 if lease.token == lease_token:
                     return lease
         raise CredentialError("unknown credential lease token")
+
+    def _consume_active_lease(self, *, lease: CredentialLease, action: str) -> CredentialLease | None:
+        with self._lock:
+            current = self._leases.get(lease.id)
+            if current is None or not current.is_active():
+                return None
+            if current.action != action:
+                return current
+            consumed = replace(current, status=LeaseStatus.REVOKED)
+            self._leases[lease.id] = consumed
+            return consumed
 
     def _record_action_denied(self, *, lease: CredentialLease, action: str, reason: str) -> None:
         self._record_audit(
