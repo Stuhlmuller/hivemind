@@ -47,6 +47,7 @@ Before doing any other work:
 3. Use one branch for one issue only.
 4. Name branches from the issue number and task, for example `issue-123-short-slug`.
 5. Do not start work on another issue until the current issue branch has been turned into a PR and that PR is merged, closed, or canceled.
+6. Ralph audits branch behavior. If the run does not switch onto an `issue-<number>-<slug>` branch, the wrapper will fail the run.
 
 ## PR workflow
 

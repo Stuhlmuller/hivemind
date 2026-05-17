@@ -105,6 +105,92 @@ ensure_github_ready() {
   fi
 }
 
+default_branch_name() {
+  local ref
+
+  ref="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -z "$ref" ]]; then
+    echo "[ralph] unable to determine the default branch from origin/HEAD" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${ref#refs/remotes/origin/}"
+}
+
+current_branch_name() {
+  local branch
+
+  branch="$(git branch --show-current)"
+  if [[ -z "$branch" ]]; then
+    echo "[ralph] Ralph requires a named git branch; detached HEAD is not supported" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$branch"
+}
+
+is_issue_branch_name() {
+  local branch="$1"
+
+  [[ "$branch" =~ ^issue-[0-9]+-[a-z0-9][a-z0-9-]*$ ]]
+}
+
+head_reflog_count() {
+  git reflog --format='%gs' | wc -l | tr -d '[:space:]'
+}
+
+reflog_includes_issue_branch_checkout() {
+  local reflog_delta="$1"
+  local entry
+
+  if [[ "$reflog_delta" -le 0 ]]; then
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    if [[ "$entry" =~ ^checkout:\ moving\ from\ .+\ to\ issue-[0-9]+-[a-z0-9][a-z0-9-]*$ ]]; then
+      return 0
+    fi
+  done <<<"$(git reflog --format='%gs' -n "$reflog_delta")"
+
+  return 1
+}
+
+ensure_branch_context_before_run() {
+  current_branch_name >/dev/null
+}
+
+ensure_issue_branch_activity_after_run() {
+  local start_branch="$1"
+  local start_reflog_count="$2"
+  local default_branch end_branch end_reflog_count reflog_delta
+
+  default_branch="$(default_branch_name)"
+  end_branch="$(current_branch_name)"
+  end_reflog_count="$(head_reflog_count)"
+  reflog_delta=$((end_reflog_count - start_reflog_count))
+
+  if [[ "$end_branch" != "$default_branch" ]] && ! is_issue_branch_name "$end_branch"; then
+    echo "[ralph] Codex run ended on non-issue branch '$end_branch'; expected '$default_branch' or issue-<number>-<slug>" >&2
+    exit 1
+  fi
+
+  if is_issue_branch_name "$end_branch"; then
+    if [[ "$start_branch" == "$default_branch" && "$end_branch" == "$start_branch" ]]; then
+      echo "[ralph] Codex run stayed on '$default_branch'; Ralph requires an issue branch before continuing" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  if reflog_includes_issue_branch_checkout "$reflog_delta"; then
+    return
+  fi
+
+  echo "[ralph] Codex run did not switch onto an issue branch. Expected a checkout to issue-<number>-<slug> before returning to '$end_branch'" >&2
+  exit 1
+}
+
 run_codex_exec() {
   local prompt_text
   local -a cmd
@@ -146,9 +232,14 @@ ensure_flake_file
 ensure_github_ready
 
 while :; do
+  local_start_branch="$(current_branch_name)"
+  local_start_reflog_count="$(head_reflog_count)"
+
   ensure_github_ready
+  ensure_branch_context_before_run
   echo "[ralph] starting Codex run $iteration"
   run_codex_exec "$@"
+  ensure_issue_branch_activity_after_run "$local_start_branch" "$local_start_reflog_count"
 
   echo "[ralph] starting auto-review for run $iteration"
   run_auto_review
