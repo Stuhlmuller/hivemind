@@ -171,6 +171,27 @@ callback stores the token bundle in the same encrypted broker store and creates
 an `oauth://codex/...` credential reference, while public API responses
 continue to expose only redacted refs.
 
+## Declarative Config
+
+Authenticated operators can export and import reproducible runtime config:
+
+```bash
+curl -sS -b cookies.txt http://localhost:8000/declarative-config > hivemind.config.json
+curl -sS -b cookies.txt -H "content-type: application/json" \
+  -d '{"dry_run": true, "config": '"$(cat hivemind.config.json)"'}' \
+  http://localhost:8000/declarative-config/import
+```
+
+The config contains agents, credential policies, and schedules with nested task
+templates. Credential entries include secret references such as
+`env://HIVEMIND_REPO_READER_TOKEN`, not raw tokens or encrypted OAuth payloads.
+Dry-run import validates references, TTLs, interval bounds, schedule task
+templates, and credential policy compatibility without writing to SQLite. Apply
+with `"dry_run": false` after the operator has provisioned the referenced
+external secrets.
+
+See `docs/declarative-config.example.json` for a complete example.
+
 ## Container
 
 ```bash

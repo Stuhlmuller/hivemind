@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "agent_config_runner",
+      "name": "Config Runner",
+      "role": "Apply declarative runtime config and report concise failures.",
+      "provider": "local",
+      "model": "deterministic-policy",
+      "system_prompt": "Return only actionable import or validation failures."
+    }
+  ],
+  "credentials": [
+    {
+      "id": "cred_repo_reader",
+      "name": "Repository Reader",
+      "provider": "github",
+      "secret_ref": "env://HIVEMIND_REPO_READER_TOKEN",
+      "policy": {
+        "allowed_agents": ["agent_config_runner"],
+        "allowed_actions": ["read_repo"],
+        "max_ttl_seconds": 180,
+        "require_intent": true
+      },
+      "metadata": {
+        "credential_kind": "generic_reference",
+        "purpose": "read-only repository context"
+      }
+    }
+  ],
+  "schedules": [
+    {
+      "id": "sched_config_review",
+      "name": "Config Review",
+      "enabled": true,
+      "interval_seconds": 3600,
+      "next_run_at": "2030-01-01T00:00:00+00:00",
+      "task_template": {
+        "title": "Review runtime configuration",
+        "description": "Check configured agents, credentials, and schedules for drift.",
+        "priority": "normal",
+        "assigned_agent_id": "agent_config_runner",
+        "credential_id": "cred_repo_reader",
+        "action": "read_repo",
+        "intent": "Review repository configuration for Hivemind drift."
+      }
+    }
+  ]
+}

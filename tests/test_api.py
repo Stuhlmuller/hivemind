@@ -1848,6 +1848,17 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
         ),
         ("PATCH", "/schedules/sched_demo", {"enabled": False}),
         ("POST", "/schedules/run-due", None),
+        ("GET", "/declarative-config", None),
+        (
+            "POST",
+            "/declarative-config/validate",
+            {"config": {"version": 1, "agents": [], "credentials": [], "schedules": []}},
+        ),
+        (
+            "POST",
+            "/declarative-config/import",
+            {"dry_run": True, "config": {"version": 1, "agents": [], "credentials": [], "schedules": []}},
+        ),
         ("GET", "/audit-events", None),
     ]
 
@@ -2044,6 +2055,254 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     assert row[0] == f"secret://{credential['id']}"
     assert secret_row is not None
     assert "BEGIN TEST SECRET" not in secret_row[0]
+
+
+def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> None:
+    source = client_for(tmp_path / "source")
+    setup(source)
+
+    agent_response = source.post(
+        "/agents",
+        json={
+            "name": "Config Runner",
+            "role": "Apply declarative runtime config.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only actionable import failures.",
+        },
+    )
+    require_equal(agent_response.status_code, 201, "agent import fixture should be created")
+    agent = agent_response.json()
+
+    credential_response = source.post(
+        "/credentials",
+        json={
+            "name": "Config GitHub",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo", "open_issue"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference", "purpose": "config round trip"},
+        },
+    )
+    require_equal(credential_response.status_code, 201, "credential import fixture should be created")
+    credential = credential_response.json()
+
+    schedule_response = source.post(
+        "/schedules",
+        json={
+            "name": "Config sync",
+            "enabled": True,
+            "interval_seconds": 120,
+            "task_title": "Validate imported config",
+            "task_description": "Confirm references and policies still line up.",
+            "priority": "high",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "read_repo",
+            "intent": "Validate declarative Hivemind configuration drift.",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule import fixture should be created")
+    schedule = schedule_response.json()
+
+    export_response = source.get("/declarative-config")
+    require_equal(export_response.status_code, 200, "declarative config export should succeed")
+    exported = export_response.json()
+    exported_credential = next(item for item in exported["credentials"] if item["id"] == credential["id"])
+    exported_schedule = next(item for item in exported["schedules"] if item["id"] == schedule["id"])
+
+    require_equal(exported["version"], 1, "export should use the supported config version")
+    require_equal(
+        exported_credential["secret_ref"],
+        "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+        "export should keep secret refs as references",
+    )
+    require_true("secret_ref_preview" not in exported_credential, "declarative export should not use public previews")
+    require_true("task_template" in exported_schedule, "schedule export should include nested task template config")
+    require_equal(
+        exported_schedule["task_template"]["assigned_agent_id"],
+        agent["id"],
+        "task template should preserve agent reference",
+    )
+    require_true("raw-token-value" not in export_response.text, "export should not include raw token material")
+
+    target = client_for(tmp_path / "target")
+    setup(target)
+
+    validate_response = target.post("/declarative-config/validate", json={"config": exported})
+    require_equal(validate_response.status_code, 200, "declarative config validation should succeed")
+    require_equal(validate_response.json()["valid"], True, "validation response should mark config valid")
+
+    dry_run_response = target.post(
+        "/declarative-config/import",
+        json={"dry_run": True, "config": exported},
+    )
+    require_equal(dry_run_response.status_code, 200, "dry-run import should succeed")
+    require_equal(dry_run_response.json()["applied"], False, "dry-run import should not apply writes")
+    require_true(
+        all(item["id"] != agent["id"] for item in target.get("/agents").json()),
+        "dry-run import should not create agents",
+    )
+
+    import_response = target.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": exported},
+    )
+    require_equal(import_response.status_code, 200, "declarative config import should succeed")
+    require_equal(import_response.json()["applied"], True, "applied import should report writes")
+
+    imported_agent = next(item for item in target.get("/agents").json() if item["id"] == agent["id"])
+    imported_credential = next(item for item in target.get("/credentials").json() if item["id"] == credential["id"])
+    imported_schedule = next(item for item in target.get("/schedules").json() if item["id"] == schedule["id"])
+    audit_events = target.get("/audit-events").json()
+
+    require_equal(imported_agent["name"], "Config Runner", "imported agent should preserve name")
+    require_equal(imported_credential["secret_ref_preview"], "env://HIV...", "public credential view should stay redacted")
+    require_equal(
+        imported_credential["policy"]["allowed_agents"],
+        [agent["id"]],
+        "imported credential policy should preserve allowed agents",
+    )
+    require_equal(imported_schedule["task_title"], "Validate imported config", "imported schedule should keep task title")
+    require_equal(imported_schedule["assigned_agent_id"], agent["id"], "imported schedule should keep agent reference")
+    require_equal(audit_events[0]["type"], "config.imported", "applied import should create an audit event")
+    require_true(audit_events[0]["actor_id"].startswith("user_"), "import audit should use the authenticated user")
+    require_equal(
+        audit_events[0]["metadata"]["credentials"],
+        len(exported["credentials"]),
+        "import audit should count credentials without naming secrets",
+    )
+
+
+def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    bad_secret_ref = {
+        "version": 1,
+        "agents": [
+            {
+                "id": agent["id"],
+                "name": agent["name"],
+                "role": agent["role"],
+                "provider": agent["provider"],
+                "model": agent["model"],
+                "system_prompt": agent["system_prompt"],
+            }
+        ],
+        "credentials": [
+            {
+                "id": "cred_bad",
+                "name": "Bad config credential",
+                "provider": "github",
+                "secret_ref": "ghp_raw_secret_value",
+                "policy": {
+                    "allowed_agents": [agent["id"]],
+                    "allowed_actions": ["read_repo"],
+                    "max_ttl_seconds": 60,
+                    "require_intent": True,
+                },
+                "metadata": {},
+            }
+        ],
+        "schedules": [],
+    }
+    response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": bad_secret_ref},
+    )
+    require_equal(response.status_code, 400, "raw secret-shaped config import should fail")
+    require_equal(
+        response.json()["detail"],
+        "credentials[0].secret_ref secret_ref must use env://, file://, vault://, or oauth://",
+        "raw secret-shaped config import should explain the rejected secret ref",
+    )
+    require_true(
+        all(item["id"] != "cred_bad" for item in client.get("/credentials").json()),
+        "failed config import should not create credentials",
+    )
+
+    bad_metadata = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+                "metadata": {"client_secret": "x"},
+            }
+        ],
+    }
+    metadata_response = client.post(
+        "/declarative-config/validate",
+        json={"config": bad_metadata},
+    )
+    require_equal(metadata_response.status_code, 400, "secret metadata validation should fail")
+    require_equal(
+        metadata_response.json()["detail"],
+        "credentials[0].metadata.client_secret cannot contain secret material",
+        "secret metadata validation should name the rejected key",
+    )
+
+    nested_metadata = {
+        **bad_metadata,
+        "credentials": [
+            {
+                **bad_metadata["credentials"][0],
+                "metadata": {"safe": {"access_token": "x"}},
+            }
+        ],
+    }
+    nested_response = client.post(
+        "/declarative-config/validate",
+        json={"config": nested_metadata},
+    )
+    require_equal(nested_response.status_code, 400, "nested secret metadata validation should fail")
+    require_equal(
+        nested_response.json()["detail"],
+        "credentials[0].metadata.safe.access_token cannot contain secret material",
+        "nested secret metadata validation should name the rejected key path",
+    )
+
+    bad_schedule_policy = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+            }
+        ],
+        "schedules": [
+            {
+                "id": "sched_bad_policy",
+                "name": "Bad policy schedule",
+                "enabled": True,
+                "interval_seconds": 60,
+                "next_run_at": "2030-01-01T00:00:00+00:00",
+                "task_template": {
+                    "title": "Use disallowed action",
+                    "assigned_agent_id": agent["id"],
+                    "credential_id": "cred_bad",
+                    "action": "delete_repo",
+                    "intent": "Try a schedule action outside credential policy.",
+                },
+            }
+        ],
+    }
+    policy_response = client.post(
+        "/declarative-config/validate",
+        json={"config": bad_schedule_policy},
+    )
+    require_equal(policy_response.status_code, 400, "schedule policy validation should fail")
+    require_equal(
+        policy_response.json()["detail"],
+        "schedules[0].task_template.action is outside credential policy: delete_repo",
+        "schedule policy validation should reject actions outside the credential policy",
+    )
 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:

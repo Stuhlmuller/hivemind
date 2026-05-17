@@ -16,6 +16,12 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from hivemind.declarative import (
+    DeclarativeConfigError,
+    export_declarative_config,
+    import_declarative_config,
+    validate_declarative_config,
+)
 from hivemind.oauth import (
     OAuthConfigurationError,
     SecretBox,
@@ -219,6 +225,14 @@ class CreateScheduleRequest(BaseModel):
 
 class UpdateScheduleRequest(BaseModel):
     enabled: bool
+
+
+class DeclarativeConfigRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class ImportDeclarativeConfigRequest(DeclarativeConfigRequest):
+    dry_run: bool = True
 
 
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
@@ -609,6 +623,29 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         try:
             return {"created_tasks": db.run_due_schedules_once()}
         except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/declarative-config")
+    def export_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        return export_declarative_config(db)
+
+    @app.post("/declarative-config/validate")
+    def validate_config(request: DeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return validate_declarative_config(db, request.config)
+        except DeclarativeConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/declarative-config/import")
+    def import_config(request: ImportDeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return import_declarative_config(
+                db,
+                request.config,
+                actor_id=user.id,
+                dry_run=request.dry_run,
+            )
+        except DeclarativeConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/audit-events")
