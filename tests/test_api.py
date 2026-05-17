@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import secrets
 import sqlite3
 from threading import Barrier
 
@@ -140,6 +141,26 @@ def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path)
     require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
     require_equal(me_response.json()["role"], "admin", "me should expose the role")
     require_true("email" not in me_response.json(), "me should not expose an email field")
+
+
+def test_persisted_sessions_store_only_token_hashes(tmp_path: Path) -> None:
+    db_path = tmp_path / "hashed-sessions.db"
+    store = HivemindStore(db_path)
+
+    store.setup_admin("admin", TEST_PASSWORD)
+    token, _ = store.login("admin", TEST_PASSWORD)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]
+        session_hashes = [row[0] for row in conn.execute("SELECT token_hash FROM sessions")]
+    finally:
+        conn.close()
+
+    require_true("token_hash" in columns, "sessions should store a token_hash column")
+    require_true("token" not in columns, "sessions should not keep a plaintext token column")
+    require_equal(session_hashes, [store.hash_token(token)], "sessions should persist only the hashed token")
+    require_true(token not in session_hashes, "raw session tokens should not be stored")
 
 
 def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
@@ -469,3 +490,89 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
 
     assert response.status_code == 200
     assert response.json()["user"]["username"] == "admin"
+
+
+def test_existing_plaintext_sessions_migrate_to_token_hashes(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-sessions.db"
+    raw_token = secrets.token_urlsafe(24)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+          token TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("user_admin", "admin", hash_password(TEST_PASSWORD), "admin", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        (raw_token, "user_admin", "2026-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    store = HivemindStore(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]
+        session_hash = conn.execute("SELECT token_hash FROM sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+    require_true("token_hash" in columns, "legacy sessions should migrate to a token_hash column")
+    require_true("token" not in columns, "legacy sessions should drop the plaintext token column")
+    require_equal(session_hash, store.hash_token(raw_token), "legacy session rows should store hashed tokens")
+    session_user = store.get_session_user(raw_token)
+    require_true(session_user is not None, "migrated sessions should still authenticate the original cookie token")
+    require_equal(session_user.username, "admin", "migrated sessions should keep the original username")
+    require_equal(session_user.role, "admin", "migrated sessions should keep the original role")
+
+    store.logout(raw_token)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        remaining_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+    require_equal(remaining_sessions, 0, "logout should remove migrated session rows")
+
+
+def test_expired_hashed_sessions_are_deleted_on_lookup(tmp_path: Path) -> None:
+    db_path = tmp_path / "expired-sessions.db"
+    store = HivemindStore(db_path)
+
+    store.setup_admin("admin", TEST_PASSWORD)
+    token, _ = store.login("admin", TEST_PASSWORD)
+    token_hash = store.hash_token(token)
+
+    with store.connect() as conn:
+        conn.execute("UPDATE sessions SET expires_at = ? WHERE token_hash = ?", ("2000-01-01T00:00:00+00:00", token_hash))
+
+    require_equal(store.get_session_user(token), None, "expired sessions should no longer authenticate")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        remaining_sessions = conn.execute("SELECT COUNT(*) FROM sessions WHERE token_hash = ?", (token_hash,)).fetchone()[0]
+    finally:
+        conn.close()
+
+    require_equal(remaining_sessions, 0, "expired sessions should be deleted after lookup")
