@@ -126,4 +126,7 @@ requests flow through a fail-closed provider reviewer interface after the same
 deterministic policy checks. Provider adapters can be registered in code so
 the broker can keep secrets and credential refs out of agents, the frontend,
 and public API responses while preserving the local deterministic reviewer for
-offline and self-hosted operation.
+offline and self-hosted operation. The default app path keeps non-local
+reviewer configs fail-closed until a provider adapter is registered; setting a
+provider by environment alone does not pass raw provider secrets to agents or
+bypass the broker.

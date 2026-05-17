@@ -93,7 +93,28 @@ class PolicyEngine:
     def review_request(self, request: PolicyReviewInput) -> IntentReview:
         normalized_action = request.action.strip().lower()
         normalized_intent = request.intent.strip()
+        deterministic_review = self._review_deterministic_policy(
+            request=request,
+            normalized_action=normalized_action,
+            normalized_intent=normalized_intent,
+        )
 
+        if not deterministic_review.allowed or self.intent_reviewer.provider_id() == "local":
+            return deterministic_review
+
+        return self._review_with_provider(
+            request=request,
+            normalized_action=normalized_action,
+            normalized_intent=normalized_intent,
+        )
+
+    def _review_deterministic_policy(
+        self,
+        *,
+        request: PolicyReviewInput,
+        normalized_action: str,
+        normalized_intent: str,
+    ) -> IntentReview:
         if request.agent_id not in request.allowed_agents:
             return IntentReview(False, "agent is not allowed to use this credential", normalized_action)
 
@@ -103,9 +124,15 @@ class PolicyEngine:
         if request.require_intent and len(normalized_intent) < 12:
             return IntentReview(False, "intent is too short to authorize", normalized_action)
 
-        if self.intent_reviewer.provider_id() == "local":
-            return IntentReview(True, "intent and scope satisfy policy", normalized_action)
+        return IntentReview(True, "intent and scope satisfy policy", normalized_action)
 
+    def _review_with_provider(
+        self,
+        *,
+        request: PolicyReviewInput,
+        normalized_action: str,
+        normalized_intent: str,
+    ) -> IntentReview:
         if not self.intent_reviewer.credential_ref:
             return IntentReview(False, "intent reviewer credential_ref is required for provider-backed review", normalized_action)
 
@@ -132,8 +159,8 @@ class PolicyEngine:
         )
         try:
             decision = reviewer.review(provider_request)
-        except ProviderIntentReviewerError as exc:
-            return IntentReview(False, str(exc), normalized_action)
+        except ProviderIntentReviewerError:
+            return IntentReview(False, "intent reviewer provider failed closed", normalized_action)
         except Exception:
             return IntentReview(False, "intent reviewer provider failed closed", normalized_action)
 

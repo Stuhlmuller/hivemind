@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
-from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest
+from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
 from hivemind.store import HivemindStore, StoreError, hash_password
 
 TEST_PASSWORD = "operator-not-secret"
@@ -28,6 +28,11 @@ class RecordingProviderReviewer:
     def review(self, request: ProviderIntentReviewRequest) -> ProviderIntentReviewDecision:
         self.requests.append(request)
         return ProviderIntentReviewDecision(allowed=self.allowed, reason=self.reason)
+
+
+class FailingProviderReviewer:
+    def review(self, request: ProviderIntentReviewRequest) -> ProviderIntentReviewDecision:
+        raise ProviderIntentReviewerError(f"upstream failure for {request.reviewer_credential_ref}")
 
 
 def client_for(tmp_path: Path, *, base_url: str = "https://testserver") -> TestClient:
@@ -312,7 +317,7 @@ def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_pa
         ),
         provider_reviewers={"openrouter": reviewer},
     )
-    client = TestClient(create_app(store, start_scheduler=False))
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
@@ -354,7 +359,7 @@ def test_unknown_provider_backed_reviewer_fails_closed_for_store_backed_lease_re
             )
         ),
     )
-    client = TestClient(create_app(store, start_scheduler=False))
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
@@ -374,6 +379,70 @@ def test_unknown_provider_backed_reviewer_fails_closed_for_store_backed_lease_re
     require_true(
         "intent reviewer provider is not configured" in response.json()["detail"],
         "lease denial should explain that the provider adapter is missing",
+    )
+
+
+def test_provider_reviewer_errors_fail_closed_without_leaking_secret_refs(tmp_path: Path) -> None:
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": FailingProviderReviewer()},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "provider reviewer errors should deny leases")
+    require_equal(response.json()["detail"], "intent reviewer provider failed closed", "denial should use a redacted reason")
+    require_true("OPENROUTER_API_KEY" not in response.text, "denial should not expose reviewer credential refs")
+    require_true("OPENROUTER_API_KEY" not in str(audit_events), "audit events should not expose reviewer credential refs")
+
+
+def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(tmp_path / "hivemind.db"))
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_PROVIDER", "openrouter")
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
+    client = TestClient(create_app(start_scheduler=False), base_url="https://testserver")
+
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 403, "default app path should fail closed without a provider adapter")
+    require_true(
+        "intent reviewer provider is not configured" in response.json()["detail"],
+        "default app path should not silently fall back to local review",
     )
 
 
