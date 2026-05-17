@@ -124,7 +124,7 @@ class HivemindStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS sessions (
-                  token TEXT PRIMARY KEY,
+                  token_hash TEXT PRIMARY KEY,
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                   created_at TEXT NOT NULL,
                   expires_at TEXT NOT NULL
@@ -244,7 +244,33 @@ class HivemindStore:
                 );
                 """
             )
+            self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
+
+    def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "token_hash" in columns or "token" not in columns:
+            return
+        legacy_rows = conn.execute("SELECT token, user_id, created_at, expires_at FROM sessions").fetchall()
+        conn.execute("ALTER TABLE sessions RENAME TO sessions_legacy")
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+              token_hash TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            [
+                (self.hash_token(row["token"]), row["user_id"], row["created_at"], row["expires_at"])
+                for row in legacy_rows
+            ],
+        )
+        conn.execute("DROP TABLE sessions_legacy")
 
     def _migrate_users_to_username(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
@@ -299,37 +325,40 @@ class HivemindStore:
             if row is None or not verify_password(password, row["password_hash"]):
                 raise StoreError("invalid username or password")
             token = secrets.token_urlsafe(32)
+            token_hash = self.hash_token(token)
             now = utcnow()
             conn.execute(
-                "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-                (token, row["id"], iso(now), iso(now + timedelta(hours=12))),
+                "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (token_hash, row["id"], iso(now), iso(now + timedelta(hours=12))),
             )
             return token, self.public_user(row)
 
     def get_session_user(self, token: str | None) -> SessionUser | None:
         if not token:
             return None
+        token_hash = self.hash_token(token)
         with self.connect() as conn:
             row = conn.execute(
                 """
                 SELECT users.id, users.username, users.role, sessions.expires_at
                 FROM sessions JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token = ?
+                WHERE sessions.token_hash = ?
                 """,
-                (token,),
+                (token_hash,),
             ).fetchone()
             if row is None:
                 return None
             if parse_dt(row["expires_at"]) <= utcnow():
-                conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
                 return None
             return SessionUser(id=row["id"], username=row["username"], role=row["role"])
 
     def logout(self, token: str | None) -> None:
         if not token:
             return
+        token_hash = self.hash_token(token)
         with self.connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
 
     def public_user(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         return {"id": row["id"], "username": row["username"], "role": row["role"], "created_at": row["created_at"]}
