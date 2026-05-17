@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets
 import sqlite3
@@ -400,6 +401,91 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         and event["metadata"]["lease_id"] == denied_pending["id"]
         and event["reason"] == "operator denied lease request"
         for event in audit_events
+    )
+
+
+def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "persisted-approval-status.db"
+    store = HivemindStore(db_path)
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    secret_ref_value = f"env://GITHUB_WRITE_{secrets.token_hex(4).upper()}"
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "GitHub Writer",
+            "provider": "github",
+            "secret_ref": secret_ref_value,
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["open_issue"],
+            "approval_required_actions": ["open_issue"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    ).json()
+    issued_at = datetime.now(timezone.utc)
+    expires_at = issued_at + timedelta(seconds=60)
+    lease_values = {
+        "pending": f"hvp_{secrets.token_urlsafe(18)}",
+        "denied": f"hvp_{secrets.token_urlsafe(18)}",
+    }
+
+    with store.connect() as conn:
+        for status, lease_secret in lease_values.items():
+            conn.execute(
+                """
+                INSERT INTO leases
+                (
+                  id, token_hash, token_preview, credential_id, agent_id,
+                  action, intent, ttl_seconds, status, issued_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"lease_{status}_known_hash",
+                    store.hash_token(lease_secret),
+                    "not issued",
+                    credential["id"],
+                    agent["id"],
+                    "open_issue",
+                    "Confirm persisted approval status cannot be bypassed with a matching lease hash.",
+                    60,
+                    status,
+                    issued_at.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+
+    pending_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": lease_values["pending"],
+            "action": "open_issue",
+            "payload": {"repo": "hivemind"},
+        },
+    )
+    denied_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": lease_values["denied"],
+            "action": "open_issue",
+            "payload": {"repo": "hivemind"},
+        },
+    )
+
+    require_equal(pending_response.status_code, 403, "pending persisted leases should reject credential actions")
+    require_equal(
+        pending_response.json()["detail"],
+        "credential lease is pending approval",
+        "pending lease rejection should explain approval state",
+    )
+    require_equal(denied_response.status_code, 403, "denied persisted leases should reject credential actions")
+    require_equal(
+        denied_response.json()["detail"],
+        "credential lease request was denied",
+        "denied lease rejection should explain denial state",
     )
 
 
