@@ -340,10 +340,13 @@ done
 
 assert_file_contains "$capture_root/scout.prompt" "This is the only loop allowed to use the Codex browser tool."
 assert_file_contains "$capture_root/reviewer.prompt" "Do not use the Codex browser tool in this loop."
+assert_file_contains "$capture_root/reviewer.prompt" "Audit open PRs oldest-first by \`createdAt\`"
 assert_file_contains "$capture_root/worker.prompt" "Leave merging to the beekeeper loop even if the checks are already green."
 assert_file_contains "$capture_root/worker.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
 assert_file_contains "$capture_root/feature-requester.prompt" "Do not use the Codex browser tool in this loop."
 assert_file_contains "$capture_root/beekeeper.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
+assert_file_contains "$capture_root/beekeeper.prompt" "Sort open PRs oldest-first by"
+assert_file_contains "$capture_root/beekeeper.prompt" "Close irrelevant or obsolete PRs completely after confirming there is no active worker ownership."
 
 status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status)"
 for role in reviewer worker feature-requester scout beekeeper; do

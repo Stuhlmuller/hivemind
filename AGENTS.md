@@ -119,6 +119,9 @@ top-level roles to fan out bounded subagents whenever useful, support an
 endless supervisor mode for laptop-open development, and reserve PR merging
 and cross-branch CI cleanup for the beekeeper loop. Worker issue selection may
 use `HIVEMIND_WORKER_PRIORITY_LABELS`, but active branch, open PR, and lane
-ownership checks must stay ahead of label priority. Legacy names such as
+ownership checks must stay ahead of label priority. Reviewer and beekeeper
+loops should prioritize oldest open PRs first; the beekeeper may close
+irrelevant or obsolete PRs completely only after confirming there is no active
+worker ownership and leaving an explicit reason. Legacy names such as
 `browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should
 remain lightweight compatibility aliases instead of reintroducing lane logic.
