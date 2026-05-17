@@ -5,6 +5,7 @@ import sqlite3
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from threading import Barrier, Event
 from time import sleep
@@ -1802,6 +1803,89 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         and event["reason"] == "operator denied lease request"
         for event in audit_events
     )
+
+
+def test_approval_decision_audit_redacts_legacy_unsafe_action_identifier(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-unsafe-approval-action.db"
+    store = HivemindStore(db_path)
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential_id = "cred_legacy_unsafe_action"
+    unsafe_action = f"token-{secrets.token_hex(8)}"
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=60)
+    lease_ids = ("lease_unsafe_pending_approve", "lease_unsafe_pending_deny")
+
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO credentials
+            (
+              id, name, provider, secret_ref, allowed_agents, allowed_actions,
+              approval_required_actions, max_ttl_seconds, require_intent,
+              metadata, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                credential_id,
+                "Legacy Unsafe Action",
+                "github",
+                "env://LEGACY_UNSAFE_ACTION_TOKEN",
+                json.dumps([agent["id"]]),
+                json.dumps([unsafe_action]),
+                json.dumps([unsafe_action]),
+                60,
+                1,
+                "{}",
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        for lease_id in lease_ids:
+            lease_secret = f"hvp_{secrets.token_urlsafe(18)}"
+            conn.execute(
+                """
+                INSERT INTO leases
+                (
+                  id, token_hash, token_preview, credential_id, agent_id,
+                  action, intent, ttl_seconds, status, issued_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    store.hash_token(lease_secret),
+                    "not issued",
+                    credential_id,
+                    agent["id"],
+                    unsafe_action,
+                    "Approve or deny a legacy pending lease without exposing its action value.",
+                    60,
+                    "pending",
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+
+    approve_response = client.post(f"/credential-leases/{lease_ids[0]}/approve")
+    deny_response = client.post(f"/credential-leases/{lease_ids[1]}/deny")
+
+    require_equal(approve_response.status_code, 200, "legacy pending lease approval should still work")
+    require_equal(deny_response.status_code, 200, "legacy pending lease denial should still work")
+
+    audit_events = client.get("/audit-events").json()
+    approved_event = next(event for event in audit_events if event["type"] == "credential.lease.approved")
+    denied_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied" and event["reason"] == "operator denied lease request"
+    )
+
+    require_equal(approved_event["metadata"]["action"], "<redacted>", "approval audit action should be redacted")
+    require_equal(denied_event["metadata"]["action"], "<redacted>", "denial audit action should be redacted")
+    require_true(unsafe_action not in str(audit_events), "unsafe action should not appear in audit events")
 
 
 def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path) -> None:
