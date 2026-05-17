@@ -1402,8 +1402,6 @@ class HivemindStore:
                 error_detail = reason
             elif lease is not None:
                 result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
-                if error_detail is not None:
-                    self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
             else:
                 error_detail = "credential action could not be evaluated"
         if error_detail is not None:
