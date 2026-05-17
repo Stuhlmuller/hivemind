@@ -15,7 +15,6 @@ approval_rules:
       users:
         - "chatgpt-codex-connector[bot]"
     options:
-      allow_author: true
       methods:
         comments: []
         body_patterns:
