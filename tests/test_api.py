@@ -337,6 +337,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "next_run_at": None,
             },
         ),
+        ("PATCH", "/schedules/sched_demo", {"enabled": False}),
         ("POST", "/schedules/run-due", None),
         ("GET", "/audit-events", None),
     ]
@@ -665,10 +666,47 @@ def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
         },
     )
     assert schedule_response.status_code == 201
+    schedule = schedule_response.json()
+    assert schedule["enabled"] is True
 
-    run_response = client.post("/schedules/run-due")
-    assert run_response.status_code == 200
-    assert len(run_response.json()["created_tasks"]) == 1
+    disable_response = client.patch(f"/schedules/{schedule['id']}", json={"enabled": False})
+    assert disable_response.status_code == 200
+    assert disable_response.json()["id"] == schedule["id"]
+    assert disable_response.json()["enabled"] is False
+
+    paused_run_response = client.post("/schedules/run-due")
+    assert paused_run_response.status_code == 200
+    assert paused_run_response.json()["created_tasks"] == []
+
+    resumed_schedule = client.patch(f"/schedules/{schedule['id']}", json={"enabled": True})
+    assert resumed_schedule.status_code == 200
+    assert resumed_schedule.json()["id"] == schedule["id"]
+    assert resumed_schedule.json()["enabled"] is True
+
+    resumed_run_response = client.post("/schedules/run-due")
+    assert resumed_run_response.status_code == 200
+    created_tasks = resumed_run_response.json()["created_tasks"]
+    assert len(created_tasks) == 1
+    assert created_tasks[0]["title"] == "Scheduled policy review"
+
+    second_paused_run_response = client.post("/schedules/run-due")
+    assert second_paused_run_response.status_code == 200
+    assert second_paused_run_response.json()["created_tasks"] == []
+
+    schedules = client.get("/schedules")
+    assert schedules.status_code == 200
+    current_schedule = next(item for item in schedules.json() if item["id"] == schedule["id"])
+    assert current_schedule["enabled"] is True
+    assert current_schedule["last_run_at"] is not None
+
+    audit_events = client.get("/audit-events")
+    assert audit_events.status_code == 200
+    schedule_run_event = next(event for event in audit_events.json() if event["type"] == "schedule.ran")
+    assert schedule_run_event["actor_id"] == agent["id"]
+    assert schedule_run_event["target_id"] == schedule["id"]
+    assert schedule_run_event["decision"] == "allowed"
+    assert schedule_run_event["reason"] == "scheduled task created"
+    assert schedule_run_event["metadata"]["task_id"] == created_tasks[0]["id"]
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:

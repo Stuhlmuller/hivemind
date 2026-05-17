@@ -114,6 +114,10 @@ class CreateScheduleRequest(BaseModel):
     next_run_at: str | None = None
 
 
+class UpdateScheduleRequest(BaseModel):
+    enabled: bool
+
+
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
     config = HivemindConfig.from_env()
     db = store or HivemindStore.from_env()
@@ -436,6 +440,15 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def create_schedule(request: CreateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
             return db.create_schedule(request.model_dump())
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/schedules/{schedule_id}")
+    def update_schedule(schedule_id: str, request: UpdateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_schedule_enabled(schedule_id, request.enabled)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
