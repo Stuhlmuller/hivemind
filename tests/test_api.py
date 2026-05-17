@@ -1681,11 +1681,12 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
     )
 
 
-def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path) -> None:
+def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path, caplog) -> None:
     db_path = tmp_path / "persisted-approval-status.db"
     store = HivemindStore(db_path)
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
     agent = client.get("/agents").json()[0]
     secret_ref_value = f"env://GITHUB_WRITE_{secrets.token_hex(4).upper()}"
     credential = client.post(
@@ -1764,6 +1765,31 @@ def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_pa
         "credential lease request was denied",
         "denied lease rejection should explain denial state",
     )
+    audit_events = client.get("/audit-events").json()
+    action_denials = [event for event in audit_events if event["type"] == "credential.action.denied"]
+    require_equal(len(action_denials), 2, "denied credential actions should be audited")
+    require_true(
+        any(
+            event["reason"] == "credential lease is pending approval"
+            and event["metadata"]["lease_id"] == "lease_pending_known_hash"
+            and event["metadata"]["lease_status"] == "pending"
+            and "lease_token" not in event["metadata"]
+            for event in action_denials
+        ),
+        "pending lease action denial should be audited without storing the token",
+    )
+    require_true(
+        any(
+            event["reason"] == "credential lease request was denied"
+            and event["metadata"]["lease_id"] == "lease_denied_known_hash"
+            and event["metadata"]["lease_status"] == "denied"
+            and "lease_token" not in event["metadata"]
+            for event in action_denials
+        ),
+        "denied lease action denial should be audited without storing the token",
+    )
+    require_true(lease_values["pending"] not in caplog.text, "pending lease token should not appear in structured logs")
+    require_true(lease_values["denied"] not in caplog.text, "denied lease token should not appear in structured logs")
 
 
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
@@ -2898,6 +2924,9 @@ def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, c
     require_equal(records[-1]["metadata"]["secret_ref"], "[redacted]", "audit log should redact secret refs")
     require_true("hvl_secret_token" not in caplog.text, "audit log should not leak lease token values")
     require_true("demo-ref" not in caplog.text, "audit log should not leak secret ref values")
+    stored_event = store.list_audit_events()[0]
+    require_equal(stored_event["metadata"]["lease_token"], "[redacted]", "persisted audit event should redact lease tokens")
+    require_equal(stored_event["metadata"]["secret_ref"], "[redacted]", "persisted audit event should redact secret refs")
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
