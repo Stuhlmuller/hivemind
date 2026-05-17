@@ -32,16 +32,9 @@ The API docs are available at `http://localhost:8000/docs`.
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
 
-For local development, the setup form is prefilled with:
-
-```text
-username: admin
-password: hivemind-password
-```
-
-Those values are only UI defaults for a fresh local database. Change them during
-setup for any real self-hosted install. After setup completes, use the same
-username and password on the login screen.
+Enter your own local admin username and a password of at least 12 characters.
+Hivemind does not ship with preset bootstrap credentials. After setup
+completes, use the same username and password on the login screen.
 
 Optional intent reviewer configuration:
 

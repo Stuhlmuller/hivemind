@@ -43,13 +43,29 @@ agents: brokered capabilities</pre>
           </div>
           <label>
             username
-            <input name="username" value="admin" autocomplete="username" />
+            <input
+              id="auth-username"
+              name="username"
+              autocomplete="username"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              minlength="3"
+              required
+            />
           </label>
           <label>
             password
-            <input name="password" type="password" value="hivemind-password" autocomplete="current-password" />
+            <input
+              id="auth-password"
+              name="password"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required
+            />
           </label>
-          <button type="submit">continue</button>
+          <button id="auth-submit" type="submit">create admin</button>
         </form>
       </section>
 

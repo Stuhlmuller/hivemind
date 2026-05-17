@@ -71,12 +71,26 @@ function optionList(items, labelKey = "name", includeEmpty = false) {
 }
 
 function renderAuth() {
+  const usernameInput = $("#auth-username");
+  const passwordInput = $("#auth-password");
+  const submitButton = $("#auth-submit");
+  const setupMode = !state.setupComplete;
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
   $("#auth-title").textContent = state.setupComplete ? "Log in" : "Set up admin";
-  $("#auth-mode").textContent = state.setupComplete ? "Use your local Hivemind account." : "First local user becomes admin.";
+  $("#auth-mode").textContent = state.setupComplete
+    ? "Sign in to the local Hivemind control plane."
+    : "Create the first local admin account with your own password.";
+  usernameInput.placeholder = setupMode ? "choose an admin username" : "username";
+  passwordInput.autocomplete = setupMode ? "new-password" : "current-password";
+  passwordInput.minLength = setupMode ? 12 : 1;
+  passwordInput.placeholder = setupMode ? "choose a password (12+ chars)" : "password";
+  submitButton.textContent = setupMode ? "create admin" : "sign in";
+  if (!state.me) {
+    passwordInput.value = "";
+  }
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
 }
 

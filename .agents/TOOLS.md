@@ -11,11 +11,15 @@ This file must exist on every new agent spawn. Update it before or immediately a
 | `gh` | `gh` | Inspect and create GitHub issues from the repository |
 | `git` | `git` | Inspect repository state and history |
 | `nix` | `external` | Evaluate `flake.nix` and verify whether the repo dev shell is usable in the local environment |
+| `open` | `external` | Launch a local browser tab for manual UI verification on macOS |
+| `python` | `external` | Run the project virtualenv for local verification and browser smoke checks |
+| `pytest` | `external` | Run targeted regression tests from the project virtualenv |
 | `qlty` | `external` | Run the required code-quality checks before finishing repository changes |
 | `rg` | `ripgrep` | Search the codebase quickly |
 | `find` | `findutils` | Discover files and repo structure |
 | `sed` | `gnused` | Read targeted file sections |
-| `ls` / `pwd` | `coreutils` | Basic shell navigation and inspection |
+| `ls` / `pwd` / `cp` | `coreutils` | Basic shell navigation, inspection, and local repo-state setup |
+| `uvicorn` | `external` | Serve the local app from the project virtualenv for browser verification |
 
 ## Update rule
 

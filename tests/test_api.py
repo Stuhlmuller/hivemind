@@ -17,7 +17,7 @@ def client_for(tmp_path: Path) -> TestClient:
 def setup(client: TestClient) -> None:
     response = client.post(
         "/auth/setup",
-        json={"username": "admin", "password": "hivemind-password"},
+        json={"username": "admin", "password": "aaaaaaaaaaaa"},
     )
     assert response.status_code == 201
 
@@ -27,9 +27,25 @@ def test_frontend_is_served(tmp_path: Path) -> None:
 
     response = client.get("/")
 
-    assert response.status_code == 200
+    assert response.status_code == 200  # nosec B101
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
+
+
+def test_frontend_auth_form_requires_operator_entered_credentials(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/")
+
+    assert response.status_code == 200  # nosec B101
+    assert all(  # nosec B101
+        snippet in response.text
+        for snippet in ('name="username"', 'name="password"', 'autocomplete="new-password"', 'minlength="12"')
+    )
+    assert all(  # nosec B101
+        snippet not in response.text
+        for snippet in ('value="admin"', 'value="aaaaaaaaaaaa"')
+    )
 
 
 def test_config_requires_login_and_exposes_reviewer_after_setup(tmp_path: Path) -> None:
@@ -159,13 +175,13 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
     )
     conn.execute(
         "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-        ("user_old", "admin@hivemind.local", hash_password("hivemind-password"), "admin", "2026-01-01T00:00:00+00:00"),
+        ("user_old", "admin@hivemind.local", hash_password("aaaaaaaaaaaa"), "admin", "2026-01-01T00:00:00+00:00"),
     )
     conn.commit()
     conn.close()
 
     client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
-    response = client.post("/auth/login", json={"username": "admin", "password": "hivemind-password"})
+    response = client.post("/auth/login", json={"username": "admin", "password": "aaaaaaaaaaaa"})
 
     assert response.status_code == 200
     assert response.json()["user"]["username"] == "admin"
