@@ -1,0 +1,45 @@
+# Git metadata is never required inside the image build context.
+.git
+.git/
+.gitignore
+
+# Local secrets and runtime state.
+.env
+.env.*
+!.env.example
+.data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.agents/runtime/
+.agents/skills/codex-review/
+.agents/skills/frontend-design/
+
+# Python and test caches.
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local development environments and build output.
+.venv/
+venv/
+.direnv/
+node_modules/
+dist/
+build/
+*.egg-info/
+
+# Local tool/runtime output.
+.qlty/sources/
+tmp/
+temp/
+*.log
+.DS_Store

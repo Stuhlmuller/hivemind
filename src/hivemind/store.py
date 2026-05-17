@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -18,6 +19,16 @@ from typing import Any, Iterator
 from hivemind.config import HivemindConfig
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
+from hivemind.providers import (
+    AgentProviderAdapter,
+    AgentProviderError,
+    AgentProviderRegistry,
+    CREDENTIAL_OPTIONAL_AGENT_PROVIDERS,
+    ProviderMessage,
+    ProviderRunRequest,
+    ProviderToolRequest,
+    normalize_agent_provider_id,
+)
 from hivemind.secret_refs import (
     ALLOWED_SECRET_REF_SCHEMES,
     preview_secret_ref,
@@ -99,7 +110,12 @@ class StoreValidationError(StoreError):
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
+AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
+AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
+REDACTED_VALUE = "[redacted]"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
+TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
+TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
@@ -228,6 +244,92 @@ BACKUP_DELETE_STATEMENTS = (
     "DELETE FROM users",
 )
 BACKUP_CREDENTIAL_REFERENCE_TABLES = ("tasks", "schedules")
+SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
+    {
+        "accesstoken",
+        "apikey",
+        "authorization",
+        "bearer",
+        "clientsecret",
+        "credentialref",
+        "leasetoken",
+        "password",
+        "refreshtoken",
+        "secret",
+        "secretref",
+        "secretkey",
+        "secretvalue",
+        "token",
+    }
+)
+PUBLIC_METADATA_NON_SECRET_KEYS = frozenset({"oauthtokenexpiresat"})
+SECRET_REF_TEXT_PATTERN = re.compile(r"\b(?:env|file|vault|oauth|secret)://[^\s\"'<>),\]}]+")
+
+
+def provider_redaction_values(credential_ref: str | None) -> tuple[str, ...]:
+    if not credential_ref:
+        return ()
+    _, _, target = credential_ref.partition("://")
+    values = [credential_ref]
+    if target:
+        values.append(target)
+    return tuple(values)
+
+
+def normalize_sensitive_provider_key(key: Any) -> str:
+    return "".join(char for char in str(key).lower() if char.isalnum())
+
+
+def is_sensitive_provider_key(key: Any) -> bool:
+    normalized = normalize_sensitive_provider_key(key)
+    return any(sensitive_key in normalized for sensitive_key in SENSITIVE_PROVIDER_RESULT_KEYS)
+
+
+def is_sensitive_public_metadata_key(key: Any) -> bool:
+    normalized = normalize_sensitive_provider_key(key)
+    if normalized in PUBLIC_METADATA_NON_SECRET_KEYS:
+        return False
+    return is_sensitive_provider_key(key)
+
+
+def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
+    redactions = provider_redaction_values(credential_ref)
+    if isinstance(value, str):
+        redacted = value
+        for secret_value in redactions:
+            redacted = redacted.replace(secret_value, REDACTED_VALUE)
+        return SECRET_REF_TEXT_PATTERN.sub(
+            lambda match: preview_secret_ref(validate_secret_ref(match.group(0))) or REDACTED_VALUE,
+            redacted,
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [redact_provider_public_value(item, credential_ref) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: REDACTED_VALUE
+            if is_sensitive_provider_key(key)
+            else redact_provider_public_value(item, credential_ref)
+            for key, item in value.items()
+        }
+    return value
+
+
+def redact_public_metadata_value(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return preview_secret_ref(validate_secret_ref(value))
+        except ValueError:
+            return value
+    if isinstance(value, list):
+        return [redact_public_metadata_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: REDACTED_VALUE
+            if is_sensitive_public_metadata_key(key)
+            else redact_public_metadata_value(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 @dataclass(frozen=True)
@@ -244,6 +346,7 @@ class HivemindStore:
         *,
         config: HivemindConfig | None = None,
         provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None,
+        agent_provider_adapters: Mapping[str, AgentProviderAdapter] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -253,6 +356,7 @@ class HivemindStore:
             self.config.intent_reviewer,
             provider_reviewers=provider_reviewers,
         )
+        self._agent_provider_registry = AgentProviderRegistry(agent_provider_adapters)
         self._migrate()
 
     @classmethod
@@ -261,20 +365,31 @@ class HivemindStore:
         *,
         require_existing: bool = False,
         provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None,
+        agent_provider_adapters: Mapping[str, AgentProviderAdapter] | None = None,
     ) -> "HivemindStore":
         config = HivemindConfig.from_env()
         path = os.getenv("HIVEMIND_DB_PATH", "/data/hivemind.db")
         if path == ":memory:":
             if require_existing:
                 raise StoreError("cannot back up ephemeral in-memory database")
-            return cls(path, config=config, provider_reviewers=provider_reviewers)
+            return cls(
+                path,
+                config=config,
+                provider_reviewers=provider_reviewers,
+                agent_provider_adapters=agent_provider_adapters,
+            )
         db_path = Path(path)
         if require_existing:
             if not db_path.exists():
                 raise StoreError("configured database does not exist; check HIVEMIND_DB_PATH")
             if not db_path.is_file():
                 raise StoreError("configured database path is not a file; check HIVEMIND_DB_PATH")
-        return cls(db_path, config=config, provider_reviewers=provider_reviewers)
+        return cls(
+            db_path,
+            config=config,
+            provider_reviewers=provider_reviewers,
+            agent_provider_adapters=agent_provider_adapters,
+        )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -756,12 +871,13 @@ class HivemindStore:
 
     def create_agent(self, data: dict[str, Any]) -> dict[str, Any]:
         now = iso()
+        provider = normalize_agent_provider_id(data.get("provider") or "local")
         row = {
             "id": f"agent_{secrets.token_urlsafe(8)}",
             "name": data["name"],
             "role": data["role"],
-            "provider": data.get("provider") or "local",
-            "model": data.get("model") or "deterministic-policy",
+            "provider": provider,
+            "model": data.get("model") or self.config.agent_provider(provider).model,
             "status": "idle",
             "system_prompt": data.get("system_prompt") or "",
             "created_at": now,
@@ -1078,7 +1194,7 @@ class HivemindStore:
                 "max_ttl_seconds": row["max_ttl_seconds"],
                 "require_intent": bool(row["require_intent"]),
             },
-            "metadata": loads(row["metadata"], {}),
+            "metadata": redact_public_metadata_value(loads(row["metadata"], {})),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1097,9 +1213,19 @@ class HivemindStore:
             raise StoreNotFoundError(f"missing broker secret for credential: {credential_id}")
         return secret_box.decrypt_text(row["ciphertext"])
 
-    def request_lease(self, credential_id: str, agent_id: str, action: str, intent: str, ttl_seconds: int | None) -> tuple[str | None, dict[str, Any]]:
+    def request_lease(
+        self,
+        credential_id: str,
+        agent_id: str,
+        action: str,
+        intent: str,
+        ttl_seconds: int | None,
+        *,
+        audit_metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
         self.get_agent(agent_id)
         credential = self.get_credential(credential_id)
+        base_audit_metadata = dict(audit_metadata or {})
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
         review = self._policy_engine.review_request(
             PolicyReviewInput(
@@ -1116,7 +1242,14 @@ class HivemindStore:
         )
         normalized_action = review.normalized_action
         if not review.allowed:
-            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", review.reason, {"action": normalized_action})
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                review.reason,
+                {"action": normalized_action, **base_audit_metadata},
+            )
             raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
         requires_approval = normalized_action in approval_required_actions
@@ -1150,10 +1283,17 @@ class HivemindStore:
                 credential_id,
                 "pending",
                 "action requires operator approval",
-                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl},
+                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
             )
             return None, self.public_lease(row)
-        self.audit("credential.lease.issued", agent_id, credential_id, "allowed", review.reason, {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl})
+        self.audit(
+            "credential.lease.issued",
+            agent_id,
+            credential_id,
+            "allowed",
+            review.reason,
+            {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+        )
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public
@@ -1451,13 +1591,325 @@ class HivemindStore:
         now = iso()
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
-            conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (status, now, task_id))
+            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
         self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as conn:
             return dict(self.get_task_row(conn, task_id))
+
+    def run_task(self, task_id: str, operator_input: str | None = None) -> dict[str, Any]:
+        with self.connect() as conn:
+            task = dict(self.get_task_row(conn, task_id))
+            if not task["assigned_agent_id"]:
+                raise StoreValidationError("task must be assigned to an agent before execution")
+            if task["status"] != "queued":
+                raise StoreError("only queued tasks can be executed")
+            agent = conn.execute("SELECT * FROM agents WHERE id = ?", (task["assigned_agent_id"],)).fetchone()
+            if agent is None:
+                raise StoreValidationError(f"assigned_agent_id references unknown agent: {task['assigned_agent_id']}")
+            agent = dict(agent)
+            provider_id = normalize_agent_provider_id(agent["provider"])
+            provider_config = self.config.agent_provider(provider_id)
+            model = agent["model"] or provider_config.model
+            now = iso()
+            self.claim_queued_task_for_execution(conn, task_id, now)
+            conn.execute("UPDATE agents SET status = ?, updated_at = ? WHERE id = ?", ("working", now, agent["id"]))
+            self._insert_audit(
+                conn,
+                "task.execution.started",
+                agent["id"],
+                task_id,
+                "allowed",
+                "task execution started",
+                {"provider": provider_id, "model": model},
+            )
+
+        prompt = (operator_input or "").strip() or task["description"].strip() or task["title"].strip()
+        if not prompt:
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason="task execution prompt is required",
+                metadata={"provider": provider_id, "model": model},
+            )
+            raise StoreValidationError("task execution prompt is required")
+
+        if provider_id not in CREDENTIAL_OPTIONAL_AGENT_PROVIDERS and not provider_config.credential_id:
+            reason = f"agent provider credential_id is not configured: {provider_id}"
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason=reason,
+                metadata={"provider": provider_id, "model": model},
+            )
+            raise StoreError(reason)
+
+        if not self._agent_provider_registry.has_adapter(provider_id):
+            reason = f"agent provider adapter is not configured: {provider_id}"
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason=reason,
+                metadata={"provider": provider_id, "model": model},
+            )
+            raise StoreError(reason)
+
+        tool_request = self.authorize_task_provider_tool_request(
+            task=task,
+            agent_id=agent["id"],
+            provider_id=provider_id,
+            model=model,
+        )
+        tool_requests = (tool_request,) if tool_request is not None else ()
+        provider_credential_action = None
+        if provider_id not in CREDENTIAL_OPTIONAL_AGENT_PROVIDERS:
+            provider_credential_action = self.authorize_agent_provider_credential(
+                task_id=task_id,
+                agent_id=agent["id"],
+                provider_id=provider_id,
+                model=model,
+                credential_id=provider_config.credential_id or "",
+            )
+        request = ProviderRunRequest(
+            provider=provider_id,
+            model=model,
+            prompt=prompt,
+            system_prompt=agent["system_prompt"],
+            messages=(ProviderMessage(role="user", content=prompt),),
+            tool_requests=tuple(tool_requests),
+            credential_id=provider_config.credential_id,
+            credential_action=provider_credential_action,
+            metadata={"task_id": task_id},
+        )
+        try:
+            result = self._agent_provider_registry.run(request)
+        except AgentProviderError as exc:
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason=AGENT_PROVIDER_FAILED_CLOSED_REASON,
+                metadata={"provider": provider_id, "model": request.model},
+            )
+            raise StoreError(AGENT_PROVIDER_FAILED_CLOSED_REASON) from exc
+        except Exception as exc:
+            self._finish_task_execution(
+                task_id=task_id,
+                agent_id=agent["id"],
+                status="failed",
+                decision="denied",
+                reason=AGENT_PROVIDER_FAILED_CLOSED_REASON,
+                metadata={"provider": provider_id, "model": request.model},
+            )
+            raise StoreError(AGENT_PROVIDER_FAILED_CLOSED_REASON) from exc
+
+        self._finish_task_execution(
+            task_id=task_id,
+            agent_id=agent["id"],
+            status="done",
+            decision="allowed",
+            reason="task executed through agent provider adapter",
+            metadata={"provider": provider_id, "model": request.model},
+        )
+        return {
+            "task_id": task_id,
+            "agent_id": agent["id"],
+            **redact_provider_public_value(result.public_view(), None),
+        }
+
+    def authorize_agent_provider_credential(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        provider_id: str,
+        model: str,
+        credential_id: str,
+    ) -> dict[str, Any]:
+        action = f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        intent = f"Run task {task_id} through the {provider_id} agent provider using model {model}."
+        try:
+            token, lease = self.request_lease(
+                credential_id=credential_id,
+                agent_id=agent_id,
+                action=action,
+                intent=intent,
+                ttl_seconds=60,
+                audit_metadata={
+                    "task_id": task_id,
+                    "provider": provider_id,
+                    "model": model,
+                    "capability": "agent_provider",
+                },
+            )
+            if token is None:
+                reason = "agent provider credential requires operator-approved lease"
+                self._finish_task_execution(
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    status="failed",
+                    decision="denied",
+                    reason=reason,
+                    metadata={
+                        "provider": provider_id,
+                        "model": model,
+                        "credential_id": credential_id,
+                        "action": lease["action"],
+                        "lease_id": lease["id"],
+                    },
+                )
+                raise StoreError(reason)
+            return self.perform_credential_action(
+                lease_token=token,
+                action=action,
+                payload={
+                    "task_id": task_id,
+                    "provider": provider_id,
+                    "model": model,
+                    "capability": "agent_provider",
+                },
+            )
+        except StoreError as exc:
+            if str(exc) != "agent provider credential requires operator-approved lease":
+                self._finish_task_execution(
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    status="failed",
+                    decision="denied",
+                    reason=str(exc),
+                    metadata={
+                        "provider": provider_id,
+                        "model": model,
+                        "credential_id": credential_id,
+                        "action": action,
+                    },
+                )
+            raise
+
+    def authorize_task_provider_tool_request(
+        self,
+        *,
+        task: Mapping[str, Any],
+        agent_id: str,
+        provider_id: str,
+        model: str,
+    ) -> ProviderToolRequest | None:
+        if not task["credential_id"] or not task["action"]:
+            return None
+        action = str(task["action"]).strip().lower()
+        try:
+            token, lease = self.request_lease(
+                credential_id=task["credential_id"],
+                agent_id=agent_id,
+                action=task["action"],
+                intent=task["intent"],
+                ttl_seconds=None,
+                audit_metadata={
+                    "task_id": task["id"],
+                    "provider": provider_id,
+                    "model": model,
+                    "capability": "provider_tool",
+                },
+            )
+            if token is None:
+                denied_reason = "credential action requires operator-approved lease"
+                self._finish_task_execution(
+                    task_id=task["id"],
+                    agent_id=agent_id,
+                    status="failed",
+                    decision="denied",
+                    reason=denied_reason,
+                    metadata={
+                        "provider": provider_id,
+                        "model": model,
+                        "credential_id": task["credential_id"],
+                        "action": lease["action"],
+                        "lease_id": lease["id"],
+                    },
+                )
+                raise StoreError(denied_reason)
+            credential_action = self.perform_credential_action(
+                lease_token=token,
+                action=task["action"],
+                payload={
+                    "task_id": task["id"],
+                    "provider": provider_id,
+                    "model": model,
+                    "capability": "provider_tool",
+                },
+            )
+        except StoreError as exc:
+            if str(exc) != "credential action requires operator-approved lease":
+                self._finish_task_execution(
+                    task_id=task["id"],
+                    agent_id=agent_id,
+                    status="failed",
+                    decision="denied",
+                    reason=str(exc),
+                    metadata={
+                        "provider": provider_id,
+                        "model": model,
+                        "credential_id": task["credential_id"],
+                        "action": action,
+                    },
+                )
+            raise
+
+        return ProviderToolRequest(
+            name=credential_action["action"],
+            arguments={
+                "credential_id": task["credential_id"],
+                "action": credential_action["action"],
+                "intent": task["intent"],
+                "credential_action": credential_action,
+            },
+        )
+
+    def claim_queued_task_for_execution(self, conn: sqlite3.Connection, task_id: str, now: str) -> None:
+        claim = conn.execute(TASK_RUN_CLAIM_SQL, ("running", now, task_id, "queued"))
+        if claim.rowcount != 1:
+            raise StoreError("only queued tasks can be executed")
+
+    def _finish_task_execution(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        status: str,
+        decision: str,
+        reason: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        now = iso()
+        with self.connect() as conn:
+            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
+            running_task = conn.execute(
+                """
+                SELECT 1
+                FROM tasks
+                WHERE assigned_agent_id = ?
+                  AND status = ?
+                  AND id != ?
+                LIMIT 1
+                """,
+                (agent_id, "running", task_id),
+            ).fetchone()
+            if running_task is None:
+                conn.execute(
+                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?",
+                    ("idle", now, agent_id),
+                )
+        event_type = "task.execution.completed" if status == "done" else "task.execution.failed"
+        self.audit(event_type, agent_id, task_id, decision, reason, metadata)
 
     def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
         now = utcnow()
