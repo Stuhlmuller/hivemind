@@ -19,12 +19,12 @@ SESSION_COOKIE = "hivemind_session"
 
 
 class SetupRequest(BaseModel):
-    email: str = Field(min_length=3)
+    username: str = Field(min_length=3)
     password: str = Field(min_length=12)
 
 
 class LoginRequest(BaseModel):
-    email: str
+    username: str
     password: str
 
 
@@ -163,8 +163,8 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/auth/setup", status_code=201)
     def setup(request: SetupRequest, response: Response) -> dict[str, Any]:
         try:
-            user = db.setup_admin(request.email, request.password)
-            token, user = db.login(request.email, request.password)
+            user = db.setup_admin(request.username, request.password)
+            token, user = db.login(request.username, request.password)
             set_session_cookie(response, token)
             return {"user": user}
         except StoreError as exc:
@@ -173,7 +173,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/auth/login")
     def login(request: LoginRequest, response: Response) -> dict[str, Any]:
         try:
-            token, user = db.login(request.email, request.password)
+            token, user = db.login(request.username, request.password)
             set_session_cookie(response, token)
             return {"user": user}
         except StoreError as exc:
@@ -187,7 +187,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.get("/me")
     def me(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return {"id": user.id, "email": user.email, "role": user.role}
+        return {"id": user.id, "username": user.username, "role": user.role}
 
     @app.get("/config")
     def read_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:

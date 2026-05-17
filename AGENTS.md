@@ -29,3 +29,17 @@ coordinated action through controlled capability handoffs.
 Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
+
+Frontend rule: before changing the Hivemind UI, use the project-local
+`hivemind-ui-no-slop` skill. The UI must feel technical, open-source,
+self-hosted, agentic, security-focused, and new; reject generic SaaS styling,
+marketing heroes, decorative bee filler, and amber/beige theme wash.
+
+Skill capture rule: use the project-local `hivemind-skill-capture` skill when a
+new ask creates a durable project rule, workflow, taste preference, security
+boundary, or implementation pattern. Prefer small project-local skills so future
+agents can replicate Hivemind work with little context.
+
+Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
+setup, login, sessions, or account flows. Hivemind is self-hosted homelab
+software; use username/password local auth, not email-first SaaS account flows.

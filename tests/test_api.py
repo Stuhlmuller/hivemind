@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
-from hivemind.store import HivemindStore
+from hivemind.store import HivemindStore, hash_password
 
 
 def client_for(tmp_path: Path) -> TestClient:
@@ -16,7 +17,7 @@ def client_for(tmp_path: Path) -> TestClient:
 def setup(client: TestClient) -> None:
     response = client.post(
         "/auth/setup",
-        json={"email": "admin@hivemind.local", "password": "hivemind-password"},
+        json={"username": "admin", "password": "hivemind-password"},
     )
     assert response.status_code == 201
 
@@ -109,3 +110,62 @@ def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
     assert run_response.status_code == 200
     assert len(run_response.json()["created_tasks"]) == 1
 
+
+def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Unassigned task",
+            "assigned_agent_id": "",
+            "credential_id": "",
+            "heartbeat_seconds": None,
+        },
+    )
+    assert task_response.status_code == 201
+    assert task_response.json()["assigned_agent_id"] is None
+    assert task_response.json()["credential_id"] is None
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Unassigned schedule",
+            "interval_seconds": 60,
+            "task_title": "Unassigned scheduled task",
+            "assigned_agent_id": "",
+            "credential_id": "",
+        },
+    )
+    assert schedule_response.status_code == 201
+    assert schedule_response.json()["assigned_agent_id"] is None
+    assert schedule_response.json()["credential_id"] is None
+
+
+def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE users (
+          id TEXT PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("user_old", "admin@hivemind.local", hash_password("hivemind-password"), "admin", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False))
+    response = client.post("/auth/login", json={"username": "admin", "password": "hivemind-password"})
+
+    assert response.status_code == 200
+    assert response.json()["user"]["username"] == "admin"

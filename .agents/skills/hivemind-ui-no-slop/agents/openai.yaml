@@ -1,0 +1,3 @@
+display_name: Hivemind UI No Slop
+short_description: Make Hivemind UI technical and credible.
+default_prompt: Use this skill before changing Hivemind frontend code so the interface is technical, self-hosted, agentic, security-focused, and free of generic SaaS or decorative AI slop.

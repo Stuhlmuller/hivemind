@@ -1,0 +1,3 @@
+display_name: Hivemind Homelab Auth
+short_description: Keep auth local and username-based.
+default_prompt: Use this skill when changing Hivemind setup, login, sessions, or self-hosted account behavior.

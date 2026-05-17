@@ -1,0 +1,3 @@
+display_name: Hivemind Skill Capture
+short_description: Preserve durable project rules as skills.
+default_prompt: Use this skill when a Hivemind decision or user preference should become reusable project-local guidance.

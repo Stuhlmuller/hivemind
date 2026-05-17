@@ -1,0 +1,3 @@
+display_name: Hivemind Agent Ops
+short_description: Build agent task and schedule flows.
+default_prompt: Use this skill when changing Hivemind agents, tasks, schedules, heartbeats, or swarm coordination.

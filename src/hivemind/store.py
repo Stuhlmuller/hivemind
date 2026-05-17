@@ -65,7 +65,7 @@ class StoreError(ValueError):
 @dataclass(frozen=True)
 class SessionUser:
     id: str
-    email: str
+    username: str
     role: str
 
 
@@ -101,7 +101,7 @@ class HivemindStore:
                 """
                 CREATE TABLE IF NOT EXISTS users (
                   id TEXT PRIMARY KEY,
-                  email TEXT NOT NULL UNIQUE,
+                  username TEXT NOT NULL UNIQUE,
                   password_hash TEXT NOT NULL,
                   role TEXT NOT NULL,
                   created_at TEXT NOT NULL
@@ -207,36 +207,59 @@ class HivemindStore:
                 );
                 """
             )
+            self._migrate_users_to_username(conn)
+
+    def _migrate_users_to_username(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "username" in columns or "email" not in columns:
+            return
+        conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        conn.execute(
+            """
+            UPDATE users
+            SET username = lower(
+              CASE
+                WHEN instr(email, '@') > 1 THEN substr(email, 1, instr(email, '@') - 1)
+                ELSE email
+              END
+            )
+            WHERE username IS NULL OR username = ''
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
             return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
-    def setup_admin(self, email: str, password: str) -> dict[str, Any]:
+    def setup_admin(self, username: str, password: str) -> dict[str, Any]:
         if self.is_setup_complete():
             raise StoreError("setup is already complete")
         if len(password) < 12:
             raise StoreError("admin password must be at least 12 characters")
+        normalized_username = username.strip().lower()
+        if len(normalized_username) < 3:
+            raise StoreError("username must be at least 3 characters")
         user = {
             "id": f"user_{secrets.token_urlsafe(10)}",
-            "email": email.strip().lower(),
+            "username": normalized_username,
             "password_hash": hash_password(password),
             "role": "admin",
             "created_at": iso(),
         }
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (:id, :email, :password_hash, :role, :created_at)",
+                "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (:id, :username, :password_hash, :role, :created_at)",
                 user,
             )
         self.seed_demo_if_empty()
         return self.public_user(user)
 
-    def login(self, email: str, password: str) -> tuple[str, dict[str, Any]]:
+    def login(self, username: str, password: str) -> tuple[str, dict[str, Any]]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (username.strip().lower(),)).fetchone()
             if row is None or not verify_password(password, row["password_hash"]):
-                raise StoreError("invalid email or password")
+                raise StoreError("invalid username or password")
             token = secrets.token_urlsafe(32)
             now = utcnow()
             conn.execute(
@@ -251,7 +274,7 @@ class HivemindStore:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT users.id, users.email, users.role, sessions.expires_at
+                SELECT users.id, users.username, users.role, sessions.expires_at
                 FROM sessions JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token = ?
                 """,
@@ -262,7 +285,7 @@ class HivemindStore:
             if parse_dt(row["expires_at"]) <= utcnow():
                 conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
                 return None
-            return SessionUser(id=row["id"], email=row["email"], role=row["role"])
+            return SessionUser(id=row["id"], username=row["username"], role=row["role"])
 
     def logout(self, token: str | None) -> None:
         if not token:
@@ -271,7 +294,7 @@ class HivemindStore:
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
 
     def public_user(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-        return {"id": row["id"], "email": row["email"], "role": row["role"], "created_at": row["created_at"]}
+        return {"id": row["id"], "username": row["username"], "role": row["role"], "created_at": row["created_at"]}
 
     def seed_demo_if_empty(self) -> None:
         with self.connect() as conn:
@@ -521,8 +544,8 @@ class HivemindStore:
             "description": data.get("description") or "",
             "status": data.get("status") or "queued",
             "priority": data.get("priority") or "normal",
-            "assigned_agent_id": data.get("assigned_agent_id"),
-            "credential_id": data.get("credential_id"),
+            "assigned_agent_id": data.get("assigned_agent_id") or None,
+            "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
             "heartbeat_seconds": heartbeat_seconds,
@@ -606,8 +629,8 @@ class HivemindStore:
             "task_title": data["task_title"],
             "task_description": data.get("task_description") or "",
             "priority": data.get("priority") or "normal",
-            "assigned_agent_id": data.get("assigned_agent_id"),
-            "credential_id": data.get("credential_id"),
+            "assigned_agent_id": data.get("assigned_agent_id") or None,
+            "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
             "next_run_at": data.get("next_run_at") or iso(now + timedelta(seconds=interval)),
