@@ -79,6 +79,11 @@ unless the user explicitly changes scope.
 Git workflow rule: use the project-local `hivemind-git-commits` skill before
 staging, committing, or pushing Hivemind changes so branch scope, commit
 signing, and verification stay consistent.
+Checkpoint rule: use the project-local `hivemind-branch-checkpoints` skill
+during multi-step work on any Hivemind branch. Prefer small signed checkpoint
+commits after each meaningful feature slice, security boundary change,
+verification milestone, or coherent refactor instead of waiting until the end
+of the branch.
 
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
