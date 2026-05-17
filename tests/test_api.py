@@ -2553,6 +2553,53 @@ def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
     require_equal(metadata["skipped_run_count"], 0, "backfill should defer rather than skip excess missed slots")
 
 
+def test_due_schedules_normalize_persisted_offset_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    offset_zone = timezone(timedelta(hours=14))
+    due_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
+    offset_due_at = due_at.astimezone(offset_zone)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Offset persisted review",
+            "interval_seconds": 60,
+            "catch_up_policy": "backfill",
+            "task_title": "Offset persisted scheduled review",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    with sqlite3.connect(tmp_path / "hivemind.db") as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", (offset_due_at.isoformat(), schedule["id"]))
+
+    run_response = client.post("/schedules/run-due")
+
+    require_equal(run_response.status_code, 200, "offset persisted due schedules should run")
+    created_tasks = run_response.json()["created_tasks"]
+    require_equal(len(created_tasks), 1, "offset persisted due schedules should create a task")
+    require_equal(
+        created_tasks[0]["title"],
+        "Offset persisted scheduled review",
+        "offset persisted schedule should create the configured task",
+    )
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    require_equal(
+        datetime.fromisoformat(updated_schedule["next_run_at"]).tzinfo,
+        timezone.utc,
+        "running the offset schedule should normalize the next run timestamp to UTC",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(
+        datetime.fromisoformat(metadata["scheduled_for"][0]),
+        due_at,
+        "schedule audit should record the absolute UTC slot, not the input offset string",
+    )
+
+
 def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -2671,6 +2718,28 @@ def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None
         "schedule next_run_at must be a valid ISO datetime",
         "schedule timestamp errors should not leak parser internals",
     )
+
+
+def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    offset_zone = timezone(timedelta(hours=14))
+    future_at = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=5)).astimezone(offset_zone)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Offset input schedule",
+            "interval_seconds": 60,
+            "task_title": "Offset input scheduled task",
+            "next_run_at": future_at.isoformat(),
+        },
+    )
+
+    require_equal(response.status_code, 201, "schedule creation should accept offset-aware next_run_at")
+    stored_next_run_at = datetime.fromisoformat(response.json()["next_run_at"])
+    require_equal(stored_next_run_at.tzinfo, timezone.utc, "schedule creation should store next_run_at in UTC")
+    require_equal(stored_next_run_at, future_at.astimezone(timezone.utc), "schedule creation should preserve the instant")
 
 
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:

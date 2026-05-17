@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -307,6 +308,70 @@ def test_restore_rejects_incompatible_backup_version(tmp_path: Path) -> None:
         )
     else:
         raise AssertionError("restore should reject a mismatched backup format version")
+
+    require_true(target.is_setup_complete() is False, "failed restores should not create a setup state")
+
+
+def test_restore_normalizes_schedule_timestamp_offsets(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    source.create_schedule(
+        {
+            "name": "Offset restore schedule",
+            "interval_seconds": 60,
+            "task_title": "Restored offset task",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+    bundle = source.export_backup_bundle()
+    schedule = bundle["tables"]["schedules"][0]
+    offset_zone = timezone(timedelta(hours=14))
+    next_run_at = datetime(2030, 1, 1, 12, 0, tzinfo=offset_zone)
+    last_run_at = datetime(2030, 1, 1, 11, 30, tzinfo=offset_zone)
+    schedule["next_run_at"] = next_run_at.isoformat()
+    schedule["last_run_at"] = last_run_at.isoformat()
+
+    target = HivemindStore(tmp_path / "target.db")
+    target.restore_backup_bundle(bundle)
+    restored_schedule = table_rows(tmp_path / "target.db", "schedules")[0]
+
+    require_equal(
+        restored_schedule["next_run_at"],
+        next_run_at.astimezone(timezone.utc).isoformat(),
+        "restore should normalize schedule next_run_at to UTC",
+    )
+    require_equal(
+        restored_schedule["last_run_at"],
+        last_run_at.astimezone(timezone.utc).isoformat(),
+        "restore should normalize schedule last_run_at to UTC",
+    )
+
+
+def test_restore_rejects_malformed_schedule_timestamp(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    source.create_schedule(
+        {
+            "name": "Malformed restore schedule",
+            "interval_seconds": 60,
+            "task_title": "Malformed restore task",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+    bundle = source.export_backup_bundle()
+    bundle["tables"]["schedules"][0]["next_run_at"] = "not-a-date"
+
+    target = HivemindStore(tmp_path / "target.db")
+
+    try:
+        target.restore_backup_bundle(bundle)
+    except StoreValidationError as exc:
+        require_true(
+            "schedule next_run_at must be a valid ISO datetime" in str(exc),
+            "restore should explain malformed schedule timestamps without parser internals",
+        )
+    else:
+        raise AssertionError("restore should reject malformed schedule timestamps")
 
     require_true(target.is_setup_complete() is False, "failed restores should not create a setup state")
 
