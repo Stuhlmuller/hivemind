@@ -43,6 +43,11 @@ canonical_path() {
   )
 }
 
+last_line() {
+  local file="$1"
+  tail -n 1 "$file"
+}
+
 setup_fixture_repo() {
   local name="$1"
   local fixture_root="$tmp_root/$name"
@@ -84,8 +89,52 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
+next_count() {
+  local name="$1"
+  local count_file="${RALPH_TEST_TMPDIR:?}/${name}-count"
+  local count=1
+  if [[ -f "$count_file" ]]; then
+    count=$(( $(cat "$count_file") + 1 ))
+  fi
+  printf '%s' "$count" >"$count_file"
+  printf '%s' "$count"
+}
+
+last_arg() {
+  local value=""
+  for value in "$@"; do
+    :
+  done
+  printf '%s' "$value"
+}
+
+create_issue_worktree() {
+  local run_root="$1"
+  local worktree_path="${RALPH_TEST_TMPDIR:?}/issue-52-demo"
+
+  if [[ ! -d "$run_root/.git" ]]; then
+    return
+  fi
+
+  if [[ -e "$worktree_path" ]]; then
+    return
+  fi
+
+  git -C "$run_root" worktree add -q -b issue-52-demo "$worktree_path" main >/dev/null
+}
+
 if [[ "$1" == "review" ]]; then
-  printf '%s\n' "$PWD" >"${RALPH_TEST_REVIEW_LOG:?}"
+  count="$(next_count review)"
+  printf '%s\n' "$PWD" >>"${RALPH_TEST_REVIEW_LOG:?}"
+
+  case "${RALPH_TEST_SCENARIO:?}" in
+    review_fail_once)
+      if [[ "$count" -eq 1 ]]; then
+        exit 29
+      fi
+      ;;
+  esac
+
   exit 0
 fi
 
@@ -115,15 +164,33 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 printf '%s\n' "$sandbox" >"${RALPH_TEST_SANDBOX_LOG:?}"
+count="$(next_count exec)"
+printf '%s\n' "$run_root" >"${RALPH_TEST_TMPDIR:?}/exec-root-${count}.log"
+printf '%s' "$(last_arg "$@")" >"${RALPH_TEST_TMPDIR:?}/exec-prompt-${count}.txt"
 
 case "${RALPH_TEST_SCENARIO:?}" in
   direct_worktree)
-    git -C "$run_root" worktree add -q -b issue-52-demo "${RALPH_TEST_TMPDIR:?}/issue-52-demo" main >/dev/null
+    create_issue_worktree "$run_root"
     ;;
   local_checkout_then_worktree)
     git -C "$run_root" checkout -q -b issue-52-demo
     git -C "$run_root" checkout -q main
     git -C "$run_root" worktree add -q "${RALPH_TEST_TMPDIR:?}/issue-52-demo" issue-52-demo >/dev/null
+    ;;
+  fail_then_worktree)
+    if [[ "$count" -eq 1 ]]; then
+      exit 23
+    fi
+    create_issue_worktree "$run_root"
+    ;;
+  fail_after_worktree_then_recover)
+    if [[ "$count" -eq 1 ]]; then
+      create_issue_worktree "$run_root"
+      exit 23
+    fi
+    ;;
+  review_fail_once)
+    create_issue_worktree "$run_root"
     ;;
   stay_same_issue_worktree)
     :
@@ -185,6 +252,49 @@ test_accepts_direct_issue_worktree_creation() {
   assert_file_contains "$stdout_log" "[ralph] starting auto-review for run 1 in $(canonical_path "$worktree_path")"
 }
 
+test_retries_failed_codex_run_before_worktree_creation() {
+  local repo
+  local bin_dir
+  IFS=$'\t' read -r repo bin_dir <<<"$(setup_fixture_repo retry-before-worktree)"
+
+  local fixture_root="$tmp_root/retry-before-worktree"
+  local stdout_log="$fixture_root/stdout.log"
+  local stderr_log="$fixture_root/stderr.log"
+  local review_log="$fixture_root/review.log"
+  local sandbox_log="$fixture_root/sandbox.log"
+  local scenario_tmp="$fixture_root/runtime"
+  local worktree_path="$scenario_tmp/issue-52-demo"
+
+  run_ralph "$repo/.agents/ralph.sh" "$bin_dir" "fail_then_worktree" "$scenario_tmp" "$review_log" "$sandbox_log" "$stdout_log" "$stderr_log"
+
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "## Ralph Recovery Instruction"
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "Failure stage: codex exec"
+  assert_eq "$(cat "$scenario_tmp/exec-root-1.log")" "$(canonical_path "$repo")" "first exec root"
+  assert_eq "$(cat "$scenario_tmp/exec-root-2.log")" "$(canonical_path "$repo")" "second exec root before worktree creation"
+  assert_eq "$(cat "$review_log")" "$(canonical_path "$worktree_path")" "review moved into new worktree"
+}
+
+test_retries_failed_codex_run_inside_new_issue_worktree() {
+  local repo
+  local bin_dir
+  IFS=$'\t' read -r repo bin_dir <<<"$(setup_fixture_repo retry-after-worktree)"
+
+  local fixture_root="$tmp_root/retry-after-worktree"
+  local stdout_log="$fixture_root/stdout.log"
+  local stderr_log="$fixture_root/stderr.log"
+  local review_log="$fixture_root/review.log"
+  local sandbox_log="$fixture_root/sandbox.log"
+  local scenario_tmp="$fixture_root/runtime"
+  local worktree_path="$scenario_tmp/issue-52-demo"
+
+  run_ralph "$repo/.agents/ralph.sh" "$bin_dir" "fail_after_worktree_then_recover" "$scenario_tmp" "$review_log" "$sandbox_log" "$stdout_log" "$stderr_log"
+
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "## Ralph Recovery Instruction"
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "Failure stage: codex exec"
+  assert_eq "$(cat "$scenario_tmp/exec-root-2.log")" "$(canonical_path "$worktree_path")" "second exec root reused new worktree"
+  assert_eq "$(cat "$review_log")" "$(canonical_path "$worktree_path")" "review stayed in recovered worktree"
+}
+
 test_rejects_local_issue_checkout_before_worktree_creation() {
   local repo
   local bin_dir
@@ -228,6 +338,27 @@ test_accepts_existing_issue_worktree_without_branch_switching() {
   assert_file_contains "$stdout_log" "[ralph] starting Codex run 1 in $(canonical_path "$issue_worktree")"
 }
 
+test_retries_failed_auto_review_in_same_issue_worktree() {
+  local repo
+  local bin_dir
+  IFS=$'\t' read -r repo bin_dir <<<"$(setup_fixture_repo retry-review)"
+
+  local fixture_root="$tmp_root/retry-review"
+  local stdout_log="$fixture_root/stdout.log"
+  local stderr_log="$fixture_root/stderr.log"
+  local review_log="$fixture_root/review.log"
+  local sandbox_log="$fixture_root/sandbox.log"
+  local scenario_tmp="$fixture_root/runtime"
+  local worktree_path="$scenario_tmp/issue-52-demo"
+
+  run_ralph "$repo/.agents/ralph.sh" "$bin_dir" "review_fail_once" "$scenario_tmp" "$review_log" "$sandbox_log" "$stdout_log" "$stderr_log"
+
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "## Ralph Recovery Instruction"
+  assert_file_contains "$scenario_tmp/exec-prompt-2.txt" "Failure stage: codex review"
+  assert_eq "$(cat "$scenario_tmp/exec-root-2.log")" "$(canonical_path "$worktree_path")" "second exec root stayed in issue worktree"
+  assert_eq "$(last_line "$review_log")" "$(canonical_path "$worktree_path")" "final review stayed in issue worktree"
+}
+
 test_rejects_repurposing_issue_worktree_with_new_branch_checkout() {
   local repo
   local bin_dir
@@ -255,8 +386,11 @@ test_rejects_repurposing_issue_worktree_with_new_branch_checkout() {
 }
 
 test_accepts_direct_issue_worktree_creation
+test_retries_failed_codex_run_before_worktree_creation
+test_retries_failed_codex_run_inside_new_issue_worktree
 test_rejects_local_issue_checkout_before_worktree_creation
 test_accepts_existing_issue_worktree_without_branch_switching
+test_retries_failed_auto_review_in_same_issue_worktree
 test_rejects_repurposing_issue_worktree_with_new_branch_checkout
 
 printf 'Ralph worktree loop tests passed.\n'

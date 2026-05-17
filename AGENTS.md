@@ -30,8 +30,9 @@ Development rule: commit often. Prefer small, intentional commits that preserve
 working checkpoints after each meaningful feature, fix, or security boundary
 change.
 Commit signing rule: every git commit for this repository must be signed.
-Unsigned commits are not acceptable because policy checks reject them. If commit
-signing fails, stop and fix signing before creating or pushing more commits.
+Unsigned commits are not acceptable because policy checks reject them. If
+signing fails, stop and fix signing before creating, amending, or pushing more
+commits.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
