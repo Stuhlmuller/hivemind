@@ -35,8 +35,9 @@ Keep these aligned with this rule:
 - `.agents/PROMPT.md`
 - `.agents/PROMPT-subagents.md`
 - `.agents/PROMPT-scout.md`
-- `.agents/PROMPT-worker-a.md`
-- `.agents/PROMPT-worker-b.md`
+- `.agents/PROMPT-reviewer.md`
+- `.agents/PROMPT-worker.md`
+- `.agents/PROMPT-feature-requester.md`
 - `.agents/PROMPT-pr-shepherd.md`
 - Any browser-related shipping, UI, or audit skills
 
@@ -48,5 +49,5 @@ Run:
 bash tests/test_ralph_loop.sh
 bash .agents/verify-ralph-worktree.sh
 bash .agents/verify-swarm.sh
-qlty check AGENTS.md .agents/PROMPT.md .agents/PROMPT-subagents.md .agents/PROMPT-scout.md .agents/PROMPT-worker-a.md .agents/PROMPT-worker-b.md .agents/PROMPT-pr-shepherd.md .agents/skills/hivemind-browser-scope/SKILL.md
+qlty check AGENTS.md .agents/PROMPT.md .agents/PROMPT-subagents.md .agents/PROMPT-scout.md .agents/PROMPT-reviewer.md .agents/PROMPT-worker.md .agents/PROMPT-feature-requester.md .agents/PROMPT-pr-shepherd.md .agents/skills/hivemind-browser-scope/SKILL.md
 ```

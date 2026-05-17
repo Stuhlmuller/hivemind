@@ -113,10 +113,14 @@ checkout, and fail when the wrapper cannot verify those rules.
 Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
 changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
 `.agents/role-loop.sh`, `.agents/scout-loop.sh`,
-`.agents/worker-loop-a.sh`, `.agents/worker-loop-b.sh`,
+`.agents/browser-user-loop.sh`, `.agents/reviewer-loop.sh`,
+`.agents/worker-loop.sh`, `.agents/worker-loop-a.sh`,
+`.agents/worker-loop-b.sh`, `.agents/feature-requester-loop.sh`,
 `.agents/pr-shepherd.sh`, `.agents/swarm-launchd.sh`, or the `PROMPT-*.md`
-loop prompts. The GitHub swarm must keep dedicated worktrees per role, split
-development workers across deterministic issue lanes, use bounded subagents
-within each loop when useful, support an endless supervisor mode for
-laptop-open development, and reserve PR merging and cross-branch CI cleanup
-for the PR shepherd loop.
+loop prompts. The GitHub swarm must keep dedicated worktrees per role,
+support configurable role-count flags, default to 3 reviewer lanes, 10 worker
+lanes, 3 feature-requester lanes, 1 scout lane, and 1 PR shepherd lane, split
+worker issue ownership deterministically across the configured worker count,
+use bounded subagents within each loop when useful, support an endless
+supervisor mode for laptop-open development, and reserve PR merging and
+cross-branch CI cleanup for the PR shepherd loop.

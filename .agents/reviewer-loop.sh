@@ -17,18 +17,18 @@ if [[ -z "$run_root" ]]; then
 fi
 shift
 
-loop_label="${HIVEMIND_LOOP_LABEL:-pr-shepherd}"
-slot_index="${HIVEMIND_PR_SHEPHERD_SLOT_INDEX:-1}"
-slot_count="${HIVEMIND_PR_SHEPHERD_SLOT_COUNT:-1}"
+loop_label="${HIVEMIND_LOOP_LABEL:-reviewer}"
+slot_index="${HIVEMIND_REVIEWER_SLOT_INDEX:-1}"
+slot_count="${HIVEMIND_REVIEWER_SLOT_COUNT:-1}"
 
 export HIVEMIND_LOOP_LABEL="$loop_label"
-export HIVEMIND_LOOP_SLEEP_SECONDS="${HIVEMIND_PR_SHEPHERD_SLEEP_SECONDS:-240}"
-export HIVEMIND_LOOP_MAX_RUNS="${HIVEMIND_PR_SHEPHERD_MAX_RUNS:-0}"
+export HIVEMIND_LOOP_SLEEP_SECONDS="${HIVEMIND_REVIEWER_SLEEP_SECONDS:-900}"
+export HIVEMIND_LOOP_MAX_RUNS="${HIVEMIND_REVIEWER_MAX_RUNS:-0}"
 unset HIVEMIND_LOOP_REVIEW_PROMPT
 
 if [[ -z "${HIVEMIND_LOOP_PROMPT_PREAMBLE:-}" ]]; then
-  loop_prompt_preamble="$(default_loop_prompt_preamble pr-shepherd "$loop_label" "$slot_index" "$slot_count")"
+  loop_prompt_preamble="$(default_loop_prompt_preamble reviewer "$loop_label" "$slot_index" "$slot_count")"
   export HIVEMIND_LOOP_PROMPT_PREAMBLE="$loop_prompt_preamble"
 fi
 
-exec "$script_dir/role-loop.sh" "$run_root" "$script_dir/PROMPT-pr-shepherd.md" "$@"
+exec "$script_dir/role-loop.sh" "$run_root" "$script_dir/PROMPT-reviewer.md" "$@"

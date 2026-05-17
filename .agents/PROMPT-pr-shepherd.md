@@ -20,16 +20,17 @@ Before doing any other work:
 
 ## Mission
 
-1. Inspect open pull requests with `gh pr list --state open --limit 50`.
-2. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
-3. Merge ready PRs whose checks are passing and whose scope matches exactly one issue.
-4. For PRs with failing CI:
+1. Read the injected lane assignment above first.
+2. Inspect open pull requests with `gh pr list --state open --limit 50`.
+3. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
+4. Merge ready PRs from your assigned lane whose checks are passing and whose scope matches exactly one issue.
+5. For PRs in your lane with failing CI:
    - inspect the failing checks first
    - if the fix is obvious and the PR branch is not actively checked out in another worktree, check out the PR branch in this review worktree and fix it
    - if another worker already owns the branch in a separate worktree, leave it alone and move to the next PR
-5. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
-6. Run focused verification and `qlty check` on changed files before pushing CI fixes.
-7. Prefer unblocking the queue over doing new feature work.
+6. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
+7. Run focused verification and `qlty check` on changed files before pushing CI fixes.
+8. Prefer unblocking the queue over doing new feature work.
 
 ## Subagent Workflow
 
@@ -44,4 +45,4 @@ Before doing any other work:
 - Do not open new feature branches from scratch.
 - Do not compete with active worker worktrees for the same branch.
 - Do not create a second PR when the existing PR branch can be updated directly.
-- Do not use the Codex browser tool. Leave live browser validation to the main-branch scout loop.
+- Do not use the Codex browser tool. Leave live browser validation to the main-branch scout lane.
