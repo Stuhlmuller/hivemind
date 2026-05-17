@@ -22,6 +22,10 @@ FORBIDDEN_METADATA_KEYS = {
     "secret",
     "token",
 }
+COMPACT_FORBIDDEN_METADATA_KEYS = {
+    "".join(character for character in item if character.isalnum()) for item in FORBIDDEN_METADATA_KEYS
+}
+FORBIDDEN_METADATA_FRAGMENTS = ("secret", "password", "token")
 EXISTING_ID_QUERIES = {
     "agents": "SELECT id FROM agents",
     "credentials": "SELECT id FROM credentials",
@@ -636,7 +640,10 @@ def _export_metadata_value(value: Any) -> Any:
 
 def _is_forbidden_metadata_key(key: object) -> bool:
     key_name = str(key).lower()
-    return key_name in FORBIDDEN_METADATA_KEYS or "secret" in key_name or "password" in key_name
+    compact_key = "".join(character for character in key_name if character.isalnum())
+    if key_name in FORBIDDEN_METADATA_KEYS or compact_key in COMPACT_FORBIDDEN_METADATA_KEYS:
+        return True
+    return any(fragment in compact_key for fragment in FORBIDDEN_METADATA_FRAGMENTS)
 
 
 def _existing_ids(conn: sqlite3.Connection, table: str) -> set[str]:

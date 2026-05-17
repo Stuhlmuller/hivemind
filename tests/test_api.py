@@ -2089,6 +2089,7 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
                 "credential_kind": "generic_reference",
                 "purpose": "config round trip",
                 "nested": {"client_secret": "not-exported-marker", "safe_note": "retained"},
+                "camel": {"accessToken": "not-exported-marker", "safe_note": "retained"},
                 "history": [{"private_key": "not-exported-marker", "label": "kept"}],
             },
         },
@@ -2132,6 +2133,11 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
         exported_credential["metadata"]["nested"],
         {"safe_note": "retained"},
         "declarative export should recursively remove secret-like metadata keys",
+    )
+    require_equal(
+        exported_credential["metadata"]["camel"],
+        {"safe_note": "retained"},
+        "declarative export should remove camelCase secret-like metadata keys",
     )
     require_equal(
         exported_credential["metadata"]["history"],
@@ -2361,6 +2367,26 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         nested_response.json()["detail"],
         "credentials[0].metadata.safe.access_token cannot contain secret material",
         "nested secret metadata validation should name the rejected key path",
+    )
+
+    camel_metadata = {
+        **bad_metadata,
+        "credentials": [
+            {
+                **bad_metadata["credentials"][0],
+                "metadata": {"safe": {"accessToken": "x"}},
+            }
+        ],
+    }
+    camel_response = client.post(
+        "/declarative-config/validate",
+        json={"config": camel_metadata},
+    )
+    require_equal(camel_response.status_code, 400, "camelCase secret metadata validation should fail")
+    require_equal(
+        camel_response.json()["detail"],
+        "credentials[0].metadata.safe.accessToken cannot contain secret material",
+        "camelCase secret metadata validation should name the rejected key path",
     )
 
     bad_schedule_policy = {
