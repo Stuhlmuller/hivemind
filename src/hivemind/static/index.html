@@ -181,6 +181,17 @@ leases: scoped + ttl</pre>
                       <label>interval seconds<input name="interval_seconds" type="number" min="60" value="3600" /></label>
                       <label>agent<select name="assigned_agent_id"></select></label>
                     </div>
+                    <div class="two-col">
+                      <label>
+                        catch-up policy
+                        <select name="catch_up_policy">
+                          <option value="run_once">run once / reset cadence</option>
+                          <option value="skip_missed">skip missed / keep cadence</option>
+                          <option value="backfill">backfill every missed run</option>
+                        </select>
+                      </label>
+                      <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
+                    </div>
                     <label>task title<input name="task_title" value="scheduled policy review" autocomplete="off" /></label>
                     <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
                     <div class="two-col">
@@ -197,7 +208,6 @@ leases: scoped + ttl</pre>
                       <label>schedule state<input value="enabled" autocomplete="off" readonly /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
-                    <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
                     <button type="submit">create schedule</button>
                   </form>
                   <button id="run-due-button" type="button">run due</button>

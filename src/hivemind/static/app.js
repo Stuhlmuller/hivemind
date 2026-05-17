@@ -202,6 +202,14 @@ function credentialTypeLabel(credential) {
   return credential.metadata?.auth_type === "oauth" ? "OAuth Broker Credential" : credentialKindLabel(credential.metadata?.credential_kind);
 }
 
+function scheduleCatchUpPolicyLabel(policy) {
+  return {
+    skip_missed: "skip missed / keep cadence",
+    run_once: "run once / reset cadence",
+    backfill: "backfill every missed run",
+  }[policy] || policy;
+}
+
 function credentialAgentScope(credential) {
   return credential.policy.allowed_agents.length
     ? credential.policy.allowed_agents.map((agentId) => agentName(agentId)).join(", ")
@@ -647,8 +655,13 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned")}<br>Credential: ${escapeHtml(schedule.credential_id ? credentialName(schedule.credential_id) : "none")}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
-        [schedule.enabled ? "enabled" : "paused", schedule.priority, due ? "due now" : "scheduled"],
+        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned")}<br>Credential: ${escapeHtml(schedule.credential_id ? credentialName(schedule.credential_id) : "none")}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
+        [
+          schedule.enabled ? "enabled" : "paused",
+          schedule.priority,
+          scheduleCatchUpPolicyLabel(schedule.catch_up_policy),
+          due ? "due now" : "scheduled",
+        ],
         actions,
       );
     })
