@@ -315,6 +315,28 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
 
+    replay_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
+    require_equal(
+        replay_response.json()["detail"],
+        "credential lease is expired or revoked",
+        "replayed lease use should expose the revoke/expiry reason",
+    )
+
+    stored_lease = client.get("/credential-leases").json()[0]
+    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
+    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
+
+    audit_events = client.get("/audit-events").json()
+    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
+    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
+    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
+    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
+    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
+
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
@@ -455,6 +477,69 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
     require_true(
         "intent reviewer provider is not configured" in response.json()["detail"],
         "default app path should not silently fall back to local review",
+    )
+
+
+def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "persisted-lease-race.db"
+    setup_store = HivemindStore(db_path)
+    setup_store.setup_admin("admin", TEST_PASSWORD)
+    agent = setup_store.list_agents()[0]
+    credential = setup_store.list_credentials()[0]
+    lease_token, _ = setup_store.request_lease(
+        credential_id=credential["id"],
+        agent_id=agent["id"],
+        action="read_repo",
+        intent="Read repository metadata for safe task triage.",
+        ttl_seconds=30,
+    )
+    if lease_token is None:
+        raise AssertionError("active lease request should issue a token")
+
+    start = Barrier(3)
+    consume = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def _consume_credential_action(self, conn, lease, normalized_action, payload):
+            consume.wait(timeout=5)
+            return super()._consume_credential_action(conn, lease, normalized_action, payload)
+
+    stores = [RacingStore(db_path), RacingStore(db_path)]
+
+    def perform(store: HivemindStore) -> tuple[str, object]:
+        start.wait(timeout=5)
+        try:
+            return (
+                "ok",
+                store.perform_credential_action(
+                    lease_token=lease_token,
+                    action="read_repo",
+                    payload={"repo": "hivemind"},
+                ),
+            )
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(perform, store) for store in stores]
+        start.wait(timeout=5)
+        results = [future.result() for future in futures]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one concurrent action should succeed")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["credential lease is expired or revoked"],
+        "losing concurrent action should fail closed as a replay",
+    )
+    require_equal(setup_store.list_leases()[0]["status"], "revoked", "persisted lease should be consumed")
+
+    action_events = [
+        event for event in setup_store.list_audit_events() if event["type"].startswith("credential.action.")
+    ]
+    require_equal(
+        sorted(event["type"] for event in action_events),
+        ["credential.action.denied", "credential.action.performed"],
+        "race should audit one allowed action and one denial",
     )
 
 

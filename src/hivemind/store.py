@@ -98,6 +98,7 @@ class StoreValidationError(StoreError):
 
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
+ACTION_DENIED_EVENT = "credential.action.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
@@ -906,22 +907,99 @@ class HivemindStore:
     def perform_credential_action(self, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         token_hash = self.hash_token(lease_token)
         normalized_action = action.strip().lower()
+        error_detail: str | None = None
+        result: dict[str, Any] | None = None
         with self.connect() as conn:
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
             if lease is None:
-                raise StoreError("unknown credential lease token")
-            if lease["status"] == "pending":
-                raise StoreError("credential lease is pending approval")
-            if lease["status"] == "denied":
-                raise StoreError("credential lease request was denied")
-            if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
-                raise StoreError("credential lease is expired or revoked")
-            if lease["action"] != normalized_action:
-                raise StoreError("credential lease does not allow this action")
-            credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
-            if credential is None:
-                raise StoreError("credential no longer exists")
-        self.audit(
+                error_detail = "unknown credential lease token"
+                self._insert_unknown_credential_action_denial(conn, normalized_action, error_detail)
+            else:
+                error_detail = self._credential_action_denial_reason(lease, normalized_action)
+                if error_detail is not None:
+                    self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+                else:
+                    result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
+        if error_detail is not None:
+            raise StoreError(error_detail)
+        if result is None:
+            raise RuntimeError("credential action flow ended without a result")
+        return result
+
+    def _credential_action_denial_reason(self, lease: sqlite3.Row, normalized_action: str) -> str | None:
+        if lease["status"] == "pending":
+            return "credential lease is pending approval"
+        if lease["status"] == "denied":
+            return "credential lease request was denied"
+        if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
+            return "credential lease is expired or revoked"
+        if lease["action"] != normalized_action:
+            return "credential lease does not allow this action"
+        return None
+
+    def _insert_unknown_credential_action_denial(
+        self,
+        conn: sqlite3.Connection,
+        normalized_action: str,
+        error_detail: str,
+    ) -> None:
+        self._insert_audit(
+            conn,
+            ACTION_DENIED_EVENT,
+            "unknown",
+            "credential_lease",
+            "denied",
+            error_detail,
+            {"action": normalized_action},
+        )
+
+    def _insert_credential_action_denial(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        error_detail: str,
+    ) -> None:
+        self._insert_audit(
+            conn,
+            ACTION_DENIED_EVENT,
+            lease["agent_id"],
+            lease["credential_id"],
+            "denied",
+            error_detail,
+            {"action": normalized_action},
+        )
+
+    def _consume_credential_action(
+        self,
+        conn: sqlite3.Connection,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
+        if credential is None:
+            error_detail = "credential no longer exists"
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return None, error_detail
+        consumed_at = utcnow()
+        cursor = conn.execute(
+            """
+            UPDATE leases
+            SET status = ?, expires_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND action = ?
+              AND expires_at > ?
+            """,
+            ("revoked", iso(consumed_at), lease["id"], "active", normalized_action, iso(consumed_at)),
+        )
+        if cursor.rowcount != 1:
+            error_detail = "credential lease is expired or revoked"
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            return None, error_detail
+        self._insert_audit(
+            conn,
             "credential.action.performed",
             lease["agent_id"],
             lease["credential_id"],
@@ -929,13 +1007,16 @@ class HivemindStore:
             "action matched active credential lease",
             {"action": normalized_action, "payload_keys": sorted(payload.keys())},
         )
-        return {
-            "ok": True,
-            "provider": credential["provider"],
-            "credential_id": credential["id"],
-            "action": normalized_action,
-            "result": "credential lease matched requested action",
-        }
+        return (
+            {
+                "ok": True,
+                "provider": credential["provider"],
+                "credential_id": credential["id"],
+                "action": normalized_action,
+                "result": "credential lease matched requested action",
+            },
+            None,
+        )
 
     def approve_lease(self, lease_id: str, actor_id: str) -> tuple[str, dict[str, Any]]:
         with self.connect() as conn:
@@ -1330,21 +1411,8 @@ class HivemindStore:
         return item
 
     def audit(self, event_type: str, actor_id: str, target_id: str, decision: str, reason: str, metadata: dict[str, Any]) -> None:
-        row = {
-            "id": f"audit_{secrets.token_urlsafe(10)}",
-            "type": event_type,
-            "actor_id": actor_id,
-            "target_id": target_id,
-            "decision": decision,
-            "reason": reason,
-            "metadata": dumps(metadata),
-            "created_at": iso(),
-        }
         with self.connect() as conn:
-            conn.execute(
-                "INSERT INTO audit_events (id, type, actor_id, target_id, decision, reason, metadata, created_at) VALUES (:id, :type, :actor_id, :target_id, :decision, :reason, :metadata, :created_at)",
-                row,
-            )
+            self._insert_audit(conn, event_type, actor_id, target_id, decision, reason, metadata)
 
     def list_audit_events(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1352,3 +1420,27 @@ class HivemindStore:
                 {**dict(row), "metadata": loads(row["metadata"], {})}
                 for row in conn.execute("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 200")
             ]
+
+    def _insert_audit(
+        self,
+        conn: sqlite3.Connection,
+        event_type: str,
+        actor_id: str,
+        target_id: str,
+        decision: str,
+        reason: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        conn.execute(
+            "INSERT INTO audit_events (id, type, actor_id, target_id, decision, reason, metadata, created_at) VALUES (:id, :type, :actor_id, :target_id, :decision, :reason, :metadata, :created_at)",
+            {
+                "id": f"audit_{secrets.token_urlsafe(10)}",
+                "type": event_type,
+                "actor_id": actor_id,
+                "target_id": target_id,
+                "decision": decision,
+                "reason": reason,
+                "metadata": dumps(metadata),
+                "created_at": iso(),
+            },
+        )
