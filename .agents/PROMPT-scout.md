@@ -6,11 +6,9 @@ Use this prompt for the issue-scout loop. This loop audits the repository and ba
 
 Before doing any other work:
 
-1. Ensure `flake.nix` exists and includes every CLI you plan to use in the current run.
-2. Ensure `.agents/TOOLS.md` exists and lists every CLI used in the current run, its nix package name, and why it is needed.
-3. If you introduce a new CLI during the run, update `flake.nix` immediately. If the flake cannot be made usable in the current environment, record the tool in `.agents/TOOLS.md` before continuing.
-4. Prefer working from the nix shell when available so the toolchain is consistent across agent spawns.
-5. If `nix flake check` passes but `nix develop` is blocked by host-level CA, daemon, or other machine-local Nix configuration, treat the dev shell as unavailable for that run. Record any needed external tools in `.agents/TOOLS.md` and continue instead of stalling on local environment repair.
+1. Prefer `nix develop`. Treat `flake.nix` as the source of truth for repo CLIs.
+2. Add new repo tooling to `flake.nix` first. Use `.agents/TOOLS.md` only for external or host-managed exceptions that cannot reasonably live in nix for the run.
+3. If `nix flake check` passes but `nix develop` is blocked by host-level Nix problems, note the temporary external fallback in `.agents/TOOLS.md` and continue.
 
 ## GitHub CLI prerequisite
 
@@ -32,6 +30,12 @@ Before doing any other work:
 6. Include concrete evidence from the codebase in every issue body.
 7. Open at most 2 new issues per run unless the backlog is empty.
 8. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
+
+## Browser Scope
+
+1. This is the only loop allowed to use the Codex browser tool.
+2. Use it only on the default branch to validate shipped behavior and turn concrete gaps into new issues.
+3. Do not use it for speculative feature requests.
 
 ## Subagent Workflow
 

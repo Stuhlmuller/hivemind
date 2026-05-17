@@ -212,6 +212,19 @@ assert_prompt_includes_subagent_policy() {
   exit 1
 }
 
+assert_file_contains() {
+  local file_path="$1"
+  local needle="$2"
+
+  if grep -F -- "$needle" "$file_path" >/dev/null; then
+    return
+  fi
+
+  echo "missing expected text in $file_path: $needle" >&2
+  cat "$file_path" >&2
+  exit 1
+}
+
 assert_text_includes() {
   local haystack="$1"
   local needle="$2"
@@ -274,6 +287,10 @@ assert_prompt_includes_subagent_policy "$capture_root/scout.prompt"
 assert_prompt_includes_subagent_policy "$capture_root/worker-a.prompt"
 assert_prompt_includes_subagent_policy "$capture_root/worker-b.prompt"
 assert_prompt_includes_subagent_policy "$capture_root/pr-shepherd.prompt"
+assert_file_contains "$capture_root/scout.prompt" "This is the only loop allowed to use the Codex browser tool."
+assert_file_contains "$capture_root/worker-a.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout loop."
+assert_file_contains "$capture_root/worker-b.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout loop."
+assert_file_contains "$capture_root/pr-shepherd.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout loop."
 
 status_output="$(
   PATH="$bin_root:$PATH" \

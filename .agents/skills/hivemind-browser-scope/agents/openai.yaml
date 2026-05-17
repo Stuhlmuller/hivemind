@@ -1,0 +1,3 @@
+display_name: Hivemind Browser Scope
+short_description: Restrict browser use to main-branch issue scouting.
+default_prompt: Use this skill when deciding whether to use the Codex browser tool in Hivemind or when changing browser-verification guidance.

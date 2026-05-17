@@ -69,6 +69,11 @@ Frontend rule: before changing the Hivemind UI, use the project-local
 `hivemind-ui-no-slop` skill. The UI must feel technical, open-source,
 self-hosted, agentic, security-focused, and new; reject generic SaaS styling,
 marketing heroes, decorative bee filler, and amber/beige theme wash.
+Browser rule: reserve the Codex browser tool for the main-branch scout lane
+that tests shipped behavior and files concrete new issues. Do not use it for
+feature-request drafting, frontend iteration, PR shepherd work, or general
+development. Use the project-local `hivemind-browser-scope` skill before
+changing browser-verification guidance in repo prompts or skills.
 
 Skill capture rule: use the project-local `hivemind-skill-capture` skill when a
 new ask creates a durable project rule, workflow, taste preference, security

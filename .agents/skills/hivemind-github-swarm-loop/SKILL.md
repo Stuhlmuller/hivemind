@@ -13,10 +13,13 @@ Keep the repository's multi-loop GitHub automation aligned around dedicated work
 
 - Every loop requires working `gh` auth and issue access before it starts.
 - Every loop must run Codex with GitHub-capable network access.
+- Startup sections in the role prompts should stay brief and nix-first. `flake.nix` is the main toolchain source; `.agents/TOOLS.md` is for external or host-managed exceptions.
 - `scout` audits the repo and opens only missing high-signal issues.
+- `scout` is the only loop allowed to use the Codex browser tool, and only on the default branch to validate shipped behavior and file concrete new issues.
 - `worker-a` owns odd-numbered issues.
 - `worker-b` owns even-numbered issues.
 - Development workers use one issue branch at a time in their own dedicated worktrees.
+- Workers, PR shepherd, feature-request drafting, and general development lanes must not use the Codex browser tool.
 - Every loop should prepend the shared subagent prompt and use bounded subagents for reconnaissance or disjoint sidecar work when delegation is available.
 - The swarm should support an endless supervisor mode so opening the laptop can resume or keep running the improvement loops without a manual terminal babysitter.
 - Workers open or update PRs but do not merge them.

@@ -62,7 +62,7 @@ Use this skill after every Hivemind implementation change before finalizing, com
 ## Verification
 
 - Run focused backend tests for API, auth, store, scheduler, credential, or lease changes.
-- Run frontend build/browser checks for UI changes.
+- Run frontend build checks for UI changes. Reserve Codex browser validation for the main-branch scout lane when shipped UI behavior needs live confirmation.
 - Run `quick_validate.py` for skill changes.
 - Run documentation or README-focused tests when docs describe login, setup, security, or deployment behavior.
 - If verification cannot run, say why and identify the residual risk.
