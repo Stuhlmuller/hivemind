@@ -5,6 +5,17 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def preview_credential_ref(credential_ref: str | None) -> str | None:
+    if not credential_ref:
+        return None
+    scheme, separator, rest = credential_ref.partition("://")
+    if not separator:
+        return "***"
+    if not rest:
+        return f"{scheme}://..."
+    return f"{scheme}://{rest[:3]}..."
+
+
 @dataclass(frozen=True)
 class IntentReviewerConfig:
     provider: str = "local"
@@ -15,7 +26,7 @@ class IntentReviewerConfig:
         return {
             "provider": self.provider,
             "model": self.model,
-            "credential_ref": self.credential_ref,
+            "credential_ref": preview_credential_ref(self.credential_ref),
         }
 
 
@@ -35,4 +46,3 @@ class HivemindConfig:
 
     def public_view(self) -> dict[str, Any]:
         return {"intent_reviewer": self.intent_reviewer.public_view()}
-

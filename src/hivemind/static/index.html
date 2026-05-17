@@ -38,16 +38,28 @@ agents: brokered capabilities</pre>
         </div>
         <form id="auth-form" class="panel stack">
           <div class="panel-heading">
-            <h2 id="auth-title">setup admin</h2>
-            <p id="auth-mode">first local user becomes admin</p>
+            <h2 id="auth-title">Set up admin</h2>
+            <p id="auth-mode">First local user becomes admin.</p>
           </div>
           <label>
             username
-            <input name="username" value="admin" autocomplete="username" />
+            <input
+              name="username"
+              placeholder="operator"
+              autocomplete="username"
+              autocapitalize="none"
+              spellcheck="false"
+            />
           </label>
           <label>
             password
-            <input name="password" type="password" value="hivemind-password" autocomplete="current-password" />
+            <input
+              name="password"
+              type="password"
+              placeholder="choose a long local password"
+              minlength="12"
+              autocomplete="new-password"
+            />
           </label>
           <button type="submit">continue</button>
         </form>
@@ -219,5 +231,28 @@ agents: brokered capabilities</pre>
 
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/static/app.js" type="module"></script>
+    <script type="module">
+      const authTitle = document.querySelector("#auth-title");
+      const usernameInput = document.querySelector('#auth-form input[name="username"]');
+      const passwordInput = document.querySelector('#auth-form input[name="password"]');
+
+      function syncAuthFieldMode() {
+        if (!authTitle || !usernameInput || !passwordInput) return;
+        const title = authTitle.textContent.trim().toLowerCase();
+        const setupMode = title === "set up admin" || title === "setup admin";
+        usernameInput.placeholder = setupMode ? "operator" : "username";
+        passwordInput.placeholder = setupMode ? "choose a long local password" : "enter your password";
+        passwordInput.autocomplete = setupMode ? "new-password" : "current-password";
+      }
+
+      if (authTitle && usernameInput && passwordInput) {
+        new MutationObserver(syncAuthFieldMode).observe(authTitle, {
+          childList: true,
+          characterData: true,
+          subtree: true,
+        });
+        syncAuthFieldMode();
+      }
+    </script>
   </body>
 </html>
