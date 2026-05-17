@@ -94,8 +94,20 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "heartbeat_seconds": 60,
         }
     )
+    oauth_task = source.create_task(
+        {
+            "title": "Reconnect OAuth credential",
+            "description": "Keep the task while dropping the non-restorable OAuth capability link.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": oauth_credential["id"],
+            "action": "exchange_oauth_code",
+            "intent": "Reconnect the brokered OAuth credential after logical restore completes.",
+            "heartbeat_seconds": None,
+        }
+    )
     source.record_heartbeat(task["id"], agent["id"], "backup rehearsal still running")
-    source.create_schedule(
+    schedule = source.create_schedule(
         {
             "name": "Nightly backup rehearsal",
             "enabled": True,
@@ -108,6 +120,21 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "action": "read_repo",
             "intent": "Inspect repository state for a safe backup rehearsal.",
             "next_run_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+    oauth_schedule = source.create_schedule(
+        {
+            "name": "OAuth reconnect reminder",
+            "enabled": True,
+            "interval_seconds": 7200,
+            "task_title": "Reconnect OAuth credential",
+            "task_description": "Recreate the brokered OAuth connection after restore.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": oauth_credential["id"],
+            "action": "exchange_oauth_code",
+            "intent": "Reconnect the brokered OAuth credential after logical restore completes.",
+            "next_run_at": "2030-01-01T01:00:00+00:00",
         }
     )
     source.audit(
@@ -130,6 +157,28 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
     exported_credential_ids = {row["id"] for row in bundle["tables"]["credentials"]}
     require_true(credential["id"] in exported_credential_ids, "vault credentials should be exported")
     require_true(oauth_credential["id"] not in exported_credential_ids, "oauth credentials should be excluded")
+    exported_tasks = {row["id"]: row for row in bundle["tables"]["tasks"]}
+    exported_schedules = {row["id"]: row for row in bundle["tables"]["schedules"]}
+    require_equal(
+        exported_tasks[task["id"]]["credential_id"],
+        credential["id"],
+        "restorable task credential refs should be preserved",
+    )
+    require_equal(
+        exported_tasks[oauth_task["id"]]["credential_id"],
+        None,
+        "tasks should drop refs to excluded oauth credentials",
+    )
+    require_equal(
+        exported_schedules[schedule["id"]]["credential_id"],
+        credential["id"],
+        "restorable schedule credential refs should be preserved",
+    )
+    require_equal(
+        exported_schedules[oauth_schedule["id"]]["credential_id"],
+        None,
+        "schedules should drop refs to excluded oauth credentials",
+    )
 
     target_db = tmp_path / "target.db"
     target = HivemindStore(target_db)

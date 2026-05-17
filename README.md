@@ -137,9 +137,11 @@ hashes, agents, tasks, schedules, audit history, and credential secret refs for
 `env://`, `file://`, and `vault://` credentials. It intentionally excludes
 active sessions, live leases, pending OAuth states, and broker-owned OAuth
 token material, so reconnect OAuth-backed credentials after a restore and treat
-the backup file itself as a sensitive operator artifact. Run restore while the
-instance is stopped or otherwise quiesced so you do not race live API traffic
-while replacing persisted state.
+the backup file itself as a sensitive operator artifact. Tasks and schedules
+that pointed at an excluded OAuth credential are restored with that credential
+link cleared so operators can reconnect the capability deliberately. Run
+restore while the instance is stopped or otherwise quiesced so you do not race
+live API traffic while replacing persisted state.
 
 ## Security Model
 

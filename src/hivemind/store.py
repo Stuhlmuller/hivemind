@@ -193,6 +193,7 @@ BACKUP_DELETE_STATEMENTS = (
     "DELETE FROM agents",
     "DELETE FROM users",
 )
+BACKUP_CREDENTIAL_REFERENCE_TABLES = ("tasks", "schedules")
 
 
 @dataclass(frozen=True)
@@ -450,6 +451,7 @@ class HivemindStore:
                 table: [dict(row) for row in conn.execute(query)]
                 for table, query in BACKUP_TABLE_QUERIES.items()
             }
+        tables = self.clear_unrestorable_credential_refs(tables)
         return {
             "format": BACKUP_FORMAT,
             "format_version": BACKUP_FORMAT_VERSION,
@@ -461,6 +463,22 @@ class HivemindStore:
             "summary": {table: len(rows) for table, rows in tables.items()},
             "tables": tables,
         }
+
+    def clear_unrestorable_credential_refs(
+        self,
+        tables: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        credential_ids = {row["id"] for row in tables.get("credentials", [])}
+        normalized = dict(tables)
+        for table in BACKUP_CREDENTIAL_REFERENCE_TABLES:
+            normalized[table] = [
+                {
+                    **row,
+                    "credential_id": row["credential_id"] if row.get("credential_id") in credential_ids else None,
+                }
+                for row in normalized.get(table, [])
+            ]
+        return normalized
 
     def validate_backup_credential_row(self, row: dict[str, Any]) -> dict[str, Any]:
         if str(row["secret_ref"]).startswith("oauth://"):
@@ -520,10 +538,11 @@ class HivemindStore:
             missing = ", ".join(missing_tables)
             raise StoreValidationError(f"backup bundle is missing required tables: {missing}")
 
-        return {
+        tables = {
             table: self.validate_backup_rows(table=table, rows=tables[table], columns=BACKUP_TABLE_COLUMNS[table])
             for table in BACKUP_TABLE_QUERIES
         }
+        return self.clear_unrestorable_credential_refs(tables)
 
     def restore_backup_bundle(self, bundle: Mapping[str, Any]) -> dict[str, int]:
         with self.connect() as conn:
