@@ -19,15 +19,18 @@ copy_agent_files() {
   mkdir -p "$repo_root/.agents" "$repo_root/.agents/skills/hivemind-github-swarm-loop/agents"
 
   cp "$source_repo_root/.agents/loop-common.sh" "$repo_root/.agents/loop-common.sh"
+  cp "$source_repo_root/.agents/swarm-roles.sh" "$repo_root/.agents/swarm-roles.sh"
+  cp "$source_repo_root/.agents/agent-loop.sh" "$repo_root/.agents/agent-loop.sh"
   cp "$source_repo_root/.agents/role-loop.sh" "$repo_root/.agents/role-loop.sh"
-  cp "$source_repo_root/.agents/scout-loop.sh" "$repo_root/.agents/scout-loop.sh"
-  cp "$source_repo_root/.agents/browser-user-loop.sh" "$repo_root/.agents/browser-user-loop.sh"
   cp "$source_repo_root/.agents/reviewer-loop.sh" "$repo_root/.agents/reviewer-loop.sh"
+  cp "$source_repo_root/.agents/feature-requester-loop.sh" "$repo_root/.agents/feature-requester-loop.sh"
+  cp "$source_repo_root/.agents/scout-loop.sh" "$repo_root/.agents/scout-loop.sh"
   cp "$source_repo_root/.agents/worker-loop.sh" "$repo_root/.agents/worker-loop.sh"
+  cp "$source_repo_root/.agents/beekeeper-loop.sh" "$repo_root/.agents/beekeeper-loop.sh"
+  cp "$source_repo_root/.agents/browser-user-loop.sh" "$repo_root/.agents/browser-user-loop.sh"
   cp "$source_repo_root/.agents/developer-loop.sh" "$repo_root/.agents/developer-loop.sh"
   cp "$source_repo_root/.agents/worker-loop-a.sh" "$repo_root/.agents/worker-loop-a.sh"
   cp "$source_repo_root/.agents/worker-loop-b.sh" "$repo_root/.agents/worker-loop-b.sh"
-  cp "$source_repo_root/.agents/feature-requester-loop.sh" "$repo_root/.agents/feature-requester-loop.sh"
   cp "$source_repo_root/.agents/pr-shepherd.sh" "$repo_root/.agents/pr-shepherd.sh"
   cp "$source_repo_root/.agents/swarm.sh" "$repo_root/.agents/swarm.sh"
   cp "$source_repo_root/.agents/swarm-launchd.sh" "$repo_root/.agents/swarm-launchd.sh"
@@ -36,7 +39,7 @@ copy_agent_files() {
   cp "$source_repo_root/.agents/PROMPT-reviewer.md" "$repo_root/.agents/PROMPT-reviewer.md"
   cp "$source_repo_root/.agents/PROMPT-worker.md" "$repo_root/.agents/PROMPT-worker.md"
   cp "$source_repo_root/.agents/PROMPT-feature-requester.md" "$repo_root/.agents/PROMPT-feature-requester.md"
-  cp "$source_repo_root/.agents/PROMPT-pr-shepherd.md" "$repo_root/.agents/PROMPT-pr-shepherd.md"
+  cp "$source_repo_root/.agents/PROMPT-beekeeper.md" "$repo_root/.agents/PROMPT-beekeeper.md"
   cp "$source_repo_root/.agents/TOOLS.md" "$repo_root/.agents/TOOLS.md"
   cp "$source_repo_root/.agents/SWARM.md" "$repo_root/.agents/SWARM.md"
   cp "$source_repo_root/.agents/skills/hivemind-github-swarm-loop/SKILL.md" "$repo_root/.agents/skills/hivemind-github-swarm-loop/SKILL.md"
@@ -45,15 +48,18 @@ copy_agent_files() {
 
   chmod +x \
     "$repo_root/.agents/loop-common.sh" \
+    "$repo_root/.agents/swarm-roles.sh" \
+    "$repo_root/.agents/agent-loop.sh" \
     "$repo_root/.agents/role-loop.sh" \
-    "$repo_root/.agents/scout-loop.sh" \
-    "$repo_root/.agents/browser-user-loop.sh" \
     "$repo_root/.agents/reviewer-loop.sh" \
+    "$repo_root/.agents/feature-requester-loop.sh" \
+    "$repo_root/.agents/scout-loop.sh" \
     "$repo_root/.agents/worker-loop.sh" \
+    "$repo_root/.agents/beekeeper-loop.sh" \
+    "$repo_root/.agents/browser-user-loop.sh" \
     "$repo_root/.agents/developer-loop.sh" \
     "$repo_root/.agents/worker-loop-a.sh" \
     "$repo_root/.agents/worker-loop-b.sh" \
-    "$repo_root/.agents/feature-requester-loop.sh" \
     "$repo_root/.agents/pr-shepherd.sh" \
     "$repo_root/.agents/swarm.sh" \
     "$repo_root/.agents/swarm-launchd.sh"
@@ -155,6 +161,7 @@ case "$command_name" in
     ;;
   review)
     pwd >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.review"
+    printf '%s\n' "${1:-}" >>"${HIVEMIND_SWARM_CAPTURE_DIR:?missing}/$HIVEMIND_LOOP_LABEL.review_prompt"
     exit 0
     ;;
 esac
@@ -201,6 +208,31 @@ wait_for_line_count() {
     fi
     sleep 0.1
   done
+}
+
+wait_for_process_exit() {
+  local pid="$1"
+  local watchdog_pid
+
+  (
+    sleep 5
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "timed out waiting for process $pid to exit" >&2
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  ) &
+  watchdog_pid="$!"
+
+  if wait "$pid"; then
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" >/dev/null 2>&1 || true
+    return
+  fi
+
+  kill "$watchdog_pid" >/dev/null 2>&1 || true
+  wait "$watchdog_pid" >/dev/null 2>&1 || true
+  echo "process $pid exited unexpectedly" >&2
+  exit 1
 }
 
 assert_file_equals() {
@@ -254,6 +286,27 @@ assert_text_includes() {
   exit 1
 }
 
+swarm_env() {
+  env \
+    PATH="$bin_root:$PATH" \
+    CODEX_SANDBOX="" \
+    HOME="$home_root" \
+    HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+    HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+    HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+    HIVEMIND_REVIEWER_MAX_RUNS=1 \
+    HIVEMIND_REVIEWER_SLEEP_SECONDS=0 \
+    HIVEMIND_WORKER_MAX_RUNS=1 \
+    HIVEMIND_WORKER_SLEEP_SECONDS=0 \
+    HIVEMIND_FEATURE_REQUESTER_MAX_RUNS=1 \
+    HIVEMIND_FEATURE_REQUESTER_SLEEP_SECONDS=0 \
+    HIVEMIND_SCOUT_MAX_RUNS=1 \
+    HIVEMIND_SCOUT_SLEEP_SECONDS=0 \
+    HIVEMIND_BEEKEEPER_MAX_RUNS=1 \
+    HIVEMIND_BEEKEEPER_SLEEP_SECONDS=0 \
+    "$@"
+}
+
 case_root="$(mktemp -d "${TMPDIR:-/tmp}/swarm-check.XXXXXX")"
 bin_root="$case_root/bin"
 capture_root="$case_root/capture"
@@ -266,67 +319,34 @@ write_stub_gh "$bin_root"
 write_stub_codex "$bin_root"
 repo_root="$(setup_case_repo "$case_root")"
 
-PATH="$bin_root:$PATH" \
-CODEX_SANDBOX="" \
-HOME="$home_root" \
-HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
-HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
-HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
-HIVEMIND_REVIEWER_MAX_RUNS=1 \
-HIVEMIND_REVIEWER_SLEEP_SECONDS=0 \
-HIVEMIND_WORKER_MAX_RUNS=1 \
-HIVEMIND_WORKER_SLEEP_SECONDS=0 \
-HIVEMIND_FEATURE_REQUESTER_MAX_RUNS=1 \
-HIVEMIND_FEATURE_REQUESTER_SLEEP_SECONDS=0 \
-HIVEMIND_SCOUT_MAX_RUNS=1 \
-HIVEMIND_SCOUT_SLEEP_SECONDS=0 \
-HIVEMIND_PR_SHEPHERD_MAX_RUNS=1 \
-HIVEMIND_PR_SHEPHERD_SLEEP_SECONDS=0 \
-bash "$repo_root/.agents/swarm.sh" start --reviewers 2 --workers 3 --feature-requesters 2 --scouts 1 --pr-shepherds 1 >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" start >/dev/null
 
-for role in reviewer-1 reviewer-2 worker-1 worker-2 worker-3 feature-requester-1 feature-requester-2 scout-1 pr-shepherd-1; do
+for role in reviewer worker feature-requester scout beekeeper; do
   wait_for_file "$capture_root/$role.exec"
   wait_for_file "$capture_root/$role.prompt"
 done
+wait_for_file "$capture_root/worker.review"
 
-for role in worker-1 worker-2 worker-3; do
-  wait_for_file "$capture_root/$role.review"
-done
+assert_file_equals "$capture_root/reviewer.exec" "$worktree_root/reviewer"
+assert_file_equals "$capture_root/worker.exec" "$worktree_root/worker"
+assert_file_equals "$capture_root/feature-requester.exec" "$worktree_root/feature-requester"
+assert_file_equals "$capture_root/scout.exec" "$worktree_root/scout"
+assert_file_equals "$capture_root/beekeeper.exec" "$worktree_root/beekeeper"
+assert_file_equals "$capture_root/worker.review" "$worktree_root/worker"
 
-assert_file_equals "$capture_root/reviewer-1.exec" "$worktree_root/reviewer-1"
-assert_file_equals "$capture_root/worker-2.exec" "$worktree_root/worker-2"
-assert_file_equals "$capture_root/feature-requester-2.exec" "$worktree_root/feature-requester-2"
-assert_file_equals "$capture_root/scout-1.exec" "$worktree_root/scout-1"
-assert_file_equals "$capture_root/pr-shepherd-1.exec" "$worktree_root/pr-shepherd-1"
-assert_file_equals "$capture_root/worker-1.review" "$worktree_root/worker-1"
-
-for role in reviewer-1 worker-2 feature-requester-2 scout-1 pr-shepherd-1; do
+for role in reviewer worker feature-requester scout beekeeper; do
   assert_prompt_includes_subagent_policy "$capture_root/$role.prompt"
 done
 
-assert_file_contains "$capture_root/scout-1.prompt" "This is the only loop allowed to use the Codex browser tool."
-assert_file_contains "$capture_root/scout-1.prompt" "You are \`scout-1\`, scout lane 1 of 1."
-assert_file_contains "$capture_root/reviewer-1.prompt" "You are \`reviewer-1\`, reviewer lane 1 of 2."
-assert_file_contains "$capture_root/worker-2.prompt" "You are \`worker-2\`, worker lane 2 of 3."
-assert_file_contains "$capture_root/worker-2.prompt" "((issue_number - 1) % 3) + 1 == 2"
-assert_file_contains "$capture_root/feature-requester-2.prompt" "You are \`feature-requester-2\`, feature-requester lane 2 of 2."
-assert_file_contains "$capture_root/pr-shepherd-1.prompt" "You are \`pr-shepherd-1\`, PR shepherd lane 1 of 1."
-assert_file_contains "$capture_root/reviewer-1.prompt" "Do not use the Codex browser tool in this loop."
-assert_file_contains "$capture_root/worker-2.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout lane."
-assert_file_contains "$capture_root/feature-requester-2.prompt" "Do not use the Codex browser tool in this loop."
-assert_file_contains "$capture_root/pr-shepherd-1.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout lane."
+assert_file_contains "$capture_root/scout.prompt" "This is the only loop allowed to use the Codex browser tool."
+assert_file_contains "$capture_root/reviewer.prompt" "Do not use the Codex browser tool in this loop."
+assert_file_contains "$capture_root/worker.prompt" "Leave merging to the beekeeper loop even if the checks are already green."
+assert_file_contains "$capture_root/worker.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
+assert_file_contains "$capture_root/feature-requester.prompt" "Do not use the Codex browser tool in this loop."
+assert_file_contains "$capture_root/beekeeper.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
 
-status_output="$(
-  PATH="$bin_root:$PATH" \
-  CODEX_SANDBOX="" \
-  HOME="$home_root" \
-  HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
-  HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
-  HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
-  bash "$repo_root/.agents/swarm.sh" status
-)"
-
-for role in reviewer-1 worker-3 feature-requester-2 scout-1 pr-shepherd-1; do
+status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status)"
+for role in reviewer worker feature-requester scout beekeeper; do
   if [[ "$status_output" != *"$role"* ]]; then
     echo "status output missing $role" >&2
     echo "$status_output" >&2
@@ -334,24 +354,53 @@ for role in reviewer-1 worker-3 feature-requester-2 scout-1 pr-shepherd-1; do
   fi
 done
 
-printf 'scout-1 sample line\n' >>"$runtime_root/logs/scout-1.log"
-printf 'worker-1 sample line\n' >>"$runtime_root/logs/worker-1.log"
+printf 'scout sample line\n' >>"$runtime_root/logs/scout.log"
+printf 'worker sample line\n' >>"$runtime_root/logs/worker.log"
 
 follow_output="$(
-  PATH="$bin_root:$PATH" \
-  CODEX_SANDBOX="" \
-  HOME="$home_root" \
-  HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
-  HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
-  HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
-  HIVEMIND_SWARM_TAIL_LINES=1 \
-  HIVEMIND_SWARM_FOLLOW_MAX_LINES=2 \
-  HIVEMIND_SWARM_FORCE_COLOR=1 \
-  bash "$repo_root/.agents/swarm.sh" logs --follow scout-1 worker-1
+  swarm_env \
+    HIVEMIND_SWARM_TAIL_LINES=1 \
+    HIVEMIND_SWARM_FOLLOW_MAX_LINES=2 \
+    HIVEMIND_SWARM_FORCE_COLOR=1 \
+    bash "$repo_root/.agents/swarm.sh" logs --follow scout worker
 )"
 
-assert_text_includes "$follow_output" $'\033[36m[scout-1]\033[0m scout-1 sample line'
-assert_text_includes "$follow_output" $'\033[32m[worker-1]\033[0m worker-1 sample line'
+assert_text_includes "$follow_output" $'\033[36m[scout]\033[0m scout sample line'
+assert_text_includes "$follow_output" $'\033[32m[worker]\033[0m worker sample line'
+
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
+rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
+
+swarm_env bash "$repo_root/.agents/swarm.sh" start reviewer-1 developer feature-requester-1 browser-user pr-shepherd >/dev/null
+
+for role in reviewer worker feature-requester scout beekeeper; do
+  wait_for_file "$capture_root/$role.exec"
+done
+wait_for_file "$capture_root/worker.review"
+
+alias_status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status reviewer-1 developer feature-requester-1 browser-user pr-shepherd)"
+for role in reviewer worker feature-requester scout beekeeper; do
+  if [[ "$alias_status_output" != *"$role"* ]]; then
+    echo "alias status output missing $role" >&2
+    echo "$alias_status_output" >&2
+    exit 1
+  fi
+done
+
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
+rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
+
+swarm_env bash "$repo_root/.agents/swarm.sh" start --reviewers 2 --workers 3 --feature-requesters 2 --scouts 1 --pr-shepherds 1 >/dev/null
+
+for role in reviewer worker feature-requester scout beekeeper; do
+  wait_for_file "$capture_root/$role.exec"
+done
+
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 
 PATH="$bin_root:$PATH" \
 CODEX_SANDBOX="" \
@@ -359,9 +408,83 @@ HOME="$home_root" \
 HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
 HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
 HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
-bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+HIVEMIND_WORKER_A_MAX_RUNS=1 \
+HIVEMIND_WORKER_A_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_A_REVIEW_PROMPT="Legacy worker A review prompt" \
+bash "$repo_root/.agents/worker-loop-a.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+worker_a_pid="$!"
 
-rm -f "$capture_root/worker-1.exec" "$capture_root/worker-1.prompt" "$capture_root/worker-1.review"
+wait_for_file "$capture_root/worker.review_prompt"
+wait_for_process_exit "$worker_a_pid"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy worker A review prompt"
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_DEVELOPER_MAX_RUNS=1 \
+HIVEMIND_DEVELOPER_SLEEP_SECONDS=0 \
+HIVEMIND_DEVELOPER_REVIEW_PROMPT="Legacy developer review prompt" \
+bash "$repo_root/.agents/developer-loop.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+developer_pid="$!"
+
+wait_for_file "$capture_root/worker.review_prompt"
+wait_for_process_exit "$developer_pid"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy developer review prompt"
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_WORKER_B_MAX_RUNS=1 \
+HIVEMIND_WORKER_B_SLEEP_SECONDS=0 \
+HIVEMIND_WORKER_B_REVIEW_PROMPT="Legacy worker B review prompt" \
+bash "$repo_root/.agents/worker-loop-b.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+worker_b_pid="$!"
+
+wait_for_file "$capture_root/worker.review_prompt"
+assert_file_contains "$capture_root/worker.review_prompt" "Legacy worker B review prompt"
+wait_for_process_exit "$worker_b_pid"
+
+rm -f "$capture_root/scout.exec" "$capture_root/scout.prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_BROWSER_USER_MAX_RUNS=1 \
+HIVEMIND_BROWSER_USER_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/browser-user-loop.sh" "$worktree_root/scout" >/dev/null 2>&1 &
+browser_user_pid="$!"
+
+wait_for_file "$capture_root/scout.exec"
+wait_for_process_exit "$browser_user_pid"
+
+rm -f "$capture_root/beekeeper.exec" "$capture_root/beekeeper.prompt"
+
+PATH="$bin_root:$PATH" \
+CODEX_SANDBOX="" \
+HOME="$home_root" \
+HIVEMIND_SWARM_CAPTURE_DIR="$capture_root" \
+HIVEMIND_SWARM_RUNTIME_ROOT="$runtime_root" \
+HIVEMIND_SWARM_WORKTREE_ROOT="$worktree_root" \
+HIVEMIND_PR_SHEPHERD_MAX_RUNS=1 \
+HIVEMIND_PR_SHEPHERD_SLEEP_SECONDS=0 \
+bash "$repo_root/.agents/pr-shepherd.sh" "$worktree_root/beekeeper" >/dev/null 2>&1 &
+pr_shepherd_pid="$!"
+
+wait_for_file "$capture_root/beekeeper.exec"
+wait_for_process_exit "$pr_shepherd_pid"
 
 PATH="$bin_root:$PATH" \
 CODEX_SANDBOX="" \
@@ -372,11 +495,11 @@ HIVEMIND_SWARM_WORKTREE_ROOT="$case_root/worktrees-supervisor" \
 HIVEMIND_SWARM_SUPERVISOR_SLEEP_SECONDS=1 \
 HIVEMIND_WORKER_MAX_RUNS=1 \
 HIVEMIND_WORKER_SLEEP_SECONDS=0 \
-bash "$repo_root/.agents/swarm.sh" run --workers 2 worker-1 >/dev/null 2>&1 &
+bash "$repo_root/.agents/swarm.sh" run worker-1 >/dev/null 2>&1 &
 supervisor_pid="$!"
 
-wait_for_line_count "$capture_root/worker-1.exec" 2
-wait_for_line_count "$capture_root/worker-1.review" 2
+wait_for_line_count "$capture_root/worker.exec" 2
+wait_for_line_count "$capture_root/worker.review" 2
 
 kill "$supervisor_pid" >/dev/null 2>&1 || true
 wait "$supervisor_pid" >/dev/null 2>&1 || true
@@ -386,14 +509,12 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     PATH="$bin_root:$PATH" \
     CODEX_SANDBOX="" \
     HOME="$home_root" \
-    bash "$repo_root/.agents/swarm-launchd.sh" print-plist --workers 3 --scouts 1 worker-1 pr-shepherd-1
+    bash "$repo_root/.agents/swarm-launchd.sh" print-plist worker beekeeper
   )"
 
   assert_text_includes "$plist_output" "<string>run</string>"
-  assert_text_includes "$plist_output" "<string>--workers</string>"
-  assert_text_includes "$plist_output" "<string>3</string>"
-  assert_text_includes "$plist_output" "<string>worker-1</string>"
-  assert_text_includes "$plist_output" "<string>pr-shepherd-1</string>"
+  assert_text_includes "$plist_output" "<string>worker</string>"
+  assert_text_includes "$plist_output" "<string>beekeeper</string>"
   assert_text_includes "$plist_output" "<key>KeepAlive</key>"
   assert_text_includes "$plist_output" "<key>RunAtLoad</key>"
 

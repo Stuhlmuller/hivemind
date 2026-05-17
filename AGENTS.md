@@ -71,7 +71,7 @@ self-hosted, agentic, security-focused, and new; reject generic SaaS styling,
 marketing heroes, decorative bee filler, and amber/beige theme wash.
 Browser rule: reserve the Codex browser tool for the main-branch scout lane
 that tests shipped behavior and files concrete new issues. Do not use it for
-feature-request drafting, frontend iteration, PR shepherd work, or general
+feature-request drafting, frontend iteration, beekeeper work, or general
 development. Use the project-local `hivemind-browser-scope` skill before
 changing browser-verification guidance in repo prompts or skills.
 
@@ -104,17 +104,19 @@ setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
 
 Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
-changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
+changing `.agents/swarm.sh`, `.agents/swarm-roles.sh`,
+`.agents/agent-loop.sh`, `.agents/loop-common.sh`,
 `.agents/role-loop.sh`, `.agents/scout-loop.sh`,
-`.agents/browser-user-loop.sh`, `.agents/reviewer-loop.sh`,
-`.agents/worker-loop.sh`, `.agents/worker-loop-a.sh`,
-`.agents/worker-loop-b.sh`, `.agents/feature-requester-loop.sh`,
+`.agents/reviewer-loop.sh`, `.agents/worker-loop.sh`,
+`.agents/feature-requester-loop.sh`, `.agents/beekeeper-loop.sh`,
+`.agents/browser-user-loop.sh`, `.agents/developer-loop.sh`,
+`.agents/worker-loop-a.sh`, `.agents/worker-loop-b.sh`,
 `.agents/pr-shepherd.sh`, `.agents/swarm-launchd.sh`, or the `PROMPT-*.md`
-loop prompts. The GitHub swarm is the supported automation suite: keep
-dedicated worktrees per role, support configurable role-count flags, default
-to 3 reviewer lanes, 10 worker lanes, 3 feature-requester lanes, 1 scout
-lane, and 1 PR shepherd lane, split worker issue ownership deterministically
-across the configured worker count, use bounded subagents within each loop
-when useful, support an endless supervisor mode for laptop-open development,
-reserve PR merging and cross-branch CI cleanup for the PR shepherd loop, and
-do not casually reintroduce the retired single-loop wrapper.
+loop prompts. The GitHub swarm must keep dedicated worktrees per role, use
+canonical top-level agents (`reviewer`, `feature-requester`, `worker`,
+`scout`, and `beekeeper`) instead of numbered lane fleets, allow those
+top-level roles to fan out bounded subagents whenever useful, support an
+endless supervisor mode for laptop-open development, and reserve PR merging
+and cross-branch CI cleanup for the beekeeper loop. Legacy names such as
+`browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should
+remain lightweight compatibility aliases instead of reintroducing lane logic.

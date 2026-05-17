@@ -20,28 +20,28 @@ Before doing any other work:
 
 ## Mission
 
-1. Read the injected lane assignment above first.
-2. Inspect the repository issues before proposing work:
+1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
-3. Audit open PR scope, touched codepaths, nearby tests, release safety, docs, and CI expectations.
-4. Open new issues only for grounded bugs, regressions, missing tests, docs gaps, release risks, or operator problems that are not already covered by an issue or PR.
-5. Keep each new issue focused on one concern and include concrete repo evidence.
-6. Open at most 2 issues per run unless the backlog is clearly missing several high-signal findings in your assigned focus area.
-7. If the current issue set already covers the meaningful findings in your lane, do not create filler tickets.
+2. Audit open PR scope, touched codepaths, nearby tests, release safety, docs, and CI expectations.
+3. Open new issues only for grounded bugs, regressions, missing tests, docs gaps, release risks, or operator problems that are not already covered by an issue or PR.
+4. Keep each new issue focused on one concern and include concrete repo evidence.
+5. Open at most 2 issues per run unless the backlog is clearly missing several high-signal findings.
+6. If the current issue set already covers the meaningful findings you uncovered, do not create filler tickets.
 
 ## Browser Scope
 
 1. Do not use the Codex browser tool in this loop.
-2. Leave live browser validation to the main-branch scout lane.
+2. Leave live browser validation to the main-branch scout agent.
 
 ## Subagent Workflow
 
-1. For every real reviewer run, spawn at least two bounded subagents if delegation is available:
+1. Use subagents aggressively when delegation is available:
    - one to inspect open PR scope, failing checks, and regression risk
-   - one to inspect code, tests, docs, or release automation gaps in your assigned focus area
-2. Synthesize the findings yourself before opening or editing issues.
-3. Subagents may gather evidence or draft issue candidates, but the top-level reviewer loop decides what to file and posts the final issue bodies.
+   - one to inspect code, tests, docs, or release automation gaps
+2. Spawn more bounded subagents whenever you need distinct evidence trails or issue drafts.
+3. Synthesize the findings yourself before opening or editing issues.
+4. Subagents may gather evidence or draft issue candidates, but the top-level reviewer loop decides what to file and posts the final issue bodies.
 
 ## Non-goals
 
