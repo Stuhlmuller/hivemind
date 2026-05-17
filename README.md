@@ -182,8 +182,9 @@ curl -sS -b cookies.txt -H "content-type: application/json" \
   http://localhost:8000/declarative-config/import
 ```
 
-The config contains agents, credential policies, and schedules with nested task
-templates. Credential entries include secret references such as
+The config contains agents, credential policies with explicit approval-gated
+action lists, and schedules with nested task templates. Credential entries
+include secret references such as
 `env://HIVEMIND_REPO_READER_TOKEN`, not raw tokens or encrypted OAuth payloads.
 Dry-run import validates references, TTLs, interval bounds, schedule task
 templates, and credential policy compatibility without writing to SQLite. Apply

@@ -2082,9 +2082,15 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
             "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
             "allowed_agents": [agent["id"]],
             "allowed_actions": ["read_repo", "open_issue"],
+            "approval_required_actions": ["open_issue"],
             "max_ttl_seconds": 180,
             "require_intent": True,
-            "metadata": {"credential_kind": "generic_reference", "purpose": "config round trip"},
+            "metadata": {
+                "credential_kind": "generic_reference",
+                "purpose": "config round trip",
+                "nested": {"client_secret": "not-exported-marker", "safe_note": "retained"},
+                "history": [{"private_key": "not-exported-marker", "label": "kept"}],
+            },
         },
     )
     require_equal(credential_response.status_code, 201, "credential import fixture should be created")
@@ -2122,13 +2128,28 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
         "export should keep secret refs as references",
     )
     require_true("secret_ref_preview" not in exported_credential, "declarative export should not use public previews")
+    require_equal(
+        exported_credential["metadata"]["nested"],
+        {"safe_note": "retained"},
+        "declarative export should recursively remove secret-like metadata keys",
+    )
+    require_equal(
+        exported_credential["metadata"]["history"],
+        [{"label": "kept"}],
+        "declarative export should scrub secret-like metadata inside lists",
+    )
+    require_equal(
+        exported_credential["policy"]["approval_required_actions"],
+        ["open_issue"],
+        "exported credential policy should preserve approval gates",
+    )
     require_true("task_template" in exported_schedule, "schedule export should include nested task template config")
     require_equal(
         exported_schedule["task_template"]["assigned_agent_id"],
         agent["id"],
         "task template should preserve agent reference",
     )
-    require_true("raw-token-value" not in export_response.text, "export should not include raw token material")
+    require_true("not-exported-marker" not in export_response.text, "export should not include sensitive metadata")
 
     target = client_for(tmp_path / "target")
     setup(target)
@@ -2167,6 +2188,11 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
         [agent["id"]],
         "imported credential policy should preserve allowed agents",
     )
+    require_equal(
+        imported_credential["policy"]["approval_required_actions"],
+        ["open_issue"],
+        "imported credential policy should preserve approval gates",
+    )
     require_equal(imported_schedule["task_title"], "Validate imported config", "imported schedule should keep task title")
     require_equal(imported_schedule["assigned_agent_id"], agent["id"], "imported schedule should keep agent reference")
     require_equal(audit_events[0]["type"], "config.imported", "applied import should create an audit event")
@@ -2204,6 +2230,7 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
                 "policy": {
                     "allowed_agents": [agent["id"]],
                     "allowed_actions": ["read_repo"],
+                    "approval_required_actions": [],
                     "max_ttl_seconds": 60,
                     "require_intent": True,
                 },
@@ -2302,6 +2329,56 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
         policy_response.json()["detail"],
         "schedules[0].task_template.action is outside credential policy: delete_repo",
         "schedule policy validation should reject actions outside the credential policy",
+    )
+
+    missing_approval_gate = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+                "policy": {
+                    "allowed_agents": [agent["id"]],
+                    "allowed_actions": ["read_repo"],
+                    "max_ttl_seconds": 60,
+                    "require_intent": True,
+                },
+            }
+        ],
+    }
+    missing_approval_response = client.post(
+        "/declarative-config/validate",
+        json={"config": missing_approval_gate},
+    )
+    require_equal(missing_approval_response.status_code, 400, "approval gate field should be explicit")
+    require_equal(
+        missing_approval_response.json()["detail"],
+        "credentials[0].policy.approval_required_actions must be a list",
+        "declarative credential policy should require explicit approval gate config",
+    )
+
+    bad_approval_gate = {
+        **bad_secret_ref,
+        "credentials": [
+            {
+                **bad_secret_ref["credentials"][0],
+                "secret_ref": "env://HIVEMIND_CONFIG_GITHUB_TOKEN",
+                "policy": {
+                    **bad_secret_ref["credentials"][0]["policy"],
+                    "approval_required_actions": ["delete_repo"],
+                },
+            }
+        ],
+    }
+    approval_response = client.post(
+        "/declarative-config/validate",
+        json={"config": bad_approval_gate},
+    )
+    require_equal(approval_response.status_code, 400, "approval gate outside allowed actions should fail")
+    require_equal(
+        approval_response.json()["detail"],
+        "credentials[0].policy.approval_required_actions is outside allowed_actions: delete_repo",
+        "approval gate validation should reject actions outside the credential policy",
     )
 
 

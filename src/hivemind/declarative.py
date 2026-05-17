@@ -55,7 +55,7 @@ def export_declarative_config(store: HivemindStore) -> dict[str, Any]:
             for row in conn.execute(
                 """
                 SELECT id, name, provider, secret_ref, allowed_agents, allowed_actions,
-                       max_ttl_seconds, require_intent, metadata
+                       approval_required_actions, max_ttl_seconds, require_intent, metadata
                 FROM credentials
                 ORDER BY id
                 """
@@ -146,6 +146,7 @@ def _credential_config(row: sqlite3.Row) -> dict[str, Any]:
         "policy": {
             "allowed_agents": loads(row["allowed_agents"], []),
             "allowed_actions": loads(row["allowed_actions"], []),
+            "approval_required_actions": loads(row["approval_required_actions"], []),
             "max_ttl_seconds": row["max_ttl_seconds"],
             "require_intent": bool(row["require_intent"]),
         },
@@ -239,7 +240,13 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
         policy = _mapping(credential.get("policy"), f"{prefix}.policy")
         _reject_unknown_keys(
             policy,
-            {"allowed_agents", "allowed_actions", "max_ttl_seconds", "require_intent"},
+            {
+                "allowed_agents",
+                "allowed_actions",
+                "approval_required_actions",
+                "max_ttl_seconds",
+                "require_intent",
+            },
             f"{prefix}.policy",
         )
         metadata = _metadata(credential.get("metadata", {}), f"{prefix}.metadata")
@@ -251,6 +258,10 @@ def _normalize_credentials(items: Sequence[Any]) -> list[dict[str, Any]]:
                 "secret_ref": secret_ref,
                 "allowed_agents": _string_list(policy.get("allowed_agents", []), f"{prefix}.policy.allowed_agents"),
                 "allowed_actions": _string_list(policy.get("allowed_actions", []), f"{prefix}.policy.allowed_actions"),
+                "approval_required_actions": _string_list(
+                    policy.get("approval_required_actions"),
+                    f"{prefix}.policy.approval_required_actions",
+                ),
                 "max_ttl_seconds": _int(policy.get("max_ttl_seconds", 300), f"{prefix}.policy.max_ttl_seconds", 1, 3600),
                 "require_intent": _bool(policy.get("require_intent", True), f"{prefix}.policy.require_intent"),
                 "metadata": metadata,
@@ -336,6 +347,11 @@ def _validate_credential_references(
                 )
         if not credential["allowed_actions"]:
             raise DeclarativeConfigError(f"credentials[{index}].policy.allowed_actions must not be empty")
+        for action in credential["approval_required_actions"]:
+            if action not in credential["allowed_actions"]:
+                raise DeclarativeConfigError(
+                    f"credentials[{index}].policy.approval_required_actions is outside allowed_actions: {action}"
+                )
 
 
 def _validate_schedule_references(
@@ -441,7 +457,8 @@ def _upsert_credential(conn: sqlite3.Connection, store: HivemindStore, credentia
             """
             UPDATE credentials
             SET name = ?, provider = ?, secret_ref = ?, allowed_agents = ?, allowed_actions = ?,
-                max_ttl_seconds = ?, require_intent = ?, metadata = ?, updated_at = ?
+                approval_required_actions = ?, max_ttl_seconds = ?, require_intent = ?,
+                metadata = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -450,6 +467,7 @@ def _upsert_credential(conn: sqlite3.Connection, store: HivemindStore, credentia
                 row["secret_ref"],
                 row["allowed_agents"],
                 row["allowed_actions"],
+                row["approval_required_actions"],
                 row["max_ttl_seconds"],
                 row["require_intent"],
                 row["metadata"],
@@ -461,10 +479,12 @@ def _upsert_credential(conn: sqlite3.Connection, store: HivemindStore, credentia
     conn.execute(
         """
         INSERT INTO credentials
-        (id, name, provider, secret_ref, allowed_agents, allowed_actions, max_ttl_seconds,
-         require_intent, metadata, created_at, updated_at)
+        (id, name, provider, secret_ref, allowed_agents, allowed_actions,
+         approval_required_actions, max_ttl_seconds, require_intent, metadata,
+         created_at, updated_at)
         VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions,
-                :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
+                :approval_required_actions, :max_ttl_seconds, :require_intent,
+                :metadata, :created_at, :updated_at)
         """,
         row,
     )
@@ -583,9 +603,8 @@ def _reject_unknown_keys(values: Mapping[str, Any], allowed: set[str], name: str
 def _reject_secret_metadata_keys(value: Any, name: str) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
-            key_name = str(key).lower()
             child_name = f"{name}.{key}"
-            if key_name in FORBIDDEN_METADATA_KEYS or "secret" in key_name or "password" in key_name:
+            if _is_forbidden_metadata_key(key):
                 raise DeclarativeConfigError(f"{child_name} cannot contain secret material")
             _reject_secret_metadata_keys(child, child_name)
         return
@@ -597,11 +616,23 @@ def _reject_secret_metadata_keys(value: Any, name: str) -> None:
 def _export_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in metadata.items():
-        key_name = str(key).lower()
-        if key_name in FORBIDDEN_METADATA_KEYS or "secret" in key_name or "password" in key_name:
+        if _is_forbidden_metadata_key(key):
             continue
-        safe[key] = value
+        safe[key] = _export_metadata_value(value)
     return safe
+
+
+def _export_metadata_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _export_metadata(value)
+    if isinstance(value, list):
+        return [_export_metadata_value(item) for item in value]
+    return value
+
+
+def _is_forbidden_metadata_key(key: object) -> bool:
+    key_name = str(key).lower()
+    return key_name in FORBIDDEN_METADATA_KEYS or "secret" in key_name or "password" in key_name
 
 
 def _existing_ids(conn: sqlite3.Connection, table: str) -> set[str]:

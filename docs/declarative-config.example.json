@@ -19,6 +19,7 @@
       "policy": {
         "allowed_agents": ["agent_config_runner"],
         "allowed_actions": ["read_repo"],
+        "approval_required_actions": [],
         "max_ttl_seconds": 180,
         "require_intent": true
       },
