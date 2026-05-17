@@ -1,5 +1,6 @@
 const state = {
   setupComplete: false,
+  authMode: null,
   me: null,
   config: null,
   agents: [],
@@ -119,7 +120,13 @@ const credentialKindLabels = {
   generic_reference: "Generic Ref",
 };
 
+const ROUTES = {
+  overview: "/",
+  credentials: "/control/credentials",
+};
+
 const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -171,8 +178,9 @@ function credentialKindLabel(kind) {
 }
 
 function credentialAgentScope(credential) {
-  const count = credential.policy.allowed_agents.length;
-  return count ? `${count} agent${count === 1 ? "" : "s"}` : "deny by default";
+  return credential.policy.allowed_agents.length
+    ? credential.policy.allowed_agents.map((agentId) => agentName(agentId)).join(", ")
+    : "none";
 }
 
 function credentialDetailRows(credential) {
@@ -194,7 +202,7 @@ function credentialDetailRows(credential) {
   }
   rows.push(`Allowed agents: ${escapeHtml(credentialAgentScope(credential))}`);
   rows.push(`Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s`);
-  rows.push(`Intent: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`);
+  rows.push(`Intent review: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`);
   return rows.join("<br>");
 }
 
@@ -232,16 +240,6 @@ function applyCredentialTemplate(reset = false) {
   form.elements.require_intent.checked = template.defaults.requireIntent;
 }
 
-function openCredentialModal() {
-  applyCredentialTemplate(true);
-  renderSelectors();
-  $("#credential-modal").hidden = false;
-}
-
-function closeCredentialModal() {
-  $("#credential-modal").hidden = true;
-}
-
 function item(title, meta, pills = [], actions = "") {
   const pillMarkup = pills.length
     ? `<div class="pill-row">${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}</div>`
@@ -254,15 +252,59 @@ function optionList(items, labelKey = "name", includeEmpty = false) {
   return empty + items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item[labelKey])}</option>`).join("");
 }
 
+function currentPage() {
+  return window.location.pathname.startsWith(ROUTES.credentials) ? "credentials" : "overview";
+}
+
+function credentialName(credentialId) {
+  const credential = state.credentials.find((item) => item.id === credentialId);
+  return credential ? credential.name : credentialId;
+}
+
+function agentName(agentId) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  return agent ? agent.name : agentId;
+}
+
+function renderNavigation() {
+  const page = currentPage();
+  $("#overview-page").hidden = page !== "overview";
+  $("#credentials-page").hidden = page !== "credentials";
+  $("#surface-line").textContent =
+    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules";
+  for (const link of $$("[data-page-link]")) {
+    const active = link.dataset.pageLink === page;
+    link.classList.toggle("active", active);
+    if (active) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  }
+}
+
 function renderAuth() {
+  const authMode = state.setupComplete ? "login" : "setup";
+  const authForm = $("#auth-form");
+  const usernameInput = authForm.elements.username;
+  const passwordInput = authForm.elements.password;
+
+  if (state.authMode !== authMode) {
+    authForm.reset();
+    state.authMode = authMode;
+  }
+
   $("#auth-view").hidden = Boolean(state.me);
   $("#app-view").hidden = !state.me;
   $("#logout-button").hidden = !state.me;
   $("#refresh-button").hidden = !state.me;
-  if (!state.me) closeCredentialModal();
+  usernameInput.placeholder = state.setupComplete ? "username" : "local-admin";
+  passwordInput.placeholder = state.setupComplete ? "password" : "create admin password";
+  passwordInput.autocomplete = state.setupComplete ? "current-password" : "new-password";
   $("#auth-title").textContent = state.setupComplete ? "Log in" : "Set up admin";
   $("#auth-mode").textContent = state.setupComplete ? "Use your local Hivemind account." : "First local user becomes admin.";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
+  renderNavigation();
 }
 
 function renderSelectors() {
@@ -305,6 +347,7 @@ function renderCredentials() {
         credentialDetailRows(credential),
         [
           credentialKindLabel(credential.metadata?.credential_kind),
+          credential.provider,
           `TTL ${credential.policy.max_ttl_seconds}s`,
           credential.policy.require_intent ? "intent required" : "intent optional",
           ...credential.policy.allowed_actions,
@@ -312,6 +355,7 @@ function renderCredentials() {
       ),
     )
     .join("") || '<p class="meta">No credentials yet.</p>';
+  $("#credential-page-count").textContent = state.credentials.length;
 }
 
 function renderLeases() {
@@ -320,11 +364,13 @@ function renderLeases() {
     .map((lease) =>
       item(
         lease.id,
-        `Agent: ${escapeHtml(lease.agent_id)}<br>Credential: ${escapeHtml(lease.credential_id)}<br>Action: ${escapeHtml(lease.action)}<br>Expires: ${escapeHtml(lease.expires_at)}`,
-        [lease.status, lease.token_preview],
+        `Agent: ${escapeHtml(agentName(lease.agent_id))}<br>Credential: ${escapeHtml(credentialName(lease.credential_id))}<br>Issued: ${escapeHtml(lease.issued_at)}<br>Expires: ${escapeHtml(lease.expires_at)}`,
+        [lease.status, lease.action, lease.token_preview],
       ),
     )
     .join("") || '<p class="meta">No leases yet.</p>';
+  $("#credential-active-lease-count").textContent = state.leases.filter((lease) => lease.status === "active").length;
+  $("#credential-expired-lease-count").textContent = state.leases.filter((lease) => lease.status === "expired").length;
 }
 
 function renderTasks() {
@@ -370,6 +416,18 @@ function renderAudit() {
     .join("") || '<p class="meta">No broker activity yet.</p>';
 }
 
+function renderCredentialAudit() {
+  const events = state.auditEvents.filter((event) => event.type.startsWith("credential."));
+  $("#credential-denied-count").textContent = events.filter((event) => event.decision === "denied").length;
+  $("#credential-audit-list").innerHTML = events
+    .map((event) => {
+      const action = event.metadata?.action ? `<br>Action: ${escapeHtml(event.metadata.action)}` : "";
+      const ttl = Number.isFinite(event.metadata?.ttl_seconds) ? `<br>TTL: ${escapeHtml(event.metadata.ttl_seconds)}s` : "";
+      return `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${action}${ttl}<br>${escapeHtml(event.created_at)}</div></article>`;
+    })
+    .join("") || '<p class="meta">No credential audit events yet.</p>';
+}
+
 function renderConfig() {
   const reviewer = state.config?.intent_reviewer;
   $("#reviewer-config").textContent = reviewer ? `${reviewer.provider} / ${reviewer.model}` : "No reviewer configured";
@@ -386,6 +444,7 @@ function render() {
   renderTasks();
   renderSchedules();
   renderAudit();
+  renderCredentialAudit();
 }
 
 async function loadSetupState() {
@@ -418,10 +477,12 @@ async function refresh() {
 
 $("#auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
+  const form = event.currentTarget;
+  const payload = readForm(form);
   const path = state.setupComplete ? "/auth/login" : "/auth/setup";
   try {
     await api(path, { method: "POST", body: JSON.stringify(payload) });
+    form.reset();
     await refresh();
     toast(state.setupComplete ? "Signed in." : "Admin created.");
   } catch (error) {
@@ -441,22 +502,6 @@ $("#refresh-button").addEventListener("click", async () => {
   toast("Runtime refreshed.");
 });
 
-$("#open-credential-modal").addEventListener("click", () => {
-  openCredentialModal();
-});
-
-$("#close-credential-modal").addEventListener("click", () => {
-  closeCredentialModal();
-});
-
-$("#credential-modal").addEventListener("click", (event) => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) return;
-  if ("closeCredentialModal" in target.dataset) {
-    closeCredentialModal();
-  }
-});
-
 $("#credential-template-picker").addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -468,10 +513,29 @@ $("#credential-template-picker").addEventListener("click", (event) => {
   renderSelectors();
 });
 
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#credential-modal").hidden) {
-    closeCredentialModal();
-  }
+for (const link of $$("[data-page-link]")) {
+  link.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const path = link.getAttribute("href");
+    if (path && path !== window.location.pathname) {
+      window.history.pushState({}, "", path);
+    }
+    renderNavigation();
+  });
+}
+
+window.addEventListener("popstate", () => {
+  renderNavigation();
 });
 
 $("#spawn-form").addEventListener("submit", async (event) => {
@@ -497,8 +561,8 @@ $("#credential-form").addEventListener("submit", async (event) => {
   payload.metadata = templatePayload.metadata;
   try {
     await api("/credentials", { method: "POST", body: JSON.stringify(payload) });
-    closeCredentialModal();
     applyCredentialTemplate(true);
+    renderSelectors();
     await refresh();
     toast("Credential policy created.");
   } catch (error) {
@@ -586,4 +650,5 @@ $("#run-due-button").addEventListener("click", async () => {
 });
 
 applyCredentialTemplate(true);
+renderNavigation();
 refresh().catch((error) => toast(error.message));

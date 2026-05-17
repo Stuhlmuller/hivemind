@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from hivemind.api import create_app
 from hivemind.store import HivemindStore, hash_password
 
-
 TEST_PASSWORD = "operator-not-secret"
 
 
@@ -33,6 +32,31 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
+    for required in ['name="username"', 'name="password"', 'autocomplete="new-password"']:
+        if required not in response.text:
+            raise AssertionError(f"missing expected auth form markup: {required}")
+    username_input_start = response.text.index('name="username"')
+    username_input_end = response.text.index("/>", username_input_start)
+    password_input_start = response.text.index('name="password"')
+    password_input_end = response.text.index("/>", password_input_start)
+    username_markup = response.text[username_input_start:username_input_end]
+    password_markup = response.text[password_input_start:password_input_end]
+    if 'value="' in username_markup:
+        raise AssertionError("username input should not ship with a preset value")
+    if 'value="' in password_markup:
+        raise AssertionError("password input should not ship with a preset value")
+
+
+def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/control/credentials")
+
+    assert response.status_code == 200
+    assert 'data-page-link="credentials"' in response.text
+    assert "credential broker" in response.text
+    assert 'id="credential-template-picker"' in response.text
+    assert 'id="credential-template-fields"' in response.text
 
 
 def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
@@ -114,6 +138,24 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert credential["policy"]["allowed_agents"] == [agent["id"]]
     assert credential["secret_ref_preview"].startswith("file://")
     assert "github-app.pem" not in response.text
+
+
+def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Bad Credential",
+            "provider": "github",
+            "secret_ref": "ghp_raw_secret_value",
+            "allowed_actions": ["read_repo"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:

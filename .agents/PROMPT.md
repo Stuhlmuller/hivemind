@@ -65,6 +65,18 @@ Before doing any other work:
 8. Do not mark an issue completed until its associated PR is merged.
 9. If the PR is abandoned, closed, or canceled, update the issue state accordingly instead of marking it completed.
 
+## Recovery workflow
+
+1. If Ralph includes a `Ralph Recovery Instruction` section in this prompt, treat it as the highest-priority blocker.
+2. Fix that blocker first.
+3. After the fix, restart the normal Ralph workflow from the top in the same run:
+   - verify the repo and tool state you need
+   - inspect repository issues again if needed
+   - continue inside exactly one dedicated `issue-<number>-<slug>` worktree and branch
+   - resume the PR flow for that single issue
+4. Do not stop after only diagnosing the problem or making a partial fix. Return to normal issue-driven work once the blocker is cleared.
+5. Recovery instructions do not weaken Ralph's hard blockers around GitHub CLI availability or issue-branch enforcement.
+
 ## Quality bar
 
 - Be critical, not cosmetic.

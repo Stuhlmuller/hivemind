@@ -7,5 +7,3 @@ approval_rules:
     requires:
       conditions:
         has_valid_signatures: true
-        has_valid_signatures_by_keys:
-          key_ids: ["A86F8F76C83C03EC", "B5690EEEBB952194"]

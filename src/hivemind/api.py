@@ -109,6 +109,9 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     app.state.store = db
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    def serve_frontend() -> FileResponse:
+        return FileResponse(static_dir.joinpath("index.html"))
+
     def require_user(session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> SessionUser:
         user = db.get_session_user(session)
         if user is None:
@@ -150,7 +153,12 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.get("/", include_in_schema=False)
     def frontend() -> FileResponse:
-        return FileResponse(static_dir.joinpath("index.html"))
+        return serve_frontend()
+
+    @app.get("/control", include_in_schema=False)
+    @app.get("/control/{path:path}", include_in_schema=False)
+    def frontend_control(path: str = "") -> FileResponse:
+        return serve_frontend()
 
     @app.get("/health")
     def health() -> dict[str, str]:

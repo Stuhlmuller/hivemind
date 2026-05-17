@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
-from hivemind.secret_refs import preview_secret_ref
+from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
 
 def utcnow() -> datetime:
@@ -392,6 +392,20 @@ class HivemindStore:
         with self.connect() as conn:
             return [self.public_credential(row) for row in conn.execute("SELECT * FROM credentials ORDER BY created_at DESC")]
 
+    def require_guided_credential_fields(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        metadata: dict[str, Any],
+        fields: tuple[str, ...],
+    ) -> None:
+        if provider != "github":
+            raise StoreError(f"{kind} credentials must use provider github")
+        for field in fields:
+            if not metadata.get(field):
+                raise StoreError(f"{kind} metadata requires {field}")
+
     def normalize_credential_metadata(self, provider: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
         normalized: dict[str, Any] = {}
         for key, value in (metadata or {}).items():
@@ -410,17 +424,19 @@ class HivemindStore:
         if kind not in {"generic_reference", "github_oauth_app", "github_app"}:
             raise StoreError(f"unsupported credential_kind: {kind}")
         if kind == "github_oauth_app":
-            if provider != "github":
-                raise StoreError("github_oauth_app credentials must use provider github")
-            if not normalized.get("client_id"):
-                raise StoreError("github_oauth_app metadata requires client_id")
-        if kind == "github_app":
-            if provider != "github":
-                raise StoreError("github_app credentials must use provider github")
-            if not normalized.get("app_id"):
-                raise StoreError("github_app metadata requires app_id")
-            if not normalized.get("installation_id"):
-                raise StoreError("github_app metadata requires installation_id")
+            self.require_guided_credential_fields(
+                kind=kind,
+                provider=provider,
+                metadata=normalized,
+                fields=("client_id",),
+            )
+        elif kind == "github_app":
+            self.require_guided_credential_fields(
+                kind=kind,
+                provider=provider,
+                metadata=normalized,
+                fields=("app_id", "installation_id"),
+            )
         return normalized
 
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -450,8 +466,10 @@ class HivemindStore:
             "created_at": now,
             "updated_at": now,
         }
-        if not row["secret_ref"].startswith(("env://", "file://", "vault://", "oauth://")):
-            raise StoreError("secret_ref must use env://, file://, vault://, or oauth://")
+        try:
+            row["secret_ref"] = validate_secret_ref(row["secret_ref"])
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
         with self.connect() as conn:
             conn.execute(
                 """

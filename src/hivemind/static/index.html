@@ -15,11 +15,17 @@
           <p>self-hosted agent control plane</p>
         </div>
       </div>
-      <nav aria-label="Primary">
-        <a href="/docs">openapi</a>
-        <button id="refresh-button" type="button">sync</button>
-        <button id="logout-button" type="button">logout</button>
-      </nav>
+      <div class="topbar-actions">
+        <nav class="page-nav" aria-label="Workspace">
+          <a href="/" data-page-link="overview">overview</a>
+          <a href="/control/credentials" data-page-link="credentials">credentials</a>
+        </nav>
+        <nav aria-label="Primary">
+          <a href="/docs">openapi</a>
+          <button id="refresh-button" type="button">sync</button>
+          <button id="logout-button" type="button">logout</button>
+        </nav>
+      </div>
     </header>
 
     <main>
@@ -43,11 +49,17 @@ agents: brokered capabilities</pre>
           </div>
           <label>
             username
-            <input name="username" value="admin" autocomplete="username" />
+            <input name="username" placeholder="local-admin" autocomplete="username" required />
           </label>
           <label>
             password
-            <input name="password" type="password" value="hivemind-password" autocomplete="current-password" />
+            <input
+              name="password"
+              type="password"
+              placeholder="create admin password"
+              autocomplete="new-password"
+              required
+            />
           </label>
           <button type="submit">continue</button>
         </form>
@@ -65,6 +77,10 @@ agents: brokered capabilities</pre>
               <code id="session-line">loading</code>
             </div>
             <div class="side-section">
+              <p>surface</p>
+              <code id="surface-line">runtime overview / agents, tasks, schedules</code>
+            </div>
+            <div class="side-section">
               <p>intent reviewer</p>
               <code id="reviewer-config">loading</code>
             </div>
@@ -75,177 +91,212 @@ agents: brokered capabilities</pre>
           </aside>
 
           <section class="console">
-            <section class="metrics" aria-label="Runtime summary">
-              <div><span id="agent-count">0</span><p>agents</p></div>
-              <div><span id="credential-count">0</span><p>credentials</p></div>
-              <div><span id="task-count">0</span><p>tasks</p></div>
-              <div><span id="schedule-count">0</span><p>schedules</p></div>
-              <div><span id="lease-count">0</span><p>leases</p></div>
-              <div><span id="audit-count">0</span><p>audit</p></div>
-            </section>
-
-            <section class="workspace">
-              <div class="panel">
-                <div class="panel-heading">
-                  <h2>agents</h2>
-                  <p>runtime registry</p>
+            <section id="overview-page" class="page">
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">overview</p>
+                  <h2>runtime surface</h2>
                 </div>
-                <form id="spawn-form" class="stack">
-                  <label>name<input name="name" value="forager" autocomplete="off" /></label>
-                  <label>role<textarea name="role" rows="3">Find the smallest useful context and report the next action.</textarea></label>
-                  <div class="two-col">
-                    <label>provider<input name="provider" value="local" autocomplete="off" /></label>
-                    <label>model<input name="model" value="deterministic-policy" autocomplete="off" /></label>
-                  </div>
-                  <label>system prompt<textarea name="system_prompt" rows="3">Communicate in concise, actionable updates.</textarea></label>
-                  <button type="submit">spawn</button>
-                </form>
-                <div id="agents-list" class="list" aria-live="polite"></div>
+                <p>agents, tasks, schedules, and the live audit stream stay in the main control surface.</p>
               </div>
 
-              <div class="panel">
+              <section class="metrics" aria-label="Runtime summary">
+                <div><span id="agent-count">0</span><p>agents</p></div>
+                <div><span id="credential-count">0</span><p>credentials</p></div>
+                <div><span id="task-count">0</span><p>tasks</p></div>
+                <div><span id="schedule-count">0</span><p>schedules</p></div>
+                <div><span id="lease-count">0</span><p>leases</p></div>
+                <div><span id="audit-count">0</span><p>audit</p></div>
+              </section>
+
+              <section class="workspace overview-workspace">
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>agents</h2>
+                    <p>runtime registry</p>
+                  </div>
+                  <form id="spawn-form" class="stack">
+                    <label>name<input name="name" value="forager" autocomplete="off" /></label>
+                    <label>role<textarea name="role" rows="3">Find the smallest useful context and report the next action.</textarea></label>
+                    <div class="two-col">
+                      <label>provider<input name="provider" value="local" autocomplete="off" /></label>
+                      <label>model<input name="model" value="deterministic-policy" autocomplete="off" /></label>
+                    </div>
+                    <label>system prompt<textarea name="system_prompt" rows="3">Communicate in concise, actionable updates.</textarea></label>
+                    <button type="submit">spawn</button>
+                  </form>
+                  <div id="agents-list" class="list" aria-live="polite"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>tasks</h2>
+                    <p>tickets with heartbeat</p>
+                  </div>
+                  <form id="task-form" class="stack">
+                    <label>title<input name="title" value="review credential policy" autocomplete="off" /></label>
+                    <label>description<textarea name="description" rows="3">Confirm denied paths and short lease behavior.</textarea></label>
+                    <div class="two-col">
+                      <label>agent<select name="assigned_agent_id"></select></label>
+                      <label>credential<select name="credential_id"></select></label>
+                    </div>
+                    <div class="two-col">
+                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="300" /></label>
+                    </div>
+                    <label>intent<textarea name="intent" rows="3">Use repo metadata to produce an actionable implementation note.</textarea></label>
+                    <button type="submit">create task</button>
+                  </form>
+                  <div id="tasks-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>schedules</h2>
+                    <p>local interval jobs</p>
+                  </div>
+                  <form id="schedule-form" class="stack">
+                    <label>name<input name="name" value="policy review cadence" autocomplete="off" /></label>
+                    <div class="two-col">
+                      <label>interval seconds<input name="interval_seconds" type="number" min="60" value="3600" /></label>
+                      <label>agent<select name="assigned_agent_id"></select></label>
+                    </div>
+                    <label>task title<input name="task_title" value="scheduled policy review" autocomplete="off" /></label>
+                    <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
+                    <div class="two-col">
+                      <label>credential<select name="credential_id"></select></label>
+                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                    </div>
+                    <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
+                    <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
+                    <button type="submit">create schedule</button>
+                  </form>
+                  <button id="run-due-button" type="button">run due</button>
+                  <div id="schedules-list" class="list"></div>
+                </div>
+              </section>
+
+              <section class="audit panel">
                 <div class="panel-heading">
-                  <div>
-                    <h2>credentials</h2>
+                  <h2>audit</h2>
+                  <p>append-only trace</p>
+                </div>
+                <div id="audit-list" class="timeline"></div>
+              </section>
+            </section>
+
+            <section id="credentials-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">credentials</p>
+                  <h2>credential broker</h2>
+                </div>
+                <p>policy creation, JIT lease issuance, brokered actions, and credential-only audit live on their own surface.</p>
+              </div>
+
+              <section class="metrics credential-metrics" aria-label="Credential summary">
+                <div><span id="credential-page-count">0</span><p>policies</p></div>
+                <div><span id="credential-active-lease-count">0</span><p>active leases</p></div>
+                <div><span id="credential-expired-lease-count">0</span><p>expired leases</p></div>
+                <div><span id="credential-denied-count">0</span><p>denied requests</p></div>
+              </section>
+
+              <section class="workspace credentials-workspace">
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>create policy</h2>
                     <p>guided refs + broker policy</p>
                   </div>
-                  <button id="open-credential-modal" type="button">new credential</button>
+                  <section class="callout">
+                    <p class="eyebrow">broker boundary</p>
+                    <p>Use provider-specific forms to capture IDs and host-side secret refs. Client secrets and private keys stay outside agents and outside the database payload.</p>
+                  </section>
+                  <form id="credential-form" class="stack">
+                    <section class="stack">
+                      <div>
+                        <p class="eyebrow">template</p>
+                        <div id="credential-template-picker" class="template-grid" role="tablist" aria-label="Credential template"></div>
+                      </div>
+                      <div id="credential-template-note" class="callout"></div>
+                      <div id="credential-template-fields" class="stack"></div>
+                    </section>
+                    <section class="stack policy-shell">
+                      <div>
+                        <p class="eyebrow">broker policy</p>
+                      </div>
+                      <label>name<input name="name" autocomplete="off" /></label>
+                      <label>allowed agents<select name="allowed_agents" multiple></select></label>
+                      <p class="field-hint">Leave the list empty to keep the credential deny-by-default until an agent is assigned.</p>
+                      <div class="two-col">
+                        <label>allowed actions<input name="allowed_actions" autocomplete="off" /></label>
+                        <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" /></label>
+                      </div>
+                      <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
+                    </section>
+                    <button type="submit">save credential</button>
+                  </form>
                 </div>
-                <section class="callout">
-                  <p class="eyebrow">broker boundary</p>
-                  <p>Use provider-specific forms to capture IDs and host-side secret refs. Client secrets and private keys stay outside agents and outside the database payload.</p>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>policy registry</h2>
+                    <p>scope and redaction</p>
+                  </div>
+                  <div id="credentials-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>issue jit lease</h2>
+                    <p>agent + action + ttl</p>
+                  </div>
+                  <form id="lease-form" class="stack">
+                    <label>agent<select name="agent_id"></select></label>
+                    <label>credential<select name="credential_id"></select></label>
+                    <div class="two-col">
+                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>ttl seconds<input name="ttl_seconds" type="number" min="1" value="60" /></label>
+                    </div>
+                    <label>intent<textarea name="intent" rows="4">Read repository metadata to triage the next safe implementation step.</textarea></label>
+                    <button type="submit">issue lease</button>
+                  </form>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>lease registry</h2>
+                    <p>active and expired</p>
+                  </div>
+                  <div id="leases-list" class="list"></div>
+                </div>
+
+                <div class="panel panel-span-2">
+                  <div class="panel-heading">
+                    <h2>broker action</h2>
+                    <p>lease token required</p>
+                  </div>
+                  <form id="action-form" class="stack">
+                    <label>lease token<input name="lease_token" placeholder="hvl_..." autocomplete="off" /></label>
+                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                    <label>payload<textarea name="payload" rows="5">{"repo":"hivemind"}</textarea></label>
+                    <button type="submit">execute</button>
+                  </form>
+                  <pre id="action-result" class="result">no action</pre>
+                </div>
+
+                <section class="panel panel-span-2">
+                  <div class="panel-heading">
+                    <h2>credential audit</h2>
+                    <p>leases, denials, actions</p>
+                  </div>
+                  <div id="credential-audit-list" class="timeline"></div>
                 </section>
-                <div id="credentials-list" class="list"></div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-heading">
-                  <h2>jit lease</h2>
-                  <p>agent + action + ttl</p>
-                </div>
-                <form id="lease-form" class="stack">
-                  <label>agent<select name="agent_id"></select></label>
-                  <label>credential<select name="credential_id"></select></label>
-                  <div class="two-col">
-                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
-                    <label>ttl seconds<input name="ttl_seconds" type="number" min="1" value="60" /></label>
-                  </div>
-                  <label>intent<textarea name="intent" rows="4">Read repository metadata to triage the next safe implementation step.</textarea></label>
-                  <button type="submit">issue lease</button>
-                </form>
-                <div id="leases-list" class="list"></div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-heading">
-                  <h2>broker action</h2>
-                  <p>lease token required</p>
-                </div>
-                <form id="action-form" class="stack">
-                  <label>lease token<input name="lease_token" placeholder="hvl_..." autocomplete="off" /></label>
-                  <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
-                  <label>payload<textarea name="payload" rows="5">{"repo":"hivemind"}</textarea></label>
-                  <button type="submit">execute</button>
-                </form>
-                <pre id="action-result" class="result">no action</pre>
-              </div>
-
-              <div class="panel">
-                <div class="panel-heading">
-                  <h2>tasks</h2>
-                  <p>tickets with heartbeat</p>
-                </div>
-                <form id="task-form" class="stack">
-                  <label>title<input name="title" value="review credential policy" autocomplete="off" /></label>
-                  <label>description<textarea name="description" rows="3">Confirm denied paths and short lease behavior.</textarea></label>
-                  <div class="two-col">
-                    <label>agent<select name="assigned_agent_id"></select></label>
-                    <label>credential<select name="credential_id"></select></label>
-                  </div>
-                  <div class="two-col">
-                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
-                    <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="300" /></label>
-                  </div>
-                  <label>intent<textarea name="intent" rows="3">Use repo metadata to produce an actionable implementation note.</textarea></label>
-                  <button type="submit">create task</button>
-                </form>
-                <div id="tasks-list" class="list"></div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-heading">
-                  <h2>schedules</h2>
-                  <p>local interval jobs</p>
-                </div>
-                <form id="schedule-form" class="stack">
-                  <label>name<input name="name" value="policy review cadence" autocomplete="off" /></label>
-                  <div class="two-col">
-                    <label>interval seconds<input name="interval_seconds" type="number" min="60" value="3600" /></label>
-                    <label>agent<select name="assigned_agent_id"></select></label>
-                  </div>
-                  <label>task title<input name="task_title" value="scheduled policy review" autocomplete="off" /></label>
-                  <label>task description<textarea name="task_description" rows="3">Check credential policies and audit events.</textarea></label>
-                  <div class="two-col">
-                    <label>credential<select name="credential_id"></select></label>
-                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
-                  </div>
-                  <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
-                  <label class="check"><input name="enabled" type="checkbox" checked /> enabled</label>
-                  <button type="submit">create schedule</button>
-                </form>
-                <button id="run-due-button" type="button">run due</button>
-                <div id="schedules-list" class="list"></div>
-              </div>
-            </section>
-
-            <section class="audit panel">
-              <div class="panel-heading">
-                <h2>audit</h2>
-                <p>append-only trace</p>
-              </div>
-              <div id="audit-list" class="timeline"></div>
+              </section>
             </section>
           </section>
         </section>
       </section>
     </main>
-
-    <div id="credential-modal" class="modal-shell" hidden>
-      <div class="modal-backdrop" data-close-credential-modal></div>
-      <section class="panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="credential-modal-title">
-        <div class="panel-heading">
-          <div>
-            <h2 id="credential-modal-title">add credential</h2>
-            <p>guided provider forms with refs only</p>
-          </div>
-          <button id="close-credential-modal" type="button">close</button>
-        </div>
-        <form id="credential-form" class="stack">
-          <section class="stack">
-            <div>
-              <p class="eyebrow">template</p>
-              <div id="credential-template-picker" class="template-grid" role="tablist" aria-label="Credential template"></div>
-            </div>
-            <div id="credential-template-note" class="callout"></div>
-            <div id="credential-template-fields" class="stack"></div>
-          </section>
-          <section class="stack policy-shell">
-            <div>
-              <p class="eyebrow">broker policy</p>
-            </div>
-            <label>name<input name="name" autocomplete="off" /></label>
-            <label>allowed agents<select name="allowed_agents" multiple></select></label>
-            <p class="field-hint">Leave the list empty to keep the credential deny-by-default until an agent is assigned.</p>
-            <div class="two-col">
-              <label>allowed actions<input name="allowed_actions" autocomplete="off" /></label>
-              <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" /></label>
-            </div>
-            <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
-          </section>
-          <button type="submit">save credential</button>
-        </form>
-      </section>
-    </div>
 
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/static/app.js" type="module"></script>
