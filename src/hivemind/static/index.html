@@ -227,6 +227,7 @@ agents: brokered capabilities</pre>
               <section class="metrics credential-metrics" aria-label="Credential summary">
                 <div><span id="credential-page-count">0</span><p>policies</p></div>
                 <div><span id="credential-active-lease-count">0</span><p>active leases</p></div>
+                <div><span id="credential-pending-lease-count">0</span><p>pending approvals</p></div>
                 <div><span id="credential-expired-lease-count">0</span><p>expired leases</p></div>
                 <div><span id="credential-denied-count">0</span><p>denied requests</p></div>
               </section>
@@ -253,6 +254,8 @@ agents: brokered capabilities</pre>
                         <label>allowed actions<input name="allowed_actions" value="delegate_code,review_code" autocomplete="off" /></label>
                         <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" value="900" /></label>
                       </div>
+                      <label>approval required actions<input name="approval_required_actions" value="review_code" autocomplete="off" /></label>
+                      <p class="field-hint">Use a narrower comma-separated list when an action must stop for operator approval before a token is issued.</p>
                       <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
                       <button id="codex-oauth-button" type="submit">connect via oauth</button>
                     </form>
@@ -289,6 +292,8 @@ agents: brokered capabilities</pre>
                         <label>allowed actions<input name="allowed_actions" autocomplete="off" /></label>
                         <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" /></label>
                       </div>
+                      <label>approval required actions<input name="approval_required_actions" autocomplete="off" /></label>
+                      <p class="field-hint">List only the actions that should enter the operator approval queue before Hivemind issues a lease token.</p>
                       <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
                     </section>
                     <button type="submit">save credential</button>
@@ -320,10 +325,18 @@ agents: brokered capabilities</pre>
                   </form>
                 </div>
 
-                <div class="panel">
+                <section class="panel panel-span-2">
+                  <div class="panel-heading">
+                    <h2>approval queue</h2>
+                    <p>pending lease decisions</p>
+                  </div>
+                  <div id="pending-approvals-list" class="list"></div>
+                </section>
+
+                <div class="panel panel-span-2">
                   <div class="panel-heading">
                     <h2>lease registry</h2>
-                    <p>active and expired</p>
+                    <p>pending, active, expired</p>
                   </div>
                   <div id="leases-list" class="list"></div>
                 </div>

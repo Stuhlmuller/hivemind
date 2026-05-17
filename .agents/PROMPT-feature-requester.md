@@ -20,29 +20,29 @@ Before doing any other work:
 
 ## Mission
 
-1. Read the injected lane assignment above first.
-2. Inspect the repository issues and open PRs before proposing new feature work:
+1. Inspect the repository issues and open PRs before proposing new feature work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
-3. Audit product gaps, self-hosted UX friction, workflow rough edges, onboarding gaps, developer experience pain, and release ergonomics in your assigned focus area.
-4. Open new issues only for concrete feature requests or capability gaps that are not already covered by an issue or PR.
-5. Keep each new issue focused on one capability and include repo evidence for why it belongs in the backlog now.
-6. Open at most 2 new issues per run unless your lane is uncovering several non-duplicate, high-signal requests.
-7. If the current backlog already covers the meaningful feature gaps in your lane, do not create filler tickets.
+2. Audit product gaps, self-hosted UX friction, workflow rough edges, onboarding gaps, developer experience pain, and release ergonomics.
+3. Open new issues only for concrete feature requests or capability gaps that are not already covered by an issue or PR.
+4. Keep each new issue focused on one capability and include repo evidence for why it belongs in the backlog now.
+5. Open at most 2 new issues per run unless you are uncovering several non-duplicate, high-signal requests.
+6. If the current backlog already covers the meaningful feature gaps you found, do not create filler tickets.
 
 ## Browser Scope
 
 1. Do not use the Codex browser tool in this loop.
-2. Leave live browser validation to the main-branch scout lane.
+2. Leave live browser validation to the main-branch scout agent.
 3. Do not use browser exploration as a substitute for repo-grounded product reasoning.
 
 ## Subagent Workflow
 
-1. For every real feature-requester run, spawn at least two bounded subagents if delegation is available:
+1. Use subagents aggressively when delegation is available:
    - one to inspect code, docs, and existing automation for product gaps
    - one to inspect backlog duplication, open PR overlap, and related workflow evidence
-2. Synthesize the findings yourself before opening or editing issues.
-3. Subagents may draft candidate issue bodies, but the top-level feature-requester loop decides what to file and posts the final issue bodies.
+2. Spawn more bounded subagents whenever you need distinct evidence trails or issue drafts.
+3. Synthesize the findings yourself before opening or editing issues.
+4. Subagents may draft candidate issue bodies, but the top-level feature-requester loop decides what to file and posts the final issue bodies.
 
 ## Non-goals
 

@@ -7,10 +7,11 @@ fi
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export HIVEMIND_LOOP_LABEL="${HIVEMIND_LOOP_LABEL:-scout}"
-export HIVEMIND_SCOUT_SLOT_INDEX="${HIVEMIND_SCOUT_SLOT_INDEX:-1}"
-export HIVEMIND_SCOUT_SLOT_COUNT="${HIVEMIND_SCOUT_SLOT_COUNT:-1}"
-export HIVEMIND_SCOUT_SLEEP_SECONDS="${HIVEMIND_SCOUT_SLEEP_SECONDS:-${HIVEMIND_BROWSER_USER_SLEEP_SECONDS:-1800}}"
-export HIVEMIND_SCOUT_MAX_RUNS="${HIVEMIND_SCOUT_MAX_RUNS:-${HIVEMIND_BROWSER_USER_MAX_RUNS:-0}}"
+run_root="${1:-}"
+if [[ -z "$run_root" ]]; then
+  echo "usage: $0 <run-root> [codex-exec-args...]" >&2
+  exit 1
+fi
+shift
 
-exec "$script_dir/browser-user-loop.sh" "$@"
+exec "$script_dir/agent-loop.sh" scout "$run_root" "$@"

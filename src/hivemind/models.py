@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from secrets import token_urlsafe
@@ -14,7 +14,9 @@ class AgentStatus(StrEnum):
 
 
 class LeaseStatus(StrEnum):
+    PENDING = "pending"
     ACTIVE = "active"
+    DENIED = "denied"
     EXPIRED = "expired"
     REVOKED = "revoked"
 
@@ -96,6 +98,7 @@ class Agent:
 class CredentialPolicy:
     allowed_agents: frozenset[str]
     allowed_actions: frozenset[str]
+    approval_required_actions: frozenset[str] = field(default_factory=frozenset)
     max_ttl_seconds: int = 300
     require_intent: bool = True
 
@@ -117,6 +120,7 @@ class CredentialRecord:
             "policy": {
                 "allowed_agents": sorted(self.policy.allowed_agents),
                 "allowed_actions": sorted(self.policy.allowed_actions),
+                "approval_required_actions": sorted(self.policy.approval_required_actions),
                 "max_ttl_seconds": self.policy.max_ttl_seconds,
                 "require_intent": self.policy.require_intent,
             },
@@ -140,6 +144,7 @@ class CredentialLease:
     intent: str
     issued_at: datetime
     expires_at: datetime
+    ttl_seconds: int
     token: str
     status: LeaseStatus = LeaseStatus.ACTIVE
 
@@ -153,6 +158,47 @@ class CredentialLease:
         intent: str,
         ttl_seconds: int,
     ) -> "CredentialLease":
+        return cls._create(
+            credential_id=credential_id,
+            agent_id=agent_id,
+            action=action,
+            intent=intent,
+            ttl_seconds=ttl_seconds,
+            status=LeaseStatus.ACTIVE,
+        )
+
+    @classmethod
+    def request_approval(
+        cls,
+        *,
+        credential_id: str,
+        agent_id: str,
+        action: str,
+        intent: str,
+        ttl_seconds: int,
+    ) -> "CredentialLease":
+        return cls._create(
+            credential_id=credential_id,
+            agent_id=agent_id,
+            action=action,
+            intent=intent,
+            ttl_seconds=ttl_seconds,
+            status=LeaseStatus.PENDING,
+            token=f"hvp_{token_urlsafe(24)}",
+        )
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        credential_id: str,
+        agent_id: str,
+        action: str,
+        intent: str,
+        ttl_seconds: int,
+        status: LeaseStatus,
+        token: str | None = None,
+    ) -> "CredentialLease":
         issued_at = datetime.now(timezone.utc)
         return cls(
             id=f"lease_{token_urlsafe(12)}",
@@ -162,14 +208,32 @@ class CredentialLease:
             intent=intent,
             issued_at=issued_at,
             expires_at=issued_at + timedelta(seconds=ttl_seconds),
-            token=f"hvl_{token_urlsafe(24)}",
+            ttl_seconds=ttl_seconds,
+            token=token or f"hvl_{token_urlsafe(24)}",
+            status=status,
         )
 
     def is_active(self, now: datetime | None = None) -> bool:
         current = now or datetime.now(timezone.utc)
         return self.status == LeaseStatus.ACTIVE and current < self.expires_at
 
+    def activate(self) -> "CredentialLease":
+        issued_at = datetime.now(timezone.utc)
+        return replace(
+            self,
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(seconds=self.ttl_seconds),
+            token=f"hvl_{token_urlsafe(24)}",
+            status=LeaseStatus.ACTIVE,
+        )
+
+    def deny(self) -> "CredentialLease":
+        return replace(self, status=LeaseStatus.DENIED)
+
     def public_view(self) -> dict[str, Any]:
+        status = self.status
+        if status == LeaseStatus.ACTIVE and not self.is_active():
+            status = LeaseStatus.EXPIRED
         return {
             "id": self.id,
             "credential_id": self.credential_id,
@@ -178,8 +242,9 @@ class CredentialLease:
             "intent": self.intent,
             "issued_at": self.issued_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
-            "status": LeaseStatus.ACTIVE if self.is_active() else LeaseStatus.EXPIRED,
-            "token_preview": f"{self.token[:8]}...",
+            "ttl_seconds": self.ttl_seconds,
+            "status": status,
+            "token_preview": f"{self.token[:8]}..." if status not in {LeaseStatus.PENDING, LeaseStatus.DENIED} else "not issued",
         }
 
 
