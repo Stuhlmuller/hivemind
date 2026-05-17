@@ -13,7 +13,7 @@ Before doing any other work:
 ## GitHub CLI prerequisite
 
 1. `gh` is required. Run `gh auth status` and `gh issue list --state all --limit 1` before relying on GitHub automation.
-2. Any required `gh` failure blocks the run. Ralph runs with full access so `gh` can reach GitHub; do not fall back to a local-only workflow.
+2. Any required `gh` failure blocks the run. GitHub-driven repo work must not fall back to a local-only workflow.
 
 ## Issue workflow
 
@@ -23,12 +23,11 @@ Before doing any other work:
 
 ## Task branch workflow
 
-1. One issue, one fresh `issue-<number>-<slug>` branch, one dedicated git worktree.
-2. Create the branch with `git worktree add -b ...` from the default branch. Never check out the issue branch in place.
+1. Use one issue, one fresh `issue-<number>-<slug>` branch, and one dedicated git worktree.
+2. Create the branch with `git worktree add -b ...` from the default branch. Never check out the issue branch in place in the primary checkout.
 3. Do all implementation, validation, commits, and PR work inside that worktree.
-4. Never repurpose a Ralph worktree for a different issue.
+4. Never repurpose an issue worktree for a different issue.
 5. Do not start another issue until the current one is merged, closed, or canceled.
-6. Ralph audits branch naming, checkout activity, and worktree isolation; violations fail the run.
 
 ## PR workflow
 
@@ -44,8 +43,8 @@ Before doing any other work:
 2. Use as many concurrent bounded subagents as safe for concrete disjoint tasks on that issue.
 3. Keep reviewer coverage at least even with worker coverage, and keep future-feature-request drafting lanes ahead of worker coverage while real backlog gaps remain. QA tester and issue-finder lanes can be opportunistic.
 4. Prefer explorer subagents for reconnaissance, risk review, test gaps, and feature-request drafting. Prefer worker subagents only for explicit disjoint write scopes.
-5. The top-level Ralph run owns issue selection, worktree and branch state, final validation, commits, pushes, PR actions, merge decisions, and final decisions about any drafted backlog issues.
-6. No subagent may create another implementation branch or PR or start coding a second issue. Backlog drafting is allowed; implementation stays on the current issue.
+5. The top-level run owns issue selection, worktree and branch state, final validation, commits, pushes, PR actions, merge decisions, and final decisions about any drafted backlog issues.
+6. No subagent may create another implementation branch or PR or start coding a second issue. Backlog drafting is allowed; implementation stays on the current issue branch.
 
 ## Browser tool scope
 
@@ -54,7 +53,7 @@ Before doing any other work:
 
 ## Recovery workflow
 
-1. If Ralph includes a `Ralph Recovery Instruction`, treat it as the top-priority blocker.
+1. If the current thread includes a `Recovery Instruction`, treat it as the top-priority blocker.
 2. Fix that blocker first, then restart the normal issue-driven flow from the top in the same run.
 3. Recovery instructions do not weaken GitHub or worktree blockers.
 
