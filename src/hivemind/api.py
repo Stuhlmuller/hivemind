@@ -46,7 +46,7 @@ class SpawnAgentRequest(BaseModel):
 
 
 class UpdateAgentStatusRequest(BaseModel):
-    status: str = Field(pattern="^(idle|working|blocked)$")
+    status: str = Field(pattern="^(idle|queued|running|blocked|done|failed|working)$")
 
 
 class CreateCredentialRequest(BaseModel):

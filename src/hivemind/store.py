@@ -76,7 +76,8 @@ class StoreValidationError(StoreError):
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
-AGENT_STATUS_VALUES = frozenset({"idle", "working", "blocked"})
+AGENT_STATUS_ALIASES = {"working": "running"}
+AGENT_STATUS_VALUES = frozenset({"idle", "queued", "running", "blocked", "done", "failed"})
 FINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
@@ -248,6 +249,7 @@ class HivemindStore:
             )
             self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
+            self._migrate_legacy_agent_statuses(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -292,6 +294,14 @@ class HivemindStore:
             """
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+
+    def _migrate_legacy_agent_statuses(self, conn: sqlite3.Connection) -> None:
+        if conn.execute("SELECT 1 FROM agents WHERE status = 'working' LIMIT 1").fetchone() is None:
+            return
+        conn.execute(
+            "UPDATE agents SET status = 'running', updated_at = ? WHERE status = 'working'",
+            (iso(),),
+        )
 
     def is_setup_complete(self) -> bool:
         with self.connect() as conn:
@@ -445,7 +455,7 @@ class HivemindStore:
             return self.public_agent(conn, row)
 
     def update_agent_status(self, agent_id: str, status: str, *, actor_id: str = "user") -> dict[str, Any]:
-        normalized_status = status.strip().lower()
+        normalized_status = AGENT_STATUS_ALIASES.get(status.strip().lower(), status.strip().lower())
         if normalized_status not in AGENT_STATUS_VALUES:
             raise StoreValidationError(f"unsupported agent status: {status}")
         with self.connect() as conn:
@@ -461,6 +471,7 @@ class HivemindStore:
 
     def public_agent(self, conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         agent = dict(row)
+        agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
         agent_id = agent["id"]
         assigned_tasks = [
             {
@@ -613,6 +624,11 @@ class HivemindStore:
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
         with self.connect() as conn:
+            self.validate_agent_scope(
+                conn,
+                field_name="allowed_agents",
+                values=loads(row["allowed_agents"], []),
+            )
             conn.execute(
                 """
                 INSERT INTO credentials
@@ -723,6 +739,11 @@ class HivemindStore:
             "updated_at": credential_row["updated_at"],
         }
         with self.connect() as conn:
+            self.validate_agent_scope(
+                conn,
+                field_name="allowed_agents",
+                values=loads(credential_row["allowed_agents"], []),
+            )
             conn.execute(
                 """
                 INSERT INTO credentials
@@ -893,6 +914,16 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown agent: {value}")
 
+    def validate_agent_scope(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        values: list[str],
+    ) -> None:
+        for value in values:
+            self.validate_optional_agent_reference(conn, field_name=field_name, value=value)
+
     def validate_optional_credential_reference(
         self,
         conn: sqlite3.Connection,
@@ -975,13 +1006,18 @@ class HivemindStore:
                 field_name="agent_id",
                 value=provided_agent_id,
             )
+            assigned_agent_id = task["assigned_agent_id"]
+            if assigned_agent_id and provided_agent_id and provided_agent_id != assigned_agent_id:
+                raise StoreValidationError(
+                    f"agent_id does not match assigned agent for task {task_id}: {provided_agent_id}"
+                )
             next_heartbeat = None
             if task["heartbeat_seconds"]:
                 next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
             event = {
                 "id": f"hb_{secrets.token_urlsafe(10)}",
                 "task_id": task_id,
-                "agent_id": provided_agent_id or task["assigned_agent_id"],
+                "agent_id": provided_agent_id or assigned_agent_id,
                 "note": note,
                 "created_at": iso(now),
             }

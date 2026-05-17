@@ -313,11 +313,11 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
 
     status_response = client.patch(
         f"/agents/{agent['id']}/status",
-        json={"status": "working"},
+        json={"status": "running"},
     )
     assert status_response.status_code == 200
     updated = status_response.json()
-    assert updated["status"] == "working"
+    assert updated["status"] == "running"
     assert updated["assigned_task_count"] == 1
     assert updated["active_task_count"] == 1
     assert updated["assigned_schedule_count"] == 1
@@ -353,7 +353,7 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
     ]
 
     listed_agents = {item["id"]: item for item in client.get("/agents").json()}
-    assert listed_agents[agent["id"]]["status"] == "working"
+    assert listed_agents[agent["id"]]["status"] == "running"
     assert listed_agents[agent["id"]]["assigned_task_count"] == 1
 
 
@@ -365,6 +365,89 @@ def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "unknown agent: agent_missing"
+
+
+def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    assert create_response.status_code == 201
+    agent = create_response.json()
+
+    response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "working"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+
+
+def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    assert create_response.status_code == 201
+    agent = create_response.json()
+
+    update_response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "running"},
+    )
+    assert update_response.status_code == 200
+
+    restarted_client = client_for(tmp_path)
+    login_response = restarted_client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    assert login_response.status_code == 200
+
+    agents = {item["id"]: item for item in restarted_client.get("/agents").json()}
+    assert agents[agent["id"]]["name"] == "Operator"
+    assert agents[agent["id"]]["status"] == "running"
+
+
+def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": ["agent_missing"],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "allowed_agents references unknown agent: agent_missing"
 
 
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
@@ -385,7 +468,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "system_prompt": "Respond briefly.",
             },
         ),
-        ("PATCH", "/agents/agent_demo/status", {"status": "working"}),
+        ("PATCH", "/agents/agent_demo/status", {"status": "running"}),
         ("GET", "/credentials", None),
         (
             "POST",
@@ -827,6 +910,18 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
+    agents = client.get("/agents").json()
+    primary_agent = agents[0]
+    secondary_agent = client.post(
+        "/agents",
+        json={
+            "name": "Mismatched heartbeat worker",
+            "role": "Try to post a heartbeat onto the wrong task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    ).json()
     credential = client.get("/credentials").json()[0]
 
     bad_task_agent = client.post(
@@ -836,8 +931,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "assigned_agent_id": "agent_missing",
         },
     )
-    assert bad_task_agent.status_code == 400
-    assert bad_task_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+    require_equal(bad_task_agent.status_code, 400, "unknown task agent should be rejected")
+    require_equal(
+        bad_task_agent.json()["detail"],
+        "assigned_agent_id references unknown agent: agent_missing",
+        "task agent rejection should explain the missing reference",
+    )
 
     bad_task_credential = client.post(
         "/tasks",
@@ -846,8 +945,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "credential_id": "cred_missing",
         },
     )
-    assert bad_task_credential.status_code == 400
-    assert bad_task_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+    require_equal(bad_task_credential.status_code, 400, "unknown task credential should be rejected")
+    require_equal(
+        bad_task_credential.json()["detail"],
+        "credential_id references unknown credential: cred_missing",
+        "task credential rejection should explain the missing reference",
+    )
 
     bad_schedule_agent = client.post(
         "/schedules",
@@ -858,8 +961,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "assigned_agent_id": "agent_missing",
         },
     )
-    assert bad_schedule_agent.status_code == 400
-    assert bad_schedule_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+    require_equal(bad_schedule_agent.status_code, 400, "unknown schedule agent should be rejected")
+    require_equal(
+        bad_schedule_agent.json()["detail"],
+        "assigned_agent_id references unknown agent: agent_missing",
+        "schedule agent rejection should explain the missing reference",
+    )
 
     bad_schedule_credential = client.post(
         "/schedules",
@@ -870,13 +977,18 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "credential_id": "cred_missing",
         },
     )
-    assert bad_schedule_credential.status_code == 400
-    assert bad_schedule_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+    require_equal(bad_schedule_credential.status_code, 400, "unknown schedule credential should be rejected")
+    require_equal(
+        bad_schedule_credential.json()["detail"],
+        "credential_id references unknown credential: cred_missing",
+        "schedule credential rejection should explain the missing reference",
+    )
 
     task = client.post(
         "/tasks",
         json={
             "title": "Heartbeat target",
+            "assigned_agent_id": primary_agent["id"],
             "credential_id": credential["id"],
         },
     ).json()
@@ -884,8 +996,23 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         f"/tasks/{task['id']}/heartbeats",
         json={"agent_id": "agent_missing", "note": "still working"},
     )
-    assert bad_heartbeat_agent.status_code == 400
-    assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
+    require_equal(bad_heartbeat_agent.status_code, 400, "unknown heartbeat agent should be rejected")
+    require_equal(
+        bad_heartbeat_agent.json()["detail"],
+        "agent_id references unknown agent: agent_missing",
+        "heartbeat rejection should explain the missing agent reference",
+    )
+
+    mismatched_heartbeat_agent = client.post(
+        f"/tasks/{task['id']}/heartbeats",
+        json={"agent_id": secondary_agent["id"], "note": "still working"},
+    )
+    require_equal(mismatched_heartbeat_agent.status_code, 400, "mismatched heartbeat agent should be rejected")
+    require_equal(
+        mismatched_heartbeat_agent.json()["detail"],
+        f"agent_id does not match assigned agent for task {task['id']}: {secondary_agent['id']}",
+        "heartbeat rejection should explain the assigned-agent mismatch",
+    )
 
 
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:

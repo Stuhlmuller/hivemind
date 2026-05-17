@@ -126,6 +126,8 @@ const ROUTES = {
   credentials: "/control/credentials",
 };
 
+const agentStatuses = ["idle", "queued", "running", "blocked", "done", "failed"];
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -347,10 +349,14 @@ function renderSelectors() {
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
     '#codex-oauth-form select[name="allowed_agents"]',
+  ]) {
+    $(selector).innerHTML = optionList(state.agents);
+  }
+  for (const selector of [
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
   ]) {
-    $(selector).innerHTML = optionList(state.agents);
+    $(selector).innerHTML = optionList(state.agents, "name", true);
   }
   for (const selector of [
     '#lease-form select[name="credential_id"]',
@@ -367,9 +373,12 @@ function renderAgents() {
     .map((agent) => {
       const actions = `
         <div class="button-row">
-          <button data-agent-status="${escapeHtml(agent.id)}" data-status="idle" type="button"${agent.status === "idle" ? " disabled" : ""}>idle</button>
-          <button data-agent-status="${escapeHtml(agent.id)}" data-status="working" type="button"${agent.status === "working" ? " disabled" : ""}>working</button>
-          <button data-agent-status="${escapeHtml(agent.id)}" data-status="blocked" type="button"${agent.status === "blocked" ? " disabled" : ""}>blocked</button>
+          ${agentStatuses
+            .map(
+              (status) =>
+                `<button data-agent-status="${escapeHtml(agent.id)}" data-status="${escapeHtml(status)}" type="button"${agent.status === status ? " disabled" : ""}>${escapeHtml(status)}</button>`,
+            )
+            .join("")}
         </div>`;
       return item(
         agent.name,
