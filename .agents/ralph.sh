@@ -19,6 +19,16 @@ iteration=1
 
 trap 'printf "\n[ralph] stopping\n"; exit 0' INT TERM
 
+ensure_not_nested_codex() {
+  if [[ -z "${CODEX_SANDBOX:-}" ]]; then
+    return
+  fi
+
+  echo "[ralph] nested Codex runs are not supported inside a Codex sandbox (${CODEX_SANDBOX})." >&2
+  echo "[ralph] run .agents/ralph.sh from a normal terminal session instead." >&2
+  exit 1
+}
+
 ensure_tools_file() {
   if [[ -f "$tools_file" ]]; then
     return
@@ -96,7 +106,8 @@ run_codex_exec() {
 run_auto_review() {
   (
     cd "$repo_root"
-    codex review --uncommitted "$review_prompt"
+    # Codex CLI 0.130.0 rejects `--uncommitted` when a custom prompt is present.
+    codex review "$review_prompt"
   )
 }
 
@@ -110,6 +121,7 @@ if [[ ! -f "$prompt_file" ]]; then
   exit 1
 fi
 
+ensure_not_nested_codex
 ensure_tools_file
 ensure_flake_file
 
