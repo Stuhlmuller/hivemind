@@ -21,6 +21,7 @@ delegation, and safe PR handling.
 - `reviewer` audits the repo, open PRs, tests, docs, and release posture, then opens grounded issue follow-ups without doing implementation.
 - `feature-requester` opens concrete feature backlog issues without using the browser tool or starting implementation.
 - `worker` owns one issue branch at a time in its own dedicated worktree.
+- `worker` may use `HIVEMIND_WORKER_PRIORITY_LABELS` as a comma-separated label priority list, but active branch, open PR, and lane-ownership checks still take precedence.
 - `beekeeper` owns the PR queue, merges ready PRs, and fixes obvious CI failures only when it is not stealing an active worker branch.
 - Compatibility wrappers and aliases such as `browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should keep routing into the canonical roles instead of reintroducing separate lane logic.
 - Workers, beekeeper, feature-request drafting, and general development loops must not use the Codex browser tool.

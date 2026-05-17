@@ -370,6 +370,19 @@ assert_text_includes "$follow_output" $'\033[32m[worker]\033[0m worker sample li
 
 swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
 
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+swarm_env \
+  HIVEMIND_WORKER_PRIORITY_LABELS="bug,priority: high,help wanted" \
+  bash "$repo_root/.agents/worker-loop.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+priority_worker_pid="$!"
+
+wait_for_file "$capture_root/worker.prompt"
+wait_for_process_exit "$priority_worker_pid"
+assert_file_contains "$capture_root/worker.prompt" "Configured priority labels: bug, priority: high, help wanted."
+assert_file_contains "$capture_root/worker.prompt" "Filter eligibility first, including active branch, open PR, and worker-lane checks."
+assert_file_contains "$capture_root/worker.prompt" "Prefer eligible issues matching priority labels in the configured order before falling back to the smallest eligible open issue."
+
 rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
 
 swarm_env bash "$repo_root/.agents/swarm.sh" start reviewer-1 developer feature-requester-1 browser-user pr-shepherd >/dev/null

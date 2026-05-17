@@ -117,6 +117,8 @@ canonical top-level agents (`reviewer`, `feature-requester`, `worker`,
 `scout`, and `beekeeper`) instead of numbered lane fleets, allow those
 top-level roles to fan out bounded subagents whenever useful, support an
 endless supervisor mode for laptop-open development, and reserve PR merging
-and cross-branch CI cleanup for the beekeeper loop. Legacy names such as
+and cross-branch CI cleanup for the beekeeper loop. Worker issue selection may
+use `HIVEMIND_WORKER_PRIORITY_LABELS`, but active branch, open PR, and lane
+ownership checks must stay ahead of label priority. Legacy names such as
 `browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should
 remain lightweight compatibility aliases instead of reintroducing lane logic.
