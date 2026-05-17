@@ -1001,12 +1001,12 @@ class HivemindStore:
             return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
 
     def update_task(self, task_id: str, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
-        requested_fields = tuple(field for field in EDITABLE_TASK_FIELDS if field in data)
-        if not requested_fields:
-            return self.get_task(task_id)
         now = utcnow()
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
+            requested_fields = tuple(field for field in EDITABLE_TASK_FIELDS if field in data)
+            if not requested_fields:
+                raise StoreValidationError("task update requires at least one editable field")
             updated = dict(row)
             changes: list[str] = []
             self.validate_task_update_data(conn, data)
@@ -1093,13 +1093,18 @@ class HivemindStore:
                 field_name="agent_id",
                 value=provided_agent_id,
             )
+            assigned_agent_id = task["assigned_agent_id"]
+            if assigned_agent_id and provided_agent_id and provided_agent_id != assigned_agent_id:
+                raise StoreValidationError(
+                    f"agent_id does not match assigned task agent: {assigned_agent_id}"
+                )
             next_heartbeat = None
             if task["heartbeat_seconds"]:
                 next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
             event = {
                 "id": f"hb_{secrets.token_urlsafe(10)}",
                 "task_id": task_id,
-                "agent_id": provided_agent_id or task["assigned_agent_id"],
+                "agent_id": provided_agent_id or assigned_agent_id,
                 "note": note,
                 "created_at": iso(now),
             }
