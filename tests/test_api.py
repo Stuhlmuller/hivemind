@@ -82,6 +82,24 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.json()["ok"] is True
 
 
+def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Bad Credential",
+            "provider": "github",
+            "secret_ref": "ghp_raw_secret_value",
+            "allowed_actions": ["read_repo"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
+
+
 def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)

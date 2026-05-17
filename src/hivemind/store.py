@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
-from hivemind.secret_refs import preview_secret_ref
+from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
 
 def utcnow() -> datetime:
@@ -411,8 +411,10 @@ class HivemindStore:
             "created_at": now,
             "updated_at": now,
         }
-        if not row["secret_ref"].startswith(("env://", "file://", "vault://", "oauth://")):
-            raise StoreError("secret_ref must use env://, file://, vault://, or oauth://")
+        try:
+            row["secret_ref"] = validate_secret_ref(row["secret_ref"])
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
         with self.connect() as conn:
             conn.execute(
                 """
