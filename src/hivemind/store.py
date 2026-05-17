@@ -1547,9 +1547,9 @@ class HivemindStore:
         if item["heartbeat_seconds"] and item["status"] not in TERMINAL_TASK_STATUSES:
             deadline = parse_dt(item["next_heartbeat_at"])
             if deadline is not None:
-                overdue_seconds = int(((now or utcnow()) - deadline).total_seconds())
-                if overdue_seconds >= 0:
-                    heartbeat_overdue_seconds = overdue_seconds
+                elapsed_seconds = ((now or utcnow()) - deadline).total_seconds()
+                if elapsed_seconds >= 0:
+                    heartbeat_overdue_seconds = int(elapsed_seconds)
                     heartbeat_state = "stale" if last_heartbeat_at else "missing"
                 else:
                     heartbeat_state = "healthy"

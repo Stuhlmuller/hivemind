@@ -2799,6 +2799,55 @@ def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectati
     require_equal(done_task["heartbeat_overdue_seconds"], None, "completed tasks should not report overdue heartbeats")
 
 
+def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat boundary",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(task_response.status_code, 201, "boundary task should be created")
+    task = task_response.json()
+    stale_task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Stale heartbeat boundary",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(stale_task_response.status_code, 201, "stale boundary task should be created")
+    stale_task = stale_task_response.json()
+    stale_heartbeat = client.post(f"/tasks/{stale_task['id']}/heartbeats", json={"note": "working"})
+    require_equal(stale_heartbeat.status_code, 201, "stale boundary task should accept its initial heartbeat")
+    deadline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with store.connect() as conn:
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (deadline.isoformat(), task["id"]))
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (deadline.isoformat(), stale_task["id"]))
+        row = store.get_task_row(conn, task["id"])
+        stale_row = store.get_task_row(conn, stale_task["id"])
+
+        early = store.public_task(conn, row, now=deadline - timedelta(milliseconds=500))
+        late = store.public_task(conn, row, now=deadline + timedelta(milliseconds=500))
+        stale_early = store.public_task(conn, stale_row, now=deadline - timedelta(milliseconds=500))
+        stale_late = store.public_task(conn, stale_row, now=deadline + timedelta(milliseconds=500))
+
+    require_equal(early["heartbeat_state"], "healthy", "sub-second pre-deadline task should stay healthy")
+    require_equal(early["heartbeat_overdue_seconds"], None, "sub-second pre-deadline task should not report overdue seconds")
+    require_equal(late["heartbeat_state"], "missing", "sub-second post-deadline task should be overdue")
+    require_equal(late["heartbeat_overdue_seconds"], 0, "sub-second post-deadline overdue value should round down")
+    require_equal(stale_early["heartbeat_state"], "healthy", "sub-second pre-deadline heartbeat task should stay healthy")
+    require_equal(stale_late["heartbeat_state"], "stale", "sub-second post-deadline heartbeat task should be stale")
+    require_equal(stale_late["heartbeat_overdue_seconds"], 0, "sub-second post-deadline stale value should round down")
+
+
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
