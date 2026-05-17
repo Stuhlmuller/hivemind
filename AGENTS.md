@@ -43,6 +43,13 @@ the scope you touched. At minimum run `qlty check` on changed files. Use
 `qlty smells` when you touched larger structures or risked duplication. Fix the
 issues you introduced or explicitly call out remaining findings in the final
 handoff.
+Security audit rule: after every implementation change, use the project-local
+`hivemind-security-audit` skill before finalizing. Treat findings around auth,
+sessions, credential separation, JIT leases, audit logs, persistence, frontend
+secret exposure, and policy enforcement as blockers until fixed or explicitly
+accepted by the user. Every implementation should be secure by default,
+deny-by-default, and well-architected with narrow trust boundaries and focused
+verification.
 
 Frontend rule: before changing the Hivemind UI, use the project-local
 `hivemind-ui-no-slop` skill. The UI must feel technical, open-source,
