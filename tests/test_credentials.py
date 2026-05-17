@@ -108,6 +108,47 @@ class CredentialServiceTests(unittest.TestCase):
 
         self.assertFalse(lease.is_active(datetime.now(timezone.utc) + timedelta(minutes=2)))
 
+    def test_pending_approval_lease_cannot_perform_action_until_approved(self) -> None:
+        vault = CredentialVault()
+        vault.add(
+            credential_id="github.writer",
+            name="GitHub Writer",
+            provider="github",
+            secret_ref="env://GITHUB_WRITE_TOKEN",
+            policy=CredentialPolicy(
+                allowed_agents=frozenset({"agent.scout"}),
+                allowed_actions=frozenset({"open_issue"}),
+                approval_required_actions=frozenset({"open_issue"}),
+                max_ttl_seconds=90,
+            ),
+        )
+        service = CredentialService(vault)
+
+        pending = service.request_lease(
+            credential_id="github.writer",
+            agent_id="agent.scout",
+            action="open_issue",
+            intent="Open an audited issue for a verified regression.",
+            ttl_seconds=120,
+        )
+
+        self.assertEqual(pending.public_view()["status"], "pending")
+        with self.assertRaisesRegex(CredentialError, "pending approval"):
+            service.perform_action(
+                lease_token=pending.token,
+                action="open_issue",
+                payload={"repo": "hivemind"},
+            )
+
+        approved = service.approve_lease(lease_id=pending.id, approved_by="user.admin")
+        result = service.perform_action(
+            lease_token=approved.token,
+            action="open_issue",
+            payload={"repo": "hivemind"},
+        )
+
+        self.assertTrue(result["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

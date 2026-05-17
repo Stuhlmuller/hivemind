@@ -51,6 +51,7 @@ class CreateCredentialRequest(BaseModel):
     secret_ref: str = Field(min_length=6)
     allowed_agents: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
+    approval_required_actions: list[str] = Field(default_factory=list)
     max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     require_intent: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -61,6 +62,7 @@ class StartOAuthCredentialRequest(BaseModel):
     name: str = Field(min_length=1)
     allowed_agents: list[str] = Field(default_factory=list)
     allowed_actions: list[str] = Field(default_factory=list)
+    approval_required_actions: list[str] = Field(default_factory=list)
     max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     require_intent: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -398,6 +400,25 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.get("/credential-leases")
     def list_credential_leases(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
         return db.list_leases()
+
+    @app.post("/credential-leases/{lease_id}/approve")
+    def approve_credential_lease(lease_id: str, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            _, lease = db.approve_lease(lease_id, user.id)
+            return lease
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/credential-leases/{lease_id}/deny")
+    def deny_credential_lease(lease_id: str, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.deny_lease(lease_id, user.id)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/credential-actions")
     def perform_credential_action(request: PerformCredentialActionRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
