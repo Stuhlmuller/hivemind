@@ -104,6 +104,10 @@ class LeakingAgentProviderAdapter:
                         "credential_id": request.credential_id,
                         "fallback_ref": "env://SECONDARY_PROVIDER_SECRET",
                         "notes": ["secondary ref env://SECONDARY_PROVIDER_SECRET"],
+                        "tuple_notes": (
+                            "tuple ref env://SECONDARY_PROVIDER_SECRET",
+                            {"x-api-key": "tuple prefixed api key"},
+                        ),
                         "token": "placeholder",
                         "accessToken": "LEAKME_TOKEN",
                         "apiKey": "raw-api-key",
@@ -1310,6 +1314,11 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
         result["tool_requests"][0]["arguments"]["notes"],
         ["secondary ref env://SEC..."],
         "secret refs embedded in free-text provider output should be previewed",
+    )
+    require_equal(
+        result["tool_requests"][0]["arguments"]["tuple_notes"],
+        ["tuple ref env://SEC...", {"x-api-key": "[redacted]"}],
+        "tuple provider payloads should be recursively redacted",
     )
     require_equal(result["tool_requests"][0]["arguments"]["token"], "[redacted]", "token-like arguments should be redacted")
     require_equal(result["tool_requests"][0]["arguments"]["accessToken"], "[redacted]", "camelCase token fields should be redacted")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import hashlib
 import hmac
 import json
@@ -181,7 +181,7 @@ def redact_provider_public_value(value: Any, credential_ref: str | None) -> Any:
             lambda match: preview_secret_ref(validate_secret_ref(match.group(0))) or REDACTED_VALUE,
             redacted,
         )
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [redact_provider_public_value(item, credential_ref) for item in value]
     if isinstance(value, dict):
         return {
