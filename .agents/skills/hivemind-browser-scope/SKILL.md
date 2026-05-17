@@ -33,6 +33,7 @@ Keep these aligned with this rule:
 
 - `AGENTS.md`
 - `.agents/PROMPT.md`
+- `.agents/SWARM.md`
 - `.agents/PROMPT-subagents.md`
 - `.agents/PROMPT-scout.md`
 - `.agents/PROMPT-reviewer.md`
@@ -46,8 +47,6 @@ Keep these aligned with this rule:
 Run:
 
 ```bash
-bash tests/test_ralph_loop.sh
-bash .agents/verify-ralph-worktree.sh
 bash .agents/verify-swarm.sh
-qlty check AGENTS.md .agents/PROMPT.md .agents/PROMPT-subagents.md .agents/PROMPT-scout.md .agents/PROMPT-reviewer.md .agents/PROMPT-worker.md .agents/PROMPT-feature-requester.md .agents/PROMPT-pr-shepherd.md .agents/skills/hivemind-browser-scope/SKILL.md
+qlty check AGENTS.md .agents/PROMPT.md .agents/SWARM.md .agents/PROMPT-subagents.md .agents/PROMPT-scout.md .agents/PROMPT-reviewer.md .agents/PROMPT-worker.md .agents/PROMPT-feature-requester.md .agents/PROMPT-pr-shepherd.md .agents/skills/hivemind-browser-scope/SKILL.md
 ```

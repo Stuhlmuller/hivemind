@@ -1,6 +1,6 @@
 # GitHub Swarm Loops
 
-The repository now has a multi-loop GitHub automation suite that complements the original Ralph workflow.
+The repository's supported GitHub automation suite is the multi-loop swarm workflow. The older single-loop wrapper has been retired.
 
 ## Roles
 

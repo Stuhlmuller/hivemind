@@ -29,8 +29,8 @@ The API docs are available at `http://localhost:8000/docs`.
 
 ## Nix Dev Shell
 
-The repository flake is primarily used to keep Ralph and agent runs aligned on a
-repeatable CLI set:
+The repository flake is primarily used to keep the swarm loops and repo agent
+runs aligned on a repeatable CLI set:
 
 ```bash
 nix flake check

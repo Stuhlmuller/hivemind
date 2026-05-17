@@ -103,13 +103,6 @@ Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
 
-Ralph rule: use the project-local `hivemind-ralph-loop` skill before changing
-`.agents/ralph.sh` or `.agents/PROMPT.md`. Ralph is a GitHub-driven loop: it
-must require working `gh`, run with GitHub-capable network access, move work
-onto `issue-<number>-<slug>` branches inside dedicated git worktrees, never
-reuse the primary checkout or repurpose a worktree via local issue-branch
-checkout, and fail when the wrapper cannot verify those rules.
-
 Swarm rule: use the project-local `hivemind-github-swarm-loop` skill before
 changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
 `.agents/role-loop.sh`, `.agents/scout-loop.sh`,
@@ -117,10 +110,11 @@ changing `.agents/swarm.sh`, `.agents/loop-common.sh`,
 `.agents/worker-loop.sh`, `.agents/worker-loop-a.sh`,
 `.agents/worker-loop-b.sh`, `.agents/feature-requester-loop.sh`,
 `.agents/pr-shepherd.sh`, `.agents/swarm-launchd.sh`, or the `PROMPT-*.md`
-loop prompts. The GitHub swarm must keep dedicated worktrees per role,
-support configurable role-count flags, default to 3 reviewer lanes, 10 worker
-lanes, 3 feature-requester lanes, 1 scout lane, and 1 PR shepherd lane, split
-worker issue ownership deterministically across the configured worker count,
-use bounded subagents within each loop when useful, support an endless
-supervisor mode for laptop-open development, and reserve PR merging and
-cross-branch CI cleanup for the PR shepherd loop.
+loop prompts. The GitHub swarm is the supported automation suite: keep
+dedicated worktrees per role, support configurable role-count flags, default
+to 3 reviewer lanes, 10 worker lanes, 3 feature-requester lanes, 1 scout
+lane, and 1 PR shepherd lane, split worker issue ownership deterministically
+across the configured worker count, use bounded subagents within each loop
+when useful, support an endless supervisor mode for laptop-open development,
+reserve PR merging and cross-branch CI cleanup for the PR shepherd loop, and
+do not casually reintroduce the retired single-loop wrapper.
