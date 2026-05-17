@@ -14,3 +14,8 @@ approval_rules:
       count: 1
       users:
         - "chatgpt-codex-connector[bot]"
+    options:
+      methods:
+        body_patterns:
+          - ":+1:"
+          - "👍"
