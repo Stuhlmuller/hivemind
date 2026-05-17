@@ -305,6 +305,14 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         try:
             oauth_state = db.consume_oauth_state(state_id=state, provider=provider, user_id=user.id)
         except (StoreError, StoreNotFoundError) as exc:
+            db.audit(
+                "credential.oauth.failed",
+                user.id,
+                provider,
+                "denied",
+                str(exc),
+                {"provider": provider},
+            )
             return oauth_frontend_redirect("error", str(exc))
         if error:
             db.audit(
