@@ -35,15 +35,22 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert "/static/app.js" in response.text
 
 
-def test_config_requires_login_and_exposes_reviewer_after_setup(tmp_path: Path) -> None:
+def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://HIVEMIND_DEMO_GITHUB_TOKEN")
     client = client_for(tmp_path)
 
     assert client.get("/config").status_code == 401
     setup(client)
     response = client.get("/config")
+    reviewer = response.json()["intent_reviewer"]
+    credential = client.get("/credentials").json()[0]
 
     assert response.status_code == 200
-    assert response.json()["intent_reviewer"]["provider"] == "local"
+    assert reviewer["provider"] == "local"
+    assert reviewer["credential_ref_preview"] == "env://HIV..."
+    assert reviewer["credential_ref_preview"] == credential["secret_ref_preview"]
+    assert "credential_ref" not in reviewer
+    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text
 
 
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
