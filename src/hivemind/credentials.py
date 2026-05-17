@@ -145,20 +145,45 @@ class CredentialService:
         return lease
 
     def perform_action(self, *, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
-        lease = self._find_lease_by_token(lease_token)
         normalized_action = action.strip().lower()
+        try:
+            lease = self._find_lease_by_token(lease_token)
+        except CredentialError:
+            self._record_audit(
+                AuditEvent(
+                    type="credential.action.denied",
+                    actor_id="unknown",
+                    target_id="credential_lease",
+                    decision="denied",
+                    reason="unknown credential lease token",
+                    metadata={"action": normalized_action},
+                )
+            )
+            raise
 
         if lease.status == LeaseStatus.PENDING:
             raise CredentialError("credential lease is pending approval")
         if lease.status == LeaseStatus.DENIED:
             raise CredentialError("credential lease request was denied")
         if not lease.is_active():
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason="credential lease is expired or revoked",
+            )
             raise CredentialError("credential lease is expired or revoked")
 
         if lease.action != normalized_action:
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason="credential lease does not allow this action",
+            )
             raise CredentialError("credential lease does not allow this action")
 
         credential = self._vault.get(lease.credential_id)
+        with self._lock:
+            self._leases[lease.id] = replace(lease, status=LeaseStatus.REVOKED)
         self._record_audit(
             AuditEvent(
                 type="credential.action.performed",
@@ -252,6 +277,18 @@ class CredentialService:
                 if lease.token == lease_token:
                     return lease
         raise CredentialError("unknown credential lease token")
+
+    def _record_action_denied(self, *, lease: CredentialLease, action: str, reason: str) -> None:
+        self._record_audit(
+            AuditEvent(
+                type="credential.action.denied",
+                actor_id=lease.agent_id,
+                target_id=lease.credential_id,
+                decision="denied",
+                reason=reason,
+                metadata={"action": action},
+            )
+        )
 
     def _record_audit(self, event: AuditEvent) -> None:
         with self._lock:

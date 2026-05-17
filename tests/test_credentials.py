@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from hivemind.credentials import CredentialError, CredentialService, CredentialVault
-from hivemind.models import CredentialPolicy
+from hivemind.models import CredentialPolicy, LeaseStatus
 
 
 def make_service() -> CredentialService:
@@ -96,6 +96,39 @@ class CredentialServiceTests(unittest.TestCase):
                 action="delete_repo",
                 payload={"repo": "example"},
             )
+
+        event = service.audit_events()[-1]
+        self.assertEqual(event.type, "credential.action.denied")
+        self.assertEqual(event.decision, "denied")
+
+    def test_successful_action_consumes_lease_and_blocks_replay(self) -> None:
+        service = make_service()
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        result = service.perform_action(
+            lease_token=lease.token,
+            action="read_repo",
+            payload={"repo": "example"},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(service.list_leases()[0].status, LeaseStatus.REVOKED)
+
+        with self.assertRaisesRegex(CredentialError, "expired or revoked"):
+            service.perform_action(
+                lease_token=lease.token,
+                action="read_repo",
+                payload={"repo": "example"},
+            )
+
+        event = service.audit_events()[-1]
+        self.assertEqual(event.type, "credential.action.denied")
+        self.assertEqual(event.reason, "credential lease is expired or revoked")
 
     def test_expired_lease_cannot_perform_action(self) -> None:
         service = make_service()

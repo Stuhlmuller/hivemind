@@ -314,6 +314,28 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
 
+    replay_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
+    require_equal(
+        replay_response.json()["detail"],
+        "credential lease is expired or revoked",
+        "replayed lease use should expose the revoke/expiry reason",
+    )
+
+    stored_lease = client.get("/credential-leases").json()[0]
+    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
+    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
+
+    audit_events = client.get("/audit-events").json()
+    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
+    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
+    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
+    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
+    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
+
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
