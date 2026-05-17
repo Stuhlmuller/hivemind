@@ -61,6 +61,12 @@ new ask creates a durable project rule, workflow, taste preference, security
 boundary, or implementation pattern. Prefer small project-local skills so future
 agents can replicate Hivemind work with little context.
 
+Idea rule: use the project-local `hivemind-idea-issues` skill when the user
+asks for new Hivemind ideas, backlog or roadmap suggestions, gap analysis, or
+"what should we build next" without asking to start coding. This workflow must
+create GitHub issues only and must not start implementation, branches, or PRs
+unless the user explicitly changes scope.
+
 Auth rule: use the project-local `hivemind-homelab-auth` skill before changing
 setup, login, sessions, or account flows. Hivemind is self-hosted homelab
 software; use username/password local auth, not email-first SaaS account flows.
