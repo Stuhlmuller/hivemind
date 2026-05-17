@@ -113,7 +113,7 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
-    for required in ['name="username"', 'name="password"', 'autocomplete="new-password"']:
+    for required in ['name="username"', 'name="password"', 'name="password_confirm"', 'autocomplete="new-password"']:
         if required not in response.text:
             raise AssertionError(f"missing expected auth form markup: {required}")
     username_input_start = response.text.index('name="username"')
@@ -126,6 +126,10 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         raise AssertionError("username input should not ship with a preset value")
     if 'value="' in password_markup:
         raise AssertionError("password input should not ship with a preset value")
+    require_true(
+        "Create the first local operator account" in response.text,
+        "frontend should describe first-run local account setup",
+    )
 
 
 def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
@@ -193,6 +197,38 @@ def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path)
     require_equal(me_response.json()["username"], "operatoradmin", "me should expose the username")
     require_equal(me_response.json()["role"], "admin", "me should expose the role")
     require_true("email" not in me_response.json(), "me should not expose an email field")
+
+
+def test_setup_rejects_mismatched_password_confirmation(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    mismatch_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": TEST_PASSWORD,
+            "password_confirm": "no",
+        },
+    )
+    setup_state = client.get("/setup-state")
+    setup_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": TEST_PASSWORD,
+            "password_confirm": TEST_PASSWORD,
+        },
+    )
+
+    require_equal(mismatch_response.status_code, 400, "setup should reject mismatched confirmation")
+    require_equal(
+        mismatch_response.json(),
+        {"detail": "password confirmation does not match"},
+        "setup should return a direct mismatch error",
+    )
+    require_equal(setup_state.json(), {"setup_complete": False}, "mismatch should not complete setup")
+    require_equal(setup_response.status_code, 201, "matching confirmation should create the admin")
+    require_equal(setup_response.json()["user"]["role"], "admin", "first user should be admin")
 
 
 def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:

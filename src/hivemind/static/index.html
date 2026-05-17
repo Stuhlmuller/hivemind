@@ -4,19 +4,24 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hivemind</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="prompt">$</span>
+        <span class="brand-mark" aria-hidden="true">
+          <img src="/static/favicon-32.png" alt="" />
+        </span>
         <div>
           <h1>hivemind</h1>
           <p>self-hosted agent control plane</p>
         </div>
       </div>
       <div class="topbar-actions">
-        <nav class="page-nav" aria-label="Workspace">
+        <nav id="workspace-nav" class="page-nav" aria-label="Workspace" hidden>
           <a href="/" data-page-link="overview">overview</a>
           <a href="/control/credentials" data-page-link="credentials">credentials</a>
         </nav>
@@ -43,9 +48,12 @@ leases: scoped + ttl
 agents: brokered capabilities</pre>
         </div>
         <form id="auth-form" class="panel stack">
-          <div class="panel-heading">
-            <h2 id="auth-title">setup admin</h2>
-            <p id="auth-mode">first local user becomes admin</p>
+          <div class="panel-heading auth-heading">
+            <div class="heading-lockup">
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <h2 id="auth-title">setup admin</h2>
+            </div>
+            <p id="auth-mode">first local admin</p>
           </div>
           <label>
             username
@@ -61,7 +69,17 @@ agents: brokered capabilities</pre>
               required
             />
           </label>
-          <button type="submit">continue</button>
+          <label id="password-confirm-field">
+            confirm password
+            <input
+              name="password_confirm"
+              type="password"
+              placeholder="repeat admin password"
+              autocomplete="new-password"
+            />
+          </label>
+          <p id="auth-detail" class="field-hint">Create the first local operator account for this Hivemind node.</p>
+          <button id="auth-submit" type="submit">create admin</button>
         </form>
       </section>
 
@@ -69,8 +87,11 @@ agents: brokered capabilities</pre>
         <section class="runtime-shell">
           <aside class="sidecar">
             <div class="node-id">
-              <span>node</span>
-              <strong>local://hivemind</strong>
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <div>
+                <span>node</span>
+                <strong>local://hivemind</strong>
+              </div>
             </div>
             <div class="side-section">
               <p>session</p>
