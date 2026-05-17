@@ -21,18 +21,21 @@ older missed slots while keeping the original cadence, and `backfill` creates
 one task per overdue slot before resuming the next scheduled run. Long backfill
 windows are processed in bounded batches so restarts remain responsive.
 
-## Run Locally
+## Start The Dev Server
 
 ```bash
 pip install -e ".[dev]"
-uvicorn hivemind.api:create_app --factory --reload
+mkdir -p .data
+export HIVEMIND_DEVELOPMENT_MODE=true
+export HIVEMIND_DB_PATH="$PWD/.data/hivemind-dev.db"
+uvicorn hivemind.api:create_app --factory --reload --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://localhost:8000/`.
 
-For plain HTTP local development, set `HIVEMIND_DEVELOPMENT_MODE=true` before
-launching the app. Outside explicit development mode, Hivemind marks auth
-session cookies `Secure`, so setup/login require HTTPS.
+`HIVEMIND_DEVELOPMENT_MODE=true` is required for plain HTTP local development.
+Outside explicit development mode, Hivemind marks auth session cookies `Secure`,
+so browser setup and login require HTTPS.
 
 The API docs are available at `http://localhost:8000/docs`.
 
@@ -70,12 +73,17 @@ If the repair does not hold or `/etc/static` still points at a missing store
 path, repair or reinstall the macOS multi-user Nix daemon installation. This is
 a machine-local problem, not a Hivemind flake problem.
 
-## Login
+## Dev Server Login
 
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
 The setup form starts blank and requires an operator-entered password. After
 setup completes, use the same username and password on the login screen.
+
+To start over during local development, stop the dev server and point
+`HIVEMIND_DB_PATH` at a new file before restarting. The dev shell defaults the
+database to `.data/hivemind.db`; the quickstart above uses
+`.data/hivemind-dev.db` so local browser testing is isolated.
 
 Optional intent reviewer configuration:
 
@@ -114,12 +122,34 @@ continue to expose only redacted refs.
 
 ```bash
 docker build -t hivemind .
-docker run --rm -p 8000:8000 -v hivemind-data:/data hivemind
+docker run --rm \
+  -p 8000:8000 \
+  -v hivemind-data:/data \
+  -e HIVEMIND_DEVELOPMENT_MODE=true \
+  hivemind
 ```
 
-Run the container behind TLS or another HTTPS terminator in normal deployments.
-Auth session cookies are `Secure` by default. Use
-`HIVEMIND_DEVELOPMENT_MODE=true` only for local HTTP development.
+This is the local container smoke-test path. Open `http://localhost:8000/`,
+complete the first-run admin setup if the `hivemind-data` volume is empty, and
+then log in with that same username/password on later starts.
+
+For the actual self-hosted container, keep the same `/data` volume but run the
+app behind TLS or another HTTPS terminator and leave
+`HIVEMIND_DEVELOPMENT_MODE` unset:
+
+```bash
+docker run -d \
+  --name hivemind \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -v hivemind-data:/data \
+  hivemind
+```
+
+Auth session cookies are `Secure` by default in this mode, so use the HTTPS
+URL from your reverse proxy when completing setup or logging in. The first
+username/password entered for an empty `/data` volume becomes the local admin;
+there are no default container credentials.
 
 GitHub Actions also builds this image on pull requests and publishes it to
 GitHub Container Registry from `main` and version tags as
