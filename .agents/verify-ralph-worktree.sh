@@ -242,8 +242,8 @@ run_case() {
   rm -rf "$case_root"
 }
 
-run_case "no-issue-branch" "failure" "did not create a dedicated issue worktree or continue inside an existing issue worktree" "no"
-run_case "in-place-issue-branch" "failure" "issue work must run from a dedicated git worktree" "no"
+run_case "no-issue-branch" "failure" "did not create a dedicated issue worktree" "no"
+run_case "in-place-issue-branch" "failure" "Ralph must create dedicated git worktrees" "no"
 run_case "existing-primary-issue-branch" "failure" "issue work must run from a dedicated git worktree" "no"
 run_case "existing-primary-issue-branch-separate-git-dir" "failure" "issue work must run from a dedicated git worktree" "no"
 run_case "dedicated-issue-worktree" "success" "" "yes"
