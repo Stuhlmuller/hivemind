@@ -93,6 +93,22 @@ If the repair does not hold or `/etc/static` still points at a missing store
 path, repair or reinstall the macOS multi-user Nix daemon installation. This is
 a machine-local problem, not a Hivemind flake problem.
 
+## Continuous Integration
+
+GitHub Actions runs the repo-owned baseline on pushes and pull requests to
+`main`: `nix flake check --no-write-lock-file`,
+`nix develop --command pytest -q`, shell script syntax checks,
+`nix develop --command bash .agents/verify-swarm.sh`, and a tracked-file check
+for unresolved merge conflict markers, including diff3 markers. Repository
+maintainers should require the `CI / Repository hygiene` and
+`CI / Nix and tests` status checks before merging changes into `main`.
+
+`qlty check` remains a local handoff gate because `qlty` is currently listed as
+host-managed in `.agents/TOOLS.md` instead of being provided by `flake.nix`.
+The pre-commit hooks remain contributor opt-in for the same reason; promote
+selected hooks into the required CI baseline only after their tools are added
+to the Nix dev shell.
+
 ## Dev Server Login
 
 There is no baked-in default account. On first run, Hivemind shows a setup

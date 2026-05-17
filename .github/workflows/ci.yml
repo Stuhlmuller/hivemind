@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject unresolved merge conflict markers
+        run: |
+          if git grep -n -E '^(<{7}|={7}|>{7}|\|{7})( .*)?$' -- .; then
+            echo "Unresolved merge conflict markers found." >&2
+            exit 1
+          fi
+
+  verify:
+    name: Nix and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Check flake
+        run: nix flake check --no-write-lock-file
+
+      - name: Run Python tests
+        env:
+          HIVEMIND_DB_PATH: ":memory:"
+        run: nix develop --command pytest -q
+
+      - name: Check shell script syntax
+        run: nix develop --command bash -c 'bash -n .agents/*.sh scripts/*.sh'
+
+      - name: Verify swarm loop automation
+        env:
+          HIVEMIND_DB_PATH: ":memory:"
+        run: nix develop --command bash .agents/verify-swarm.sh
