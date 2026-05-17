@@ -23,6 +23,7 @@ from hivemind.providers import AgentProviderError, ProviderRunRequest, ProviderR
 from hivemind.store import (
     AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
     HivemindStore,
+    LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
     SCHEDULE_BACKFILL_BATCH_LIMIT,
     StoreError,
     hash_password,
@@ -273,6 +274,46 @@ def create_provider_credential(
             "metadata": {"credential_kind": "generic_reference", "purpose": "agent_provider"},
         }
     )
+
+
+def create_legacy_provider_credential(
+    store: HivemindStore,
+    agent_id: str,
+    *,
+    credential_id: str = PROVIDER_CREDENTIAL_ID,
+) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "id": credential_id,
+        "name": "OpenRouter Provider Credential",
+        "provider": "openrouter",
+        "secret_ref": "env://OPENROUTER_API_KEY",
+        "allowed_agents": json.dumps([agent_id]),
+        "allowed_actions": json.dumps([f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter"]),
+        "approval_required_actions": json.dumps([]),
+        "max_ttl_seconds": 300,
+        "require_intent": 1,
+        "metadata": json.dumps({"credential_kind": "generic_reference", "purpose": "agent_provider"}),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO credentials (
+                id, name, provider, secret_ref, allowed_agents, allowed_actions,
+                approval_required_actions, max_ttl_seconds, require_intent, metadata,
+                created_at, updated_at
+            )
+            VALUES (
+                :id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions,
+                :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata,
+                :created_at, :updated_at
+            )
+            """,
+            row,
+        )
+    return store.public_credential(store.get_credential(credential_id))
 
 
 def latest_schedule_run_event(client: TestClient, schedule_id: str) -> dict[str, object]:
@@ -1152,6 +1193,60 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
     )
     require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
+
+
+def test_agent_provider_credential_accepts_legacy_action_prefix(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Legacy provider runner",
+            "role": "run through an upgraded provider credential",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_legacy_provider_credential(store, agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Run with legacy provider action",
+            "description": "Existing provider credentials should remain usable after upgrade.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 201, "legacy provider credential action should still authorize")
+    require_equal(len(adapter.requests), 1, "provider adapter should receive the authorized legacy credential request")
+    provider_request = adapter.requests[0]
+    require_equal(
+        provider_request.credential_action["action"],
+        f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter",
+        "adapter should receive the exact legacy brokered action",
+    )
+    require_true(
+        "lease_token" not in provider_request.credential_action,
+        "legacy provider action should not expose raw lease tokens",
+    )
+    require_true(
+        not any(
+            event["type"] == "credential.lease.denied" and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            for event in audit_events
+        ),
+        "legacy provider credentials should not emit a denied lease before succeeding",
+    )
 
 
 def test_agent_provider_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:

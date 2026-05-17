@@ -112,6 +112,7 @@ LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
 AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider_"
+LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
 REDACTED_VALUE = "[redacted]"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
@@ -1854,7 +1855,7 @@ class HivemindStore:
         model: str,
         credential_id: str,
     ) -> dict[str, Any]:
-        action = f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        action = self.agent_provider_credential_action(credential_id=credential_id, provider_id=provider_id)
         intent = f"Run task {task_id} through the {provider_id} agent provider using model {model}."
         try:
             token, lease = self.request_lease(
@@ -1913,6 +1914,18 @@ class HivemindStore:
                     },
                 )
             raise
+
+    def agent_provider_credential_action(self, *, credential_id: str, provider_id: str) -> str:
+        action = f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        legacy_action = f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        try:
+            credential = self.get_credential(credential_id)
+        except StoreError:
+            return action
+        allowed_actions = set(loads(credential["allowed_actions"], []))
+        if action not in allowed_actions and legacy_action in allowed_actions:
+            return legacy_action
+        return action
 
     def authorize_task_provider_tool_request(
         self,
