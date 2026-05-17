@@ -76,6 +76,7 @@ class StoreValidationError(StoreError):
 
 LEASE_DENIED_EVENT = "credential.lease.denied"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
+SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 
 
 @dataclass(frozen=True)
@@ -795,6 +796,12 @@ class HivemindStore:
             raise StoreNotFoundError(f"unknown task: {task_id}")
         return row
 
+    def get_schedule_row(self, conn: sqlite3.Connection, schedule_id: str) -> sqlite3.Row:
+        row = conn.execute(SCHEDULE_BY_ID_QUERY, (schedule_id,)).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"unknown schedule: {schedule_id}")
+        return row
+
     def validate_optional_agent_reference(
         self,
         conn: sqlite3.Connection,
@@ -970,6 +977,19 @@ class HivemindStore:
         with self.connect() as conn:
             return [self.public_schedule(row) for row in conn.execute("SELECT * FROM schedules ORDER BY created_at DESC")]
 
+    def update_schedule_enabled(self, schedule_id: str, enabled: bool) -> dict[str, Any]:
+        now = iso()
+        with self.connect() as conn:
+            row = self.get_schedule_row(conn, schedule_id)
+            conn.execute(
+                "UPDATE schedules SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now, schedule_id),
+            )
+        actor = row["assigned_agent_id"] or "user"
+        reason = "schedule enabled" if enabled else "schedule paused"
+        self.audit("schedule.enabled.updated", actor, schedule_id, "allowed", reason, {"enabled": enabled})
+        return self.get_schedule(schedule_id)
+
     def run_due_schedules_once(self) -> list[dict[str, Any]]:
         now = utcnow()
         created: list[dict[str, Any]] = []
@@ -997,6 +1017,10 @@ class HivemindStore:
             self.audit("schedule.ran", row["assigned_agent_id"] or "scheduler", row["id"], "allowed", "scheduled task created", {"task_id": task["id"]})
             created.append(task)
         return created
+
+    def get_schedule(self, schedule_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            return self.public_schedule(self.get_schedule_row(conn, schedule_id))
 
     def public_schedule(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         item = dict(row)
