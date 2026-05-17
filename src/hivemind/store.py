@@ -15,7 +15,9 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
 
+from hivemind.config import HivemindConfig
 from hivemind.oauth import SecretBox
+from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
 from hivemind.secret_refs import preview_secret_ref, validate_secret_ref
 
 
@@ -90,18 +92,30 @@ class SessionUser:
 
 
 class HivemindStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        config: HivemindConfig | None = None,
+        provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self.config = config or HivemindConfig.from_env()
+        self._policy_engine = PolicyEngine(
+            self.config.intent_reviewer,
+            provider_reviewers=provider_reviewers,
+        )
         self._migrate()
 
     @classmethod
-    def from_env(cls) -> "HivemindStore":
+    def from_env(cls, *, provider_reviewers: Mapping[str, ProviderIntentReviewer] | None = None) -> "HivemindStore":
+        config = HivemindConfig.from_env()
         path = os.getenv("HIVEMIND_DB_PATH", "/data/hivemind.db")
         if path == ":memory:":
-            return cls(path)
-        return cls(Path(path))
+            return cls(path, config=config, provider_reviewers=provider_reviewers)
+        return cls(Path(path), config=config, provider_reviewers=provider_reviewers)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -877,20 +891,24 @@ class HivemindStore:
         with self.connect() as conn:
             self.get_agent_row(conn, agent_id)
         credential = self.get_credential(credential_id)
-        allowed_agents = set(loads(credential["allowed_agents"], []))
-        allowed_actions = set(loads(credential["allowed_actions"], []))
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
-        normalized_action = action.strip().lower()
-        reason = "intent and scope satisfy policy"
-        if agent_id not in allowed_agents:
-            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "agent is not allowed to use this credential", {"action": normalized_action})
-            raise StoreError("agent is not allowed to use this credential")
-        if normalized_action not in allowed_actions:
-            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "action is outside this credential policy", {"action": normalized_action})
-            raise StoreError("action is outside this credential policy")
-        if credential["require_intent"] and len(intent.strip()) < 12:
-            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", "intent is too short to authorize", {"action": normalized_action})
-            raise StoreError("intent is too short to authorize")
+        review = self._policy_engine.review_request(
+            PolicyReviewInput(
+                credential_id=credential_id,
+                credential_provider=credential["provider"],
+                allowed_agents=frozenset(loads(credential["allowed_agents"], [])),
+                allowed_actions=frozenset(loads(credential["allowed_actions"], [])),
+                require_intent=bool(credential["require_intent"]),
+                agent_id=agent_id,
+                action=action,
+                intent=intent,
+                credential_metadata=loads(credential["metadata"], {}),
+            )
+        )
+        normalized_action = review.normalized_action
+        if not review.allowed:
+            self.audit(LEASE_DENIED_EVENT, agent_id, credential_id, "denied", review.reason, {"action": normalized_action})
+            raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
         requires_approval = normalized_action in approval_required_actions
         token = f"hvp_{secrets.token_urlsafe(24)}" if requires_approval else f"hvl_{secrets.token_urlsafe(24)}"
@@ -926,7 +944,7 @@ class HivemindStore:
                 {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl},
             )
             return None, self.public_lease(row)
-        self.audit("credential.lease.issued", agent_id, credential_id, "allowed", reason, {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl})
+        self.audit("credential.lease.issued", agent_id, credential_id, "allowed", review.reason, {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl})
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public

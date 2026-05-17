@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from hivemind.config import HivemindConfig
 from hivemind.oauth import (
     OAuthConfigurationError,
     SecretBox,
@@ -125,8 +124,8 @@ class UpdateScheduleRequest(BaseModel):
 
 
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
-    config = HivemindConfig.from_env()
     db = store or HivemindStore.from_env()
+    config = db.config
     oauth_providers = load_oauth_providers_from_env()
     secret_box = SecretBox.from_env()
     static_dir = files("hivemind").joinpath("static")
