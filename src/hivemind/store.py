@@ -447,6 +447,8 @@ class HivemindStore:
 
     def export_backup_bundle(self) -> dict[str, Any]:
         with self.connect() as conn:
+            # Keep all logical table reads on the same SQLite snapshot.
+            conn.execute("BEGIN")
             tables = {
                 table: [dict(row) for row in conn.execute(query)]
                 for table, query in BACKUP_TABLE_QUERIES.items()
