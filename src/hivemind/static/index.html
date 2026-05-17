@@ -45,7 +45,7 @@ agents: brokered capabilities</pre>
         <form id="auth-form" class="panel stack">
           <div class="panel-heading">
             <h2 id="auth-title">setup admin</h2>
-            <p id="auth-mode">first local user becomes admin</p>
+            <p id="auth-mode">first local admin</p>
           </div>
           <label>
             username
@@ -61,7 +61,17 @@ agents: brokered capabilities</pre>
               required
             />
           </label>
-          <button type="submit">continue</button>
+          <label id="password-confirm-field">
+            confirm password
+            <input
+              name="password_confirm"
+              type="password"
+              placeholder="repeat admin password"
+              autocomplete="new-password"
+            />
+          </label>
+          <p id="auth-detail" class="field-hint">Create the first local operator account for this Hivemind node.</p>
+          <button id="auth-submit" type="submit">create admin</button>
         </form>
       </section>
 

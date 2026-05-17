@@ -29,6 +29,7 @@ OAUTH_FAILED_EVENT = "credential.oauth.failed"
 class SetupRequest(BaseModel):
     username: str = Field(min_length=3)
     password: str = Field(min_length=12)
+    password_confirm: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -205,6 +206,8 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/auth/setup", status_code=201)
     def setup(request: SetupRequest, response: Response) -> dict[str, Any]:
+        if request.password_confirm is not None and request.password_confirm != request.password:
+            raise HTTPException(status_code=400, detail="password confirmation does not match")
         try:
             user = db.setup_admin(request.username, request.password)
             token, user = db.login(request.username, request.password)
