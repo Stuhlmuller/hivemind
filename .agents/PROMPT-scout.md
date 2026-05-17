@@ -24,12 +24,13 @@ Before doing any other work:
    - Run `gh issue list --state all --limit 100`
    - Run `gh pr list --state open --limit 50`
 2. Audit the current codebase, tests, docs, automation scripts, release gaps, and shipped behavior on the default branch.
-3. Open new issues only for gaps that are not already covered by existing issues or open PRs.
-4. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
-5. Keep each new issue focused on one concern.
-6. Include concrete evidence from the codebase or shipped behavior in every issue body.
-7. Open at most 2 new issues per run unless the backlog is empty.
-8. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
+3. Treat issue creation as exceptional when there is already an actionable open backlog. Prefer updating, de-duplicating, ranking, or commenting on existing issues.
+4. Open new issues only for gaps that are not already covered by existing issues or open PRs.
+5. Prefer high-signal issues around security, reliability, tests, CI, release safety, observability, onboarding, and agent automation.
+6. Keep each new issue focused on one concern.
+7. Include concrete evidence from the codebase or shipped behavior in every issue body.
+8. Open at most 1 new issue per run, and only when the validated shipped-behavior gap is materially more important than the current open backlog.
+9. If the current issue set already covers the meaningful gaps you found, do not create filler tickets.
 
 ## Browser Scope
 

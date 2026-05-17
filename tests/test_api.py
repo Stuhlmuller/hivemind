@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 
 from hivemind.api import create_app
 from hivemind.config import HivemindConfig, IntentReviewerConfig
+from hivemind.oauth import SecretBox
 from hivemind.policy import ProviderIntentReviewDecision, ProviderIntentReviewRequest, ProviderIntentReviewerError
-from hivemind.store import HivemindStore, StoreError, hash_password
+from hivemind.store import HivemindStore, SCHEDULE_BACKFILL_BATCH_LIMIT, StoreError, hash_password
 
 TEST_PASSWORD = "operator-not-secret"
 
@@ -56,6 +57,17 @@ def setup(client: TestClient) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
     assert response.status_code == 201
+
+
+def latest_schedule_run_event(client: TestClient, schedule_id: str) -> dict[str, object]:
+    events = [
+        event
+        for event in client.get("/audit-events").json()
+        if event["type"] == "schedule.ran" and event["target_id"] == schedule_id
+    ]
+    if not events:
+        raise AssertionError(f"missing schedule.ran audit event for {schedule_id}")
+    return events[0]
 
 
 def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> None:
@@ -303,6 +315,28 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
 
+    replay_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
+    require_equal(
+        replay_response.json()["detail"],
+        "credential lease is expired or revoked",
+        "replayed lease use should expose the revoke/expiry reason",
+    )
+
+    stored_lease = client.get("/credential-leases").json()[0]
+    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
+    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
+
+    audit_events = client.get("/audit-events").json()
+    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
+    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
+    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
+    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
+    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
+
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
@@ -443,6 +477,69 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
     require_true(
         "intent reviewer provider is not configured" in response.json()["detail"],
         "default app path should not silently fall back to local review",
+    )
+
+
+def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "persisted-lease-race.db"
+    setup_store = HivemindStore(db_path)
+    setup_store.setup_admin("admin", TEST_PASSWORD)
+    agent = setup_store.list_agents()[0]
+    credential = setup_store.list_credentials()[0]
+    lease_token, _ = setup_store.request_lease(
+        credential_id=credential["id"],
+        agent_id=agent["id"],
+        action="read_repo",
+        intent="Read repository metadata for safe task triage.",
+        ttl_seconds=30,
+    )
+    if lease_token is None:
+        raise AssertionError("active lease request should issue a token")
+
+    start = Barrier(3)
+    consume = Barrier(2)
+
+    class RacingStore(HivemindStore):
+        def _consume_credential_action(self, conn, lease, normalized_action, payload):
+            consume.wait(timeout=5)
+            return super()._consume_credential_action(conn, lease, normalized_action, payload)
+
+    stores = [RacingStore(db_path), RacingStore(db_path)]
+
+    def perform(store: HivemindStore) -> tuple[str, object]:
+        start.wait(timeout=5)
+        try:
+            return (
+                "ok",
+                store.perform_credential_action(
+                    lease_token=lease_token,
+                    action="read_repo",
+                    payload={"repo": "hivemind"},
+                ),
+            )
+        except StoreError as exc:
+            return ("error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(perform, store) for store in stores]
+        start.wait(timeout=5)
+        results = [future.result() for future in futures]
+
+    require_equal(sum(1 for status, _ in results if status == "ok"), 1, "only one concurrent action should succeed")
+    require_equal(
+        [detail for status, detail in results if status == "error"],
+        ["credential lease is expired or revoked"],
+        "losing concurrent action should fail closed as a replay",
+    )
+    require_equal(setup_store.list_leases()[0]["status"], "revoked", "persisted lease should be consumed")
+
+    action_events = [
+        event for event in setup_store.list_audit_events() if event["type"].startswith("credential.action.")
+    ]
+    require_equal(
+        sorted(event["type"] for event in action_events),
+        ["credential.action.denied", "credential.action.performed"],
+        "race should audit one allowed action and one denial",
     )
 
 
@@ -786,7 +883,177 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, or oauth://"
+    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, oauth://, or secret://"
+
+
+def test_create_credential_rejects_client_supplied_secret_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Forged Broker Secret",
+            "provider": "openrouter",
+            "secret_ref": "secret://cred_existing",
+            "allowed_actions": ["review_intent"],
+        },
+    )
+
+    require_equal(response.status_code, 400, "client-supplied secret:// refs should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "secret:// refs are broker-generated; provide secret_value for broker-managed storage",
+        "client-supplied secret:// refs should explain how to use managed storage",
+    )
+
+
+def test_store_rejects_client_supplied_broker_secret_ref(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    try:
+        store.create_credential(
+            {
+                "name": "Forged Broker Secret",
+                "provider": "openrouter",
+                "secret_ref": "secret://cred_existing",
+                "allowed_actions": ["review_intent"],
+            }
+        )
+    except StoreError as exc:
+        require_equal(
+            str(exc),
+            "secret:// refs are broker-generated; provide secret_value for broker-managed storage",
+            "store should preserve broker-managed secret_ref invariant",
+        )
+    else:
+        raise AssertionError("client-supplied secret:// credential was accepted")
+
+
+def test_create_credential_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Forged Managed Secret",
+            "provider": "openrouter",
+            "secret_ref": "env://OPENROUTER_API_KEY",
+            "allowed_actions": ["review_intent"],
+            "metadata": {"credential_kind": "managed_secret"},
+        },
+    )
+
+    require_equal(response.status_code, 400, "external refs should not claim broker-managed secret metadata")
+    require_equal(
+        response.json()["detail"],
+        "managed_secret metadata is broker-generated; provide secret_value for broker-managed storage",
+        "external refs should explain how to use managed storage",
+    )
+
+
+def test_store_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+
+    try:
+        store.create_credential(
+            {
+                "name": "Forged Managed Secret",
+                "provider": "openrouter",
+                "secret_ref": "env://OPENROUTER_API_KEY",
+                "allowed_actions": ["review_intent"],
+                "metadata": {"credential_kind": "managed_secret"},
+            }
+        )
+    except StoreError as exc:
+        require_equal(
+            str(exc),
+            "managed_secret metadata is broker-generated; provide secret_value for broker-managed storage",
+            "store should preserve broker-managed metadata invariant",
+        )
+    else:
+        raise AssertionError("external ref with managed_secret metadata was accepted")
+
+
+def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Broker Secret",
+            "provider": "openrouter",
+            "secret_value": "sk-test-local-secret",
+            "allowed_actions": ["review_intent"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Set HIVEMIND_SECRETS_KEY to enable broker-side local secret storage."
+    assert "sk-test-local-secret" not in response.text
+
+
+def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    managed_value = "  -----BEGIN TEST SECRET-----\nline-one\nline-two\n-----END TEST SECRET-----\n"
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Broker Secret",
+            "provider": "openrouter",
+            "secret_value": managed_value,
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["review_intent"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference", "note": "operator supplied"},
+        },
+    )
+
+    assert response.status_code == 201
+    credential = response.json()
+    assert credential["provider"] == "openrouter"
+    assert credential["metadata"]["credential_kind"] == "managed_secret"
+    require_equal(credential["metadata"]["note"], "operator supplied", "managed secrets should preserve non-kind metadata")
+    assert credential["secret_ref_preview"].startswith("secret://")
+    assert "secret_value" not in credential
+    assert managed_value not in response.text
+
+    list_response = client.get("/credentials")
+    assert list_response.status_code == 200
+    assert managed_value not in list_response.text
+
+    store = client.app.state.store
+    secret_box = SecretBox.from_env()
+    assert secret_box is not None
+    assert store.resolve_broker_secret(credential["id"], secret_box) == managed_value
+
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    try:
+        row = conn.execute(
+            "SELECT secret_ref FROM credentials WHERE id = ?",
+            (credential["id"],),
+        ).fetchone()
+        secret_row = conn.execute(
+            "SELECT ciphertext FROM broker_secrets WHERE credential_id = ?",
+            (credential["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row[0] == f"secret://{credential['id']}"
+    assert secret_row is not None
+    assert "BEGIN TEST SECRET" not in secret_row[0]
 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
@@ -1055,10 +1322,11 @@ def test_codex_oauth_flow_audits_missing_code_callback(
     assert all(item["provider"] != "codex" for item in credentials)
 
 
-def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
+def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
     agent = client.get("/agents").json()[0]
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
     task_response = client.post(
         "/tasks",
@@ -1084,51 +1352,245 @@ def test_tasks_heartbeats_and_due_schedules(tmp_path: Path) -> None:
             "interval_seconds": 60,
             "task_title": "Scheduled policy review",
             "assigned_agent_id": agent["id"],
+            "next_run_at": (base_now - timedelta(seconds=190)).isoformat(),
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+    require_equal(schedule["catch_up_policy"], "run_once", "schedules should default to run_once")
+    require_true(schedule["enabled"] is True, "schedules should start enabled")
+
+    disable_response = client.patch(f"/schedules/{schedule['id']}", json={"enabled": False})
+    require_equal(disable_response.status_code, 200, "schedule pause should succeed")
+    require_equal(disable_response.json()["id"], schedule["id"], "pause should target the requested schedule")
+    require_true(disable_response.json()["enabled"] is False, "pause should disable the schedule")
+
+    paused_run_response = client.post("/schedules/run-due")
+    require_equal(paused_run_response.status_code, 200, "running due schedules while paused should succeed")
+    require_equal(paused_run_response.json()["created_tasks"], [], "paused schedules should not create tasks")
+
+    resumed_schedule = client.patch(f"/schedules/{schedule['id']}", json={"enabled": True})
+    require_equal(resumed_schedule.status_code, 200, "schedule resume should succeed")
+    require_equal(resumed_schedule.json()["id"], schedule["id"], "resume should target the requested schedule")
+    require_true(resumed_schedule.json()["enabled"] is True, "resume should re-enable the schedule")
+
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "running due schedules should succeed")
+    created_tasks = run_response.json()["created_tasks"]
+    require_equal(len(created_tasks), 1, "run_once should create exactly one task")
+    require_equal(created_tasks[0]["title"], "Scheduled policy review", "run_once should create the scheduled task template")
+
+    second_run_response = client.post("/schedules/run-due")
+    require_equal(second_run_response.status_code, 200, "a second immediate due run check should succeed")
+    require_equal(second_run_response.json()["created_tasks"], [], "run_once should advance the schedule after one execution")
+
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    require_true(updated_schedule["enabled"] is True, "the schedule should remain enabled after resuming")
+    require_true(updated_schedule["last_run_at"] is not None, "running the schedule should record last_run_at")
+    last_run_at = datetime.fromisoformat(updated_schedule["last_run_at"])
+    next_run_at = datetime.fromisoformat(updated_schedule["next_run_at"])
+    require_equal(
+        next_run_at - last_run_at,
+        timedelta(seconds=60),
+        "run_once should reset cadence from the current execution time",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(metadata["catch_up_policy"], "run_once", "audit metadata should record the active catch-up policy")
+    require_equal(metadata["created_task_count"], 1, "run_once audit metadata should report one created task")
+    require_true(metadata["missed_run_count"] >= 4, "run_once should record the number of overdue schedule slots")
+    require_equal(
+        metadata["skipped_run_count"],
+        metadata["missed_run_count"] - 1,
+        "run_once should report every skipped missed run after the immediate catch-up task",
+    )
+    require_equal(metadata["task_ids"], [created_tasks[0]["id"]], "run_once should audit the created task id")
+    require_equal(len(metadata["scheduled_for"]), 1, "run_once should audit the single executed slot")
+    schedule_run_event = latest_schedule_run_event(client, schedule["id"])
+    require_equal(schedule_run_event["actor_id"], agent["id"], "schedule audit should attribute the assigned agent")
+    require_equal(schedule_run_event["target_id"], schedule["id"], "schedule audit should target the schedule id")
+    require_equal(schedule_run_event["decision"], "allowed", "schedule audit should record an allowed decision")
+    require_equal(schedule_run_event["reason"], "scheduled task created", "schedule audit should describe the created task")
+
+
+def test_due_schedules_skip_missed_runs_and_preserve_cadence(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Cadence-preserving review",
+            "interval_seconds": 60,
+            "catch_up_policy": "skip_missed",
+            "task_title": "Cadence-preserving scheduled review",
+            "next_run_at": (base_now - timedelta(seconds=190)).isoformat(),
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "running due schedules should succeed")
+    require_equal(len(run_response.json()["created_tasks"]), 1, "skip_missed should create one current task")
+
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    last_run_at = datetime.fromisoformat(updated_schedule["last_run_at"])
+    next_run_at = datetime.fromisoformat(updated_schedule["next_run_at"])
+    require_true(
+        timedelta(0) < next_run_at - last_run_at < timedelta(seconds=60),
+        "skip_missed should preserve the existing cadence instead of drifting from the current execution time",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(metadata["catch_up_policy"], "skip_missed", "audit metadata should record skip_missed")
+    require_equal(metadata["created_task_count"], 1, "skip_missed should create one task for the latest due slot")
+    require_equal(
+        metadata["skipped_run_count"],
+        metadata["missed_run_count"] - 1,
+        "skip_missed should report the older missed slots it intentionally discarded",
+    )
+    require_equal(len(metadata["scheduled_for"]), 1, "skip_missed should audit one scheduled run slot")
+
+
+def test_due_schedules_backfill_every_missed_run(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Backfill review",
+            "interval_seconds": 60,
+            "catch_up_policy": "backfill",
+            "task_title": "Backfill scheduled review",
+            "next_run_at": (base_now - timedelta(seconds=190)).isoformat(),
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "running due schedules should succeed")
+    require_equal(len(run_response.json()["created_tasks"]), 4, "backfill should create one task per missed run")
+
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    last_run_at = datetime.fromisoformat(updated_schedule["last_run_at"])
+    next_run_at = datetime.fromisoformat(updated_schedule["next_run_at"])
+    require_true(
+        timedelta(0) < next_run_at - last_run_at < timedelta(seconds=60),
+        "backfill should resume on the next scheduled slot after catching up",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(metadata["catch_up_policy"], "backfill", "audit metadata should record backfill")
+    require_equal(metadata["created_task_count"], 4, "backfill should report every created catch-up task")
+    require_equal(metadata["missed_run_count"], 4, "backfill should report the number of overdue slots")
+    require_equal(metadata["skipped_run_count"], 0, "backfill should not skip any missed runs")
+    require_equal(len(metadata["task_ids"]), 4, "backfill should audit each created task id")
+    require_equal(len(metadata["scheduled_for"]), 4, "backfill should audit each scheduled slot it replayed")
+
+
+def test_due_schedules_run_once_counts_long_downtime_without_expanding_slots(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Long downtime review",
+            "interval_seconds": 60,
+            "catch_up_policy": "run_once",
+            "task_title": "Long downtime scheduled review",
             "next_run_at": "2000-01-01T00:00:00+00:00",
         },
     )
-    assert schedule_response.status_code == 201
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
     schedule = schedule_response.json()
-    assert schedule["enabled"] is True
 
-    disable_response = client.patch(f"/schedules/{schedule['id']}", json={"enabled": False})
-    assert disable_response.status_code == 200
-    assert disable_response.json()["id"] == schedule["id"]
-    assert disable_response.json()["enabled"] is False
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "long-overdue run_once schedules should not hang")
+    require_equal(len(run_response.json()["created_tasks"]), 1, "run_once should still create exactly one task")
 
-    paused_run_response = client.post("/schedules/run-due")
-    assert paused_run_response.status_code == 200
-    assert paused_run_response.json()["created_tasks"] == []
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_true(metadata["missed_run_count"] > 1_000_000, "long downtime should be counted arithmetically")
+    require_equal(metadata["created_task_count"], 1, "run_once should not create one task per missed slot")
+    require_equal(
+        metadata["skipped_run_count"],
+        metadata["missed_run_count"] - 1,
+        "run_once should report skipped downtime slots without materializing tasks",
+    )
+    require_equal(metadata["remaining_run_count"], 0, "run_once should not leave catch-up work queued")
+    require_equal(len(metadata["scheduled_for"]), 1, "run_once should audit only the immediate recovery run")
 
-    resumed_schedule = client.patch(f"/schedules/{schedule['id']}", json={"enabled": True})
-    assert resumed_schedule.status_code == 200
-    assert resumed_schedule.json()["id"] == schedule["id"]
-    assert resumed_schedule.json()["enabled"] is True
 
-    resumed_run_response = client.post("/schedules/run-due")
-    assert resumed_run_response.status_code == 200
-    created_tasks = resumed_run_response.json()["created_tasks"]
-    assert len(created_tasks) == 1
-    assert created_tasks[0]["title"] == "Scheduled policy review"
+def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
-    second_paused_run_response = client.post("/schedules/run-due")
-    assert second_paused_run_response.status_code == 200
-    assert second_paused_run_response.json()["created_tasks"] == []
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Batched backfill review",
+            "interval_seconds": 60,
+            "catch_up_policy": "backfill",
+            "task_title": "Batched backfill scheduled review",
+            "next_run_at": (base_now - timedelta(seconds=60 * (SCHEDULE_BACKFILL_BATCH_LIMIT + 10))).isoformat(),
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
 
-    schedules = client.get("/schedules")
-    assert schedules.status_code == 200
-    current_schedule = next(item for item in schedules.json() if item["id"] == schedule["id"])
-    assert current_schedule["enabled"] is True
-    assert current_schedule["last_run_at"] is not None
+    run_response = client.post("/schedules/run-due")
+    require_equal(run_response.status_code, 200, "long-overdue backfill schedules should not hang")
+    require_equal(
+        len(run_response.json()["created_tasks"]),
+        SCHEDULE_BACKFILL_BATCH_LIMIT,
+        "backfill should create only a bounded batch in one scheduler pass",
+    )
 
-    audit_events = client.get("/audit-events")
-    assert audit_events.status_code == 200
-    schedule_run_event = next(event for event in audit_events.json() if event["type"] == "schedule.ran")
-    assert schedule_run_event["actor_id"] == agent["id"]
-    assert schedule_run_event["target_id"] == schedule["id"]
-    assert schedule_run_event["decision"] == "allowed"
-    assert schedule_run_event["reason"] == "scheduled task created"
-    assert schedule_run_event["metadata"]["task_id"] == created_tasks[0]["id"]
+    updated_schedule = next(item for item in client.get("/schedules").json() if item["id"] == schedule["id"])
+    require_true(
+        datetime.fromisoformat(updated_schedule["next_run_at"]) <= datetime.now(timezone.utc),
+        "partial backfill should leave the next unprocessed slot due for a later scheduler pass",
+    )
+    metadata = latest_schedule_run_event(client, schedule["id"])["metadata"]
+    require_equal(
+        metadata["created_task_count"],
+        SCHEDULE_BACKFILL_BATCH_LIMIT,
+        "backfill audit should record the bounded batch size",
+    )
+    require_true(metadata["remaining_run_count"] > 0, "backfill audit should report unprocessed missed slots")
+    require_equal(metadata["skipped_run_count"], 0, "backfill should defer rather than skip excess missed slots")
+
+
+def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Malformed persisted schedule",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    with sqlite3.connect(tmp_path / "hivemind.db") as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", ("0-not-a-date", schedule["id"]))
+
+    run_response = client.post("/schedules/run-due")
+
+    require_equal(run_response.status_code, 400, "malformed persisted schedule timestamps should return a clean 4xx")
+    require_equal(
+        run_response.json()["detail"],
+        "schedule next_run_at must be a valid ISO datetime",
+        "malformed schedule timestamps should not leak parser internals",
+    )
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
@@ -1161,6 +1623,65 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
     assert schedule_response.status_code == 201
     assert schedule_response.json()["assigned_agent_id"] is None
     assert schedule_response.json()["credential_id"] is None
+    require_equal(schedule_response.json()["catch_up_policy"], "run_once", "schedules should default to run_once")
+
+
+def test_schedule_creation_rejects_invalid_catch_up_policy(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Broken catch-up policy",
+            "interval_seconds": 60,
+            "catch_up_policy": "drift_forever",
+            "task_title": "Scheduled task",
+        },
+    )
+    require_equal(response.status_code, 422, "invalid catch-up policies should fail request validation")
+
+
+def test_schedule_creation_rejects_naive_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Naive schedule timestamp",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "2000-01-01T00:00:00",
+        },
+    )
+    require_equal(response.status_code, 400, "schedule creation should reject timezone-naive next_run_at")
+    require_equal(
+        response.json()["detail"],
+        "schedule next_run_at must include a timezone",
+        "schedule timestamp errors should explain the missing timezone",
+    )
+
+
+def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/schedules",
+        json={
+            "name": "Malformed schedule timestamp",
+            "interval_seconds": 60,
+            "task_title": "Scheduled task",
+            "next_run_at": "not-a-date",
+        },
+    )
+    require_equal(response.status_code, 400, "schedule creation should reject malformed next_run_at")
+    require_equal(
+        response.json()["detail"],
+        "schedule next_run_at must be a valid ISO datetime",
+        "schedule timestamp errors should not leak parser internals",
+    )
 
 
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:

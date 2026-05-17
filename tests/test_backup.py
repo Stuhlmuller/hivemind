@@ -6,14 +6,18 @@ from pathlib import Path
 import sqlite3
 
 from hivemind.__main__ import main
+from hivemind.oauth import SecretBox
 from hivemind.store import BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BACKUP_TABLE_QUERIES, HivemindStore, StoreValidationError
 
 TEST_PASSWORD = "operator-not-secret"  # nosec B105
+MANAGED_SECRET_VALUE = "example"  # nosec B105
+STALE_MANAGED_SECRET_VALUE = "stale-example"  # nosec B105
 TABLE_COUNT_QUERIES = {
     "sessions": "SELECT COUNT(*) FROM sessions",
     "leases": "SELECT COUNT(*) FROM leases",
     "oauth_states": "SELECT COUNT(*) FROM oauth_states",
     "oauth_connections": "SELECT COUNT(*) FROM oauth_connections",
+    "broker_secrets": "SELECT COUNT(*) FROM broker_secrets",
 }
 
 
@@ -83,6 +87,18 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "metadata": {"auth_type": "oauth"},
         }
     )
+    managed_credential = source.create_managed_credential(
+        {
+            "name": "Broker-managed secret",
+            "provider": "github",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+        },
+        secret_value=MANAGED_SECRET_VALUE,
+        secret_box=SecretBox("source-backup-secret-key"),
+    )
     task = source.create_task(
         {
             "title": "Backup repo state",
@@ -104,6 +120,18 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "credential_id": oauth_credential["id"],
             "action": "exchange_oauth_code",
             "intent": "Reconnect the brokered OAuth credential after logical restore completes.",
+            "heartbeat_seconds": None,
+        }
+    )
+    managed_task = source.create_task(
+        {
+            "title": "Reconnect managed credential",
+            "description": "Keep the task while dropping the non-restorable managed secret link.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": managed_credential["id"],
+            "action": "read_repo",
+            "intent": "Reconnect the broker-managed credential after logical restore completes.",
             "heartbeat_seconds": None,
         }
     )
@@ -138,6 +166,21 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "next_run_at": "2030-01-01T01:00:00+00:00",
         }
     )
+    managed_schedule = source.create_schedule(
+        {
+            "name": "Managed secret reconnect reminder",
+            "enabled": True,
+            "interval_seconds": 7200,
+            "task_title": "Reconnect managed credential",
+            "task_description": "Recreate the broker-managed secret after restore.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": managed_credential["id"],
+            "action": "read_repo",
+            "intent": "Reconnect the broker-managed credential after logical restore completes.",
+            "next_run_at": "2030-01-01T02:00:00+00:00",
+        }
+    )
     source.audit(
         "backup.bundle.prepared",
         source_admin["id"],
@@ -158,6 +201,10 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
     exported_credential_ids = {row["id"] for row in bundle["tables"]["credentials"]}
     require_true(credential["id"] in exported_credential_ids, "vault credentials should be exported")
     require_true(oauth_credential["id"] not in exported_credential_ids, "oauth credentials should be excluded")
+    require_true(
+        managed_credential["id"] not in exported_credential_ids,
+        "broker-managed credentials should be excluded",
+    )
     exported_tasks = {row["id"]: row for row in bundle["tables"]["tasks"]}
     exported_schedules = {row["id"]: row for row in bundle["tables"]["schedules"]}
     require_equal(
@@ -171,6 +218,11 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
         "tasks should drop refs to excluded oauth credentials",
     )
     require_equal(
+        exported_tasks[managed_task["id"]]["credential_id"],
+        None,
+        "tasks should drop refs to excluded broker-managed credentials",
+    )
+    require_equal(
         exported_schedules[schedule["id"]]["credential_id"],
         credential["id"],
         "restorable schedule credential refs should be preserved",
@@ -179,6 +231,11 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
         exported_schedules[oauth_schedule["id"]]["credential_id"],
         None,
         "schedules should drop refs to excluded oauth credentials",
+    )
+    require_equal(
+        exported_schedules[managed_schedule["id"]]["credential_id"],
+        None,
+        "schedules should drop refs to excluded broker-managed credentials",
     )
 
     target_db = tmp_path / "target.db"
@@ -192,6 +249,18 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
         action="open_issue",
         intent="Create a bounded pre-restore lease for restore cleanup coverage.",
         ttl_seconds=30,
+    )
+    target.create_managed_credential(
+        {
+            "name": "Stale managed secret",
+            "provider": "github",
+            "allowed_agents": [stale_agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 120,
+            "require_intent": True,
+        },
+        secret_value=STALE_MANAGED_SECRET_VALUE,
+        secret_box=SecretBox("target-backup-secret-key"),
     )
     target.create_oauth_state(
         user_id=target_admin["id"],
@@ -213,6 +282,11 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
         table_count(target_db, "oauth_connections"),
         0,
         "restore should not recreate broker-owned oauth token material",
+    )
+    require_equal(
+        table_count(target_db, "broker_secrets"),
+        0,
+        "restore should not recreate broker-managed secret material",
     )
 
 

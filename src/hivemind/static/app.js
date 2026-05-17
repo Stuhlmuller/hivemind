@@ -16,13 +16,13 @@ const state = {
 
 const credentialTemplates = {
   github_oauth_app: {
-    label: "GitHub OAuth App",
+    label: "GitHub OAuth Secret Ref",
     provider: "github",
-    summary: "Capture the public client ID plus a host-side ref for the client secret.",
-    note: "Use this when Hivemind needs to broker OAuth exchange or refresh actions for a GitHub OAuth app.",
+    summary: "Store the public client ID plus a host-side ref for the client secret.",
+    note: "Creates a credential policy record. OAuth exchange and refresh adapters are not implemented yet.",
     defaults: {
-      name: "GitHub OAuth App",
-      allowedActions: "exchange_oauth_code,refresh_oauth_token",
+      name: "GitHub OAuth Secret Ref",
+      allowedActions: "read_repo",
       maxTtlSeconds: 300,
       requireIntent: true,
     },
@@ -51,10 +51,10 @@ const credentialTemplates = {
     label: "GitHub App",
     provider: "github",
     summary: "Store app identifiers in metadata and keep the PEM private key behind a host-side ref.",
-    note: "Use this for GitHub App installation flows where Hivemind needs the app ID, installation ID, and private key reference.",
+    note: "Creates a credential policy record. Installation-token issuance requires a broker adapter.",
     defaults: {
       name: "GitHub App Installation",
-      allowedActions: "issue_installation_token,read_repo",
+      allowedActions: "read_repo",
       maxTtlSeconds: 300,
       requireIntent: true,
     },
@@ -79,6 +79,37 @@ const credentialTemplates = {
           credential_kind: "github_app",
           app_id: form.elements.app_id.value.trim(),
           installation_id: form.elements.installation_id.value.trim(),
+        },
+      };
+    },
+  },
+  managed_secret: {
+    label: "Broker-Stored Secret",
+    provider: "custom",
+    summary: "Encrypt secret material at rest inside Hivemind instead of pointing at a host-side ref.",
+    note: "Requires HIVEMIND_SECRETS_KEY. Public views still expose only a redacted secret:// reference, and only the broker can decrypt the stored material.",
+    defaults: {
+      name: "Broker Managed Secret",
+      allowedActions: "read_repo",
+      maxTtlSeconds: 300,
+      requireIntent: true,
+    },
+    renderFields() {
+      return `
+        <div class="two-col">
+          <label>provider<input name="provider" value="custom" autocomplete="off" required /></label>
+          <label>storage<input value="broker-encrypted" readonly /></label>
+        </div>
+        <label>secret value<textarea name="secret_value" rows="4" autocomplete="off" required></textarea></label>
+        <p class="field-hint">Use this when Hivemind should keep the secret locally in encrypted broker storage and return only a generated <code>secret://</code> ref from public APIs.</p>
+      `;
+    },
+    buildPayload(form) {
+      return {
+        provider: form.elements.provider.value.trim(),
+        secret_value: form.elements.secret_value.value,
+        metadata: {
+          credential_kind: "managed_secret",
         },
       };
     },
@@ -116,8 +147,9 @@ const credentialTemplates = {
 };
 
 const credentialKindLabels = {
-  github_oauth_app: "GitHub OAuth App",
+  github_oauth_app: "GitHub OAuth Secret Ref",
   github_app: "GitHub App",
+  managed_secret: "Broker-Stored Secret",
   generic_reference: "Generic Ref",
 };
 
@@ -180,6 +212,14 @@ function credentialKindLabel(kind) {
 
 function credentialTypeLabel(credential) {
   return credential.metadata?.auth_type === "oauth" ? "OAuth Broker Credential" : credentialKindLabel(credential.metadata?.credential_kind);
+}
+
+function scheduleCatchUpPolicyLabel(policy) {
+  return {
+    skip_missed: "skip missed / keep cadence",
+    run_once: "run once / reset cadence",
+    backfill: "backfill every missed run",
+  }[policy] || policy;
 }
 
 function credentialAgentScope(credential) {
@@ -480,7 +520,7 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
+        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
         [schedule.enabled ? "enabled" : "paused"],
         actions,
       );
@@ -495,7 +535,7 @@ function renderAudit() {
       (event) =>
         `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}<br>${escapeHtml(event.created_at)}</div></article>`,
     )
-    .join("") || '<p class="meta">No broker activity yet.</p>';
+    .join("") || '<p class="meta">No audit events yet.</p>';
 }
 
 function renderCredentialAudit() {
@@ -514,11 +554,13 @@ function renderCredentialAudit() {
 function renderConfig() {
   const reviewer = state.config?.intent_reviewer;
   if (!reviewer) {
-    $("#reviewer-config").textContent = "No reviewer configured";
+    $("#reviewer-config").textContent = "local / deterministic-policy / no credential ref";
     return;
   }
+  const provider = reviewer.provider || "local";
+  const model = reviewer.model || "deterministic-policy";
   const credentialRef = reviewer.credential_ref_preview || "no credential ref";
-  $("#reviewer-config").textContent = `${reviewer.provider} / ${reviewer.model} / ${credentialRef}`;
+  $("#reviewer-config").textContent = `${provider} / ${model} / ${credentialRef}`;
 }
 
 function render() {
@@ -647,7 +689,7 @@ $("#spawn-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
   await refresh();
-  toast("Agent joined the swarm.");
+  toast("Agent registered.");
 });
 
 $("#credential-form").addEventListener("submit", async (event) => {
@@ -658,7 +700,10 @@ $("#credential-form").addEventListener("submit", async (event) => {
   const templatePayload = template.buildPayload(form);
   payload.name = payload.name.trim();
   payload.provider = templatePayload.provider;
-  payload.secret_ref = templatePayload.secret_ref;
+  delete payload.secret_ref;
+  delete payload.secret_value;
+  payload.secret_ref = templatePayload.secret_ref ?? null;
+  payload.secret_value = templatePayload.secret_value ?? null;
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.approval_required_actions = splitCsv(payload.approval_required_actions);
@@ -719,7 +764,7 @@ $("#action-form").addEventListener("submit", async (event) => {
     const result = await api("/credential-actions", { method: "POST", body: JSON.stringify(payload) });
     $("#action-result").textContent = JSON.stringify(result, null, 2);
     await refresh();
-    toast("Broker accepted the action.");
+    toast("Lease matched action.");
   } catch (error) {
     $("#action-result").textContent = error.message;
     await refresh();
