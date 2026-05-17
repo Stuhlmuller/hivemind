@@ -128,6 +128,21 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         raise AssertionError("password input should not ship with a preset value")
 
 
+def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/static/app.js")
+
+    require_equal(response.status_code, 200, "frontend script should be served")
+    require_true("function formatApiError" in response.text, "frontend should format API errors")
+    require_true("function formatErrorItem" in response.text, "frontend should format validation items")
+    require_true(
+        "new Error(formatApiError(body, response.status))" in response.text,
+        "API helper should use formatted error messages",
+    )
+    require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")
+
+
 def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
