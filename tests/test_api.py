@@ -107,6 +107,8 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     assert "credential broker" in response.text
     assert 'id="credential-template-picker"' in response.text
     assert 'id="credential-template-fields"' in response.text
+    assert 'name="approval_required_actions"' in response.text
+    assert 'id="pending-approvals-list"' in response.text
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
@@ -295,8 +297,110 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
     assert credential["metadata"]["app_id"] == "123456"
     assert credential["metadata"]["installation_id"] == "987654321"
     assert credential["policy"]["allowed_agents"] == [agent["id"]]
+    assert credential["policy"]["approval_required_actions"] == []
     assert credential["secret_ref_preview"].startswith("file://")
     assert "github-app.pem" not in response.text
+
+
+def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "GitHub Writer",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_WRITE_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["open_issue", "read_repo"],
+            "approval_required_actions": ["open_issue"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+
+    assert credential_response.status_code == 201
+    credential = credential_response.json()
+    assert credential["policy"]["approval_required_actions"] == ["open_issue"]
+
+    pending_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "open_issue",
+            "intent": "Open a verified issue for a reproducible credential broker regression.",
+            "ttl_seconds": 600,
+        },
+    )
+
+    assert pending_response.status_code == 201
+    pending_lease = pending_response.json()
+    assert pending_lease["status"] == "pending"
+    assert pending_lease["token_preview"] == "not issued"
+    assert pending_lease["ttl_seconds"] == 180
+    assert "lease_token" not in pending_lease
+
+    listed_pending = client.get("/credential-leases").json()
+    assert any(item["id"] == pending_lease["id"] and item["status"] == "pending" for item in listed_pending)
+
+    approve_response = client.post(f"/credential-leases/{pending_lease['id']}/approve")
+    assert approve_response.status_code == 200
+    approved_lease = approve_response.json()
+    assert approved_lease["status"] == "active"
+    assert approved_lease["ttl_seconds"] == 180
+    assert approved_lease["lease_token"].startswith("hvl_")
+
+    action_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": approved_lease["lease_token"],
+            "action": "open_issue",
+            "payload": {"repo": "hivemind", "title": "credential approval regression"},
+        },
+    )
+    assert action_response.status_code == 200
+    assert action_response.json()["ok"] is True
+
+    denied_pending = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "open_issue",
+            "intent": "Open a second issue to confirm operator denial paths stay audited.",
+            "ttl_seconds": 90,
+        },
+    ).json()
+    deny_response = client.post(f"/credential-leases/{denied_pending['id']}/deny")
+    assert deny_response.status_code == 200
+    denied_lease = deny_response.json()
+    assert denied_lease["status"] == "denied"
+    assert denied_lease["token_preview"] == "not issued"
+    assert "lease_token" not in denied_lease
+
+    audit_events = client.get("/audit-events").json()
+    assert any(
+        event["type"] == "credential.lease.pending"
+        and event["metadata"]["lease_id"] == pending_lease["id"]
+        and event["decision"] == "pending"
+        for event in audit_events
+    )
+    assert any(
+        event["type"] == "credential.lease.approved"
+        and event["metadata"]["lease_id"] == pending_lease["id"]
+        and event["decision"] == "allowed"
+        for event in audit_events
+    )
+    assert any(
+        event["type"] == "credential.lease.denied"
+        and event["metadata"]["lease_id"] == denied_pending["id"]
+        and event["reason"] == "operator denied lease request"
+        for event in audit_events
+    )
 
 
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
@@ -333,6 +437,8 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
             },
         ),
         ("GET", "/credential-leases", None),
+        ("POST", "/credential-leases/lease_demo/approve", None),
+        ("POST", "/credential-leases/lease_demo/deny", None),
         (
             "POST",
             "/credential-leases",

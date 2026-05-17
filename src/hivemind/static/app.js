@@ -215,6 +215,11 @@ function credentialDetailRows(credential) {
     rows.push(`Token expiry: ${escapeHtml(metadata.oauth_token_expires_at)}`);
   }
   rows.push(`Allowed agents: ${escapeHtml(credentialAgentScope(credential))}`);
+  rows.push(
+    `Approval required: ${escapeHtml(
+      credential.policy.approval_required_actions.length ? credential.policy.approval_required_actions.join(", ") : "none",
+    )}`,
+  );
   rows.push(`Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s`);
   rows.push(`Intent review: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`);
   return rows.join("<br>");
@@ -278,6 +283,21 @@ function credentialName(credentialId) {
 function agentName(agentId) {
   const agent = state.agents.find((item) => item.id === agentId);
   return agent ? agent.name : agentId;
+}
+
+function leaseTimestampLabel(lease) {
+  return lease.status === "pending" ? "Requested" : "Issued";
+}
+
+function leaseDetailRows(lease) {
+  return [
+    `Agent: ${escapeHtml(agentName(lease.agent_id))}`,
+    `Credential: ${escapeHtml(credentialName(lease.credential_id))}`,
+    `${escapeHtml(leaseTimestampLabel(lease))}: ${escapeHtml(lease.issued_at)}`,
+    `Expires: ${escapeHtml(lease.expires_at)}`,
+    `TTL: ${escapeHtml(lease.ttl_seconds)}s`,
+    `Intent: ${escapeHtml(lease.intent)}`,
+  ].join("<br>");
 }
 
 function renderNavigation() {
@@ -368,6 +388,9 @@ function renderCredentials() {
       if (credential.metadata?.auth_type === "oauth") {
         pills.push(credential.metadata?.oauth_refreshable ? "refreshable" : "access-only");
       }
+      if (credential.policy.approval_required_actions.length) {
+        pills.push(`approval gate: ${credential.policy.approval_required_actions.join(", ")}`);
+      }
       return item(credential.name, credentialDetailRows(credential), pills);
     })
     .join("") || '<p class="meta">No credentials yet.</p>';
@@ -401,13 +424,28 @@ function renderLeases() {
     .map((lease) =>
       item(
         lease.id,
-        `Agent: ${escapeHtml(agentName(lease.agent_id))}<br>Credential: ${escapeHtml(credentialName(lease.credential_id))}<br>Issued: ${escapeHtml(lease.issued_at)}<br>Expires: ${escapeHtml(lease.expires_at)}`,
-        [lease.status, lease.action, lease.token_preview],
+        leaseDetailRows(lease),
+        [lease.status, lease.action, `TTL ${lease.ttl_seconds}s`, lease.token_preview],
       ),
     )
     .join("") || '<p class="meta">No leases yet.</p>';
   $("#credential-active-lease-count").textContent = state.leases.filter((lease) => lease.status === "active").length;
+  $("#credential-pending-lease-count").textContent = state.leases.filter((lease) => lease.status === "pending").length;
   $("#credential-expired-lease-count").textContent = state.leases.filter((lease) => lease.status === "expired").length;
+}
+
+function renderPendingApprovals() {
+  const pendingLeases = state.leases.filter((lease) => lease.status === "pending");
+  $("#pending-approvals-list").innerHTML = pendingLeases
+    .map((lease) => {
+      const actions = `
+        <div class="button-row">
+          <button data-approve-lease="${escapeHtml(lease.id)}" type="button">Approve</button>
+          <button data-deny-lease="${escapeHtml(lease.id)}" type="button">Deny</button>
+        </div>`;
+      return item(lease.id, leaseDetailRows(lease), [lease.status, lease.action, `TTL ${lease.ttl_seconds}s`], actions);
+    })
+    .join("") || '<p class="meta">No pending approvals.</p>';
 }
 
 function renderTasks() {
@@ -467,7 +505,8 @@ function renderCredentialAudit() {
     .map((event) => {
       const action = event.metadata?.action ? `<br>Action: ${escapeHtml(event.metadata.action)}` : "";
       const ttl = Number.isFinite(event.metadata?.ttl_seconds) ? `<br>TTL: ${escapeHtml(event.metadata.ttl_seconds)}s` : "";
-      return `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${action}${ttl}<br>${escapeHtml(event.created_at)}</div></article>`;
+      const leaseId = event.metadata?.lease_id ? `<br>Lease: ${escapeHtml(event.metadata.lease_id)}` : "";
+      return `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${action}${ttl}${leaseId}<br>${escapeHtml(event.created_at)}</div></article>`;
     })
     .join("") || '<p class="meta">No credential audit events yet.</p>';
 }
@@ -486,6 +525,7 @@ function render() {
   renderAgents();
   renderCredentials();
   renderLeases();
+  renderPendingApprovals();
   renderTasks();
   renderSchedules();
   renderAudit();
@@ -616,6 +656,7 @@ $("#credential-form").addEventListener("submit", async (event) => {
   payload.secret_ref = templatePayload.secret_ref;
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
+  payload.approval_required_actions = splitCsv(payload.approval_required_actions);
   payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
   payload.require_intent = form.elements.require_intent.checked;
   payload.metadata = templatePayload.metadata;
@@ -637,6 +678,7 @@ $("#codex-oauth-form").addEventListener("submit", async (event) => {
   payload.provider = "codex";
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
+  payload.approval_required_actions = splitCsv(payload.approval_required_actions);
   payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
   payload.require_intent = form.elements.require_intent.checked;
   payload.metadata = {};
@@ -654,10 +696,10 @@ $("#lease-form").addEventListener("submit", async (event) => {
   payload.ttl_seconds = Number(payload.ttl_seconds);
   try {
     const lease = await api("/credential-leases", { method: "POST", body: JSON.stringify(payload) });
-    $('#action-form input[name="lease_token"]').value = lease.lease_token;
+    $('#action-form input[name="lease_token"]').value = lease.lease_token || "";
     $('#action-form input[name="action"]').value = lease.action;
     await refresh();
-    toast("Lease issued.");
+    toast(lease.lease_token ? "Lease issued." : "Lease request queued for approval.");
   } catch (error) {
     await refresh();
     toast(error.message);
@@ -677,6 +719,33 @@ $("#action-form").addEventListener("submit", async (event) => {
     $("#action-result").textContent = error.message;
     await refresh();
     toast(error.message);
+  }
+});
+
+$("#pending-approvals-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) return;
+  if (target.dataset.approveLease) {
+    try {
+      const lease = await api(`/credential-leases/${target.dataset.approveLease}/approve`, { method: "POST" });
+      $('#action-form input[name="lease_token"]').value = lease.lease_token;
+      $('#action-form input[name="action"]').value = lease.action;
+      await refresh();
+      toast("Lease approved.");
+    } catch (error) {
+      await refresh();
+      toast(error.message);
+    }
+  }
+  if (target.dataset.denyLease) {
+    try {
+      await api(`/credential-leases/${target.dataset.denyLease}/deny`, { method: "POST" });
+      await refresh();
+      toast("Lease denied.");
+    } catch (error) {
+      await refresh();
+      toast(error.message);
+    }
   }
 });
 
