@@ -22,13 +22,15 @@ Before doing any other work:
 
 1. Inspect the repository issues before proposing work:
    - Run `gh issue list --state all --limit 100`
-   - Run `gh pr list --state open --limit 50`
-2. Audit open PR scope, touched codepaths, nearby tests, release safety, docs, and CI expectations.
-3. Treat issue creation as exceptional when there is already an actionable open backlog. Prefer updating, de-duplicating, ranking, or commenting on existing issues.
-4. Open new issues only for grounded bugs, regressions, missing tests, docs gaps, release risks, or operator problems that are not already covered by an issue or PR.
-5. Keep each new issue focused on one concern and include concrete repo evidence.
-6. Open at most 1 issue per run, and only when the finding is materially more important than the current open backlog.
-7. If the current issue set already covers the meaningful findings you uncovered, do not create filler tickets.
+   - Fetch the full open PR queue with paginated `gh api graphql`, or an equivalent API query, including number, title, createdAt, updatedAt, draft state, head/base refs, URL, author, merge state, review decision, and status checks
+2. Audit the full open PR queue oldest-first by `createdAt`, especially stale PRs that have not moved recently, before reviewing newer PRs. Do not rely on a capped `gh pr list` result before enforcing oldest-first ordering.
+3. Audit PR scope, touched codepaths, nearby tests, release safety, docs, and CI expectations.
+4. When an old PR appears obsolete, duplicated by merged work, detached from any open issue or accepted direction, or no longer compatible with current architecture, leave a clear close recommendation for the beekeeper with the evidence. The reviewer loop does not close or merge PRs itself.
+5. Treat issue creation as exceptional when there is already an actionable open backlog. Prefer updating, de-duplicating, ranking, or commenting on existing issues.
+6. Open new issues only for grounded bugs, regressions, missing tests, docs gaps, release risks, or operator problems that are not already covered by an issue or PR.
+7. Keep each new issue focused on one concern and include concrete repo evidence.
+8. Open at most 1 issue per run, and only when the finding is materially more important than the current open backlog.
+9. If the current issue set already covers the meaningful findings you uncovered, do not create filler tickets.
 
 ## Browser Scope
 
