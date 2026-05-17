@@ -264,6 +264,14 @@ function credentialTypeLabel(credential) {
   return credential.metadata?.auth_type === "oauth" ? "OAuth Broker Credential" : credentialKindLabel(credential.metadata?.credential_kind);
 }
 
+function activeOAuthProvider() {
+  return state.oauthProviders.find((provider) => provider.available) || state.oauthProviders[0] || null;
+}
+
+function oauthProviderLabel(provider) {
+  return provider?.label || provider?.id || "OAuth provider";
+}
+
 function scheduleCatchUpPolicyLabel(policy) {
   return {
     skip_missed: "skip missed / keep cadence",
@@ -577,7 +585,7 @@ function renderSelectors() {
   for (const selector of [
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
-    '#codex-oauth-form select[name="allowed_agents"]',
+    '#oauth-credential-form select[name="allowed_agents"]',
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
   ]) {
@@ -630,15 +638,18 @@ function renderCredentials() {
 }
 
 function renderOAuthProviders() {
-  const provider = state.oauthProviders.find((item) => item.id === "codex");
+  const provider = activeOAuthProvider();
+  const providerLabel = oauthProviderLabel(provider);
   const stateNode = $("#oauth-provider-state");
   const detailNode = $("#oauth-provider-detail");
-  const button = $("#codex-oauth-button");
+  const button = $("#oauth-provider-button");
+  $("#oauth-provider-title").textContent = provider?.available ? providerLabel : "OAuth provider";
   if (!provider) {
     stateNode.textContent = "missing";
     stateNode.dataset.state = "error";
-    detailNode.textContent = "Codex OAuth profile is unavailable in this build.";
+    detailNode.textContent = "No OAuth provider profile is configured for this node.";
     button.disabled = true;
+    button.textContent = "oauth unavailable";
     return;
   }
   stateNode.textContent = provider.available ? "ready" : "blocked";
@@ -646,8 +657,8 @@ function renderOAuthProviders() {
   button.disabled = !provider.available;
   button.textContent = provider.available ? "connect via oauth" : "oauth unavailable";
   detailNode.textContent = provider.available
-    ? `Scopes: ${provider.scopes.join(" ")}`
-    : provider.reason;
+    ? `${providerLabel} / scopes: ${provider.scopes.join(" ")}`
+    : provider.reason || "OAuth provider is unavailable.";
 }
 
 function renderLeases() {
@@ -943,11 +954,16 @@ $("#credential-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("#codex-oauth-form").addEventListener("submit", async (event) => {
+$("#oauth-credential-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
+  const provider = activeOAuthProvider();
+  if (!provider || !provider.available) {
+    toast("OAuth provider is not available.");
+    return;
+  }
   const payload = readForm(form);
-  payload.provider = "codex";
+  payload.provider = provider.id;
   payload.allowed_agents = selectedValues(form.elements.allowed_agents);
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.approval_required_actions = splitCsv(payload.approval_required_actions);

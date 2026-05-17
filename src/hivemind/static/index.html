@@ -266,7 +266,7 @@ agents: brokered capabilities</pre>
               <section class="workspace credentials-workspace">
                 <div class="panel">
                   <div class="panel-heading">
-                    <h2>codex subscription</h2>
+                    <h2 id="oauth-provider-title">oauth provider</h2>
                     <p>oauth-backed broker credential</p>
                   </div>
                   <section class="subpanel stack">
@@ -278,19 +278,19 @@ agents: brokered capabilities</pre>
                       <span id="oauth-provider-state" class="status-chip">loading</span>
                     </div>
                     <p id="oauth-provider-detail" class="meta">Checking broker OAuth configuration.</p>
-                    <form id="codex-oauth-form" class="stack">
-                      <label>name<input name="name" value="codex subscription" autocomplete="off" /></label>
+                    <form id="oauth-credential-form" class="stack">
+                      <label>name<input name="name" value="OAuth broker credential" autocomplete="off" /></label>
                       <label>allowed agents<select name="allowed_agents" multiple></select></label>
                       <div class="two-col">
-                        <label>allowed actions<input name="allowed_actions" value="delegate_code,review_code" autocomplete="off" /></label>
+                        <label>allowed actions<input name="allowed_actions" value="agent_provider" autocomplete="off" /></label>
                         <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" value="900" /></label>
                       </div>
-                      <label>approval required actions<input name="approval_required_actions" value="review_code" autocomplete="off" /></label>
+                      <label>approval required actions<input name="approval_required_actions" value="" autocomplete="off" /></label>
                       <p class="field-hint">Use a narrower comma-separated list when an action must stop for operator approval before a token is issued.</p>
                       <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
-                      <button id="codex-oauth-button" type="submit">connect via oauth</button>
+                      <button id="oauth-provider-button" type="submit">connect via oauth</button>
                     </form>
-                    <p class="meta oauth-note">Creates an <code>oauth://codex/...</code> reference after the callback. Token material stays in broker storage.</p>
+                    <p class="meta oauth-note">Creates an <code>oauth://provider/...</code> reference after the callback. Token material stays in broker storage.</p>
                   </section>
                 </div>
 

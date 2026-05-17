@@ -39,3 +39,26 @@ def test_readme_and_frontend_avoid_generic_ai_slop_terms() -> None:
 
     if findings:
         raise AssertionError(f"README and frontend copy contains generic AI/SaaS terms: {findings}")
+
+
+def test_frontend_oauth_defaults_are_provider_neutral() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    frontend_text = "\n".join(
+        [
+            (repo_root / "src/hivemind/static/index.html").read_text(encoding="utf-8"),
+            (repo_root / "src/hivemind/static/app.js").read_text(encoding="utf-8"),
+        ]
+    ).lower()
+    provider_specific_defaults = [
+        "codex subscription",
+        "codex-oauth",
+        'payload.provider = "codex"',
+        "oauth://codex",
+        "delegate_code",
+        "review_code",
+    ]
+
+    findings = [term for term in provider_specific_defaults if term in frontend_text]
+
+    if findings:
+        raise AssertionError(f"frontend OAuth defaults should be provider-neutral: {findings}")

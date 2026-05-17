@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier, Event
+from time import sleep
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -2443,6 +2444,109 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     audit_types = [event["type"] for event in client.get("/audit-events").json()]
     require_true("task.created" in audit_types, "task creation should be audited")
     require_true("task.status.updated" in audit_types, "task status changes should be audited")
+
+
+def test_due_schedule_run_is_atomic_across_overlapping_store_instances(tmp_path: Path) -> None:
+    db_path = tmp_path / "scheduler-race.db"
+    creator = HivemindStore(db_path)
+    base_now = datetime.now(timezone.utc).replace(microsecond=0)
+    schedule = creator.create_schedule(
+        {
+            "name": "Overlapping run_once review",
+            "interval_seconds": 60,
+            "task_title": "One scheduled task",
+            "next_run_at": (base_now - timedelta(seconds=120)).isoformat(),
+        }
+    )
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
+    start = Barrier(3)
+
+    def run_due(store: HivemindStore) -> list[dict[str, object]]:
+        start.wait()
+        return store.run_due_schedules_once()
+
+    lock_conn = sqlite3.connect(db_path)
+    lock_released = False
+    try:
+        lock_conn.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_due, store) for store in stores]
+            start.wait()
+            sleep(0.2)
+            lock_conn.commit()
+            lock_released = True
+            results = [future.result(timeout=5) for future in futures]
+    finally:
+        if not lock_released:
+            lock_conn.rollback()
+        lock_conn.close()
+
+    require_equal(
+        sum(len(result) for result in results),
+        1,
+        "overlapping due schedule runners should create one run_once task",
+    )
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        run_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE type = 'schedule.ran' AND target_id = ?",
+            (schedule["id"],),
+        ).fetchone()[0]
+    require_equal(task_count, 1, "overlapping runners should persist one task")
+    require_equal(run_audit_count, 1, "overlapping runners should persist one schedule.ran audit event")
+
+
+def test_due_schedule_run_rolls_back_partial_task_insert_on_failure(tmp_path: Path) -> None:
+    class FailingScheduleAuditStore(HivemindStore):
+        fail_schedule_audit = True
+
+        def _insert_audit(self, conn, event_type, actor_id, target_id, decision, reason, metadata, *, now=None) -> None:
+            if self.fail_schedule_audit and event_type == "schedule.ran":
+                raise StoreError("forced schedule audit failure")
+            super()._insert_audit(conn, event_type, actor_id, target_id, decision, reason, metadata, now=now)
+
+    db_path = tmp_path / "scheduler-rollback.db"
+    store = FailingScheduleAuditStore(db_path)
+    due_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=120)
+    schedule = store.create_schedule(
+        {
+            "name": "Rollback review",
+            "interval_seconds": 60,
+            "task_title": "Rollback scheduled task",
+            "next_run_at": due_at.isoformat(),
+        }
+    )
+
+    try:
+        store.run_due_schedules_once()
+    except StoreError as exc:
+        require_equal(str(exc), "forced schedule audit failure", "the injected schedule audit failure should surface")
+    else:
+        raise AssertionError("due schedule run should fail before commit")
+
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        task_audit_count = conn.execute("SELECT COUNT(*) FROM audit_events WHERE type = 'task.created'").fetchone()[0]
+        persisted_schedule = conn.execute(
+            "SELECT last_run_at, next_run_at FROM schedules WHERE id = ?",
+            (schedule["id"],),
+        ).fetchone()
+    require_equal(task_count, 0, "failed due schedule transaction should not persist the task")
+    require_equal(task_audit_count, 0, "failed due schedule transaction should not persist task audit")
+    require_true(persisted_schedule[0] is None, "failed due schedule transaction should not set last_run_at")
+    require_equal(
+        persisted_schedule[1],
+        due_at.isoformat(),
+        "failed due schedule transaction should leave next_run_at unchanged",
+    )
+
+    store.fail_schedule_audit = False
+    created = store.run_due_schedules_once()
+
+    require_equal(len(created), 1, "rerunning after rollback should create the scheduled task once")
+    with sqlite3.connect(db_path) as conn:
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    require_equal(task_count, 1, "successful rerun should persist one task")
 
 
 def test_due_schedules_skip_missed_runs_and_preserve_cadence(tmp_path: Path) -> None:

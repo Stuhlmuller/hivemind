@@ -1,9 +1,17 @@
 policy:
   approval:
-    - signed
+    - and:
+      - signed
+      - cursor bot approved
 
 approval_rules:
   - name: signed
     requires:
       conditions:
         has_valid_signatures: true
+  - name: cursor bot approved
+    requires:
+      conditions:
+        count: 1
+        users:
+          - "chatgpt-codex-connector[bot]"
