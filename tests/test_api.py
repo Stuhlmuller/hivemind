@@ -444,7 +444,7 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
             "metadata": {"credential_kind": "generic_reference"},
         },
     )
-    assert credential_response.status_code == 201
+    require_equal(credential_response.status_code, 201, "credential creation should succeed before restart")
     credential = credential_response.json()
 
     task_response = client.post(
@@ -456,7 +456,7 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
             "heartbeat_seconds": 60,
         },
     )
-    assert task_response.status_code == 201
+    require_equal(task_response.status_code, 201, "task creation should succeed before restart")
     task = task_response.json()
 
     schedule_response = client.post(
@@ -468,7 +468,7 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
             "assigned_agent_id": agent["id"],
         },
     )
-    assert schedule_response.status_code == 201
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed before restart")
     schedule = schedule_response.json()
 
     update_response = client.patch(
