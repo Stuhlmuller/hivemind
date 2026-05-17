@@ -648,11 +648,15 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.json()["ok"] is True
     audit_events = client.get("/audit-events").json()
     performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
-    assert performed_event["actor_id"] == agent["id"]
-    assert performed_event["target_id"] == credential["id"]
-    assert performed_event["metadata"] == {"action": "read_repo", "payload_key_count": 2}
-    assert payload_key not in str(audit_events)
-    assert payload_secret not in str(audit_events)
+    require_equal(performed_event["actor_id"], agent["id"], "performed audit event should identify the agent")
+    require_equal(performed_event["target_id"], credential["id"], "performed audit event should identify the credential")
+    require_equal(
+        performed_event["metadata"],
+        {"action": "read_repo", "payload_key_count": 2},
+        "performed audit metadata should include action and payload key count only",
+    )
+    require_true(payload_key not in str(audit_events), "audit events should not expose payload keys")
+    require_true(payload_secret not in str(audit_events), "audit events should not expose payload values")
 
 
 def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Path) -> None:
@@ -673,7 +677,7 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
             "ttl_seconds": 30,
         },
     )
-    assert lease_response.status_code == 201
+    require_equal(lease_response.status_code, 201, "lease request should succeed before denied action")
     lease = lease_response.json()
 
     action_response = client.post(
@@ -684,17 +688,25 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
             "payload": {"repo": "hivemind", payload_key: payload_secret},
         },
     )
-    assert action_response.status_code == 403
-    assert action_response.json()["detail"] == "credential lease does not allow this action"
+    require_equal(action_response.status_code, 403, "wrong action should be denied")
+    require_equal(
+        action_response.json()["detail"],
+        "credential lease does not allow this action",
+        "wrong action denial should explain the lease action mismatch",
+    )
 
     audit_events = client.get("/audit-events").json()
     denied_event = next(event for event in audit_events if event["type"] == "credential.action.denied")
-    assert denied_event["decision"] == "denied"
-    assert denied_event["actor_id"] == agent["id"]
-    assert denied_event["target_id"] == credential["id"]
-    assert denied_event["metadata"] == {"action": "delete_repo", "payload_key_count": 2}
-    assert payload_key not in str(audit_events)
-    assert payload_secret not in str(audit_events)
+    require_equal(denied_event["decision"], "denied", "denied action audit event should record the decision")
+    require_equal(denied_event["actor_id"], agent["id"], "denied action audit event should identify the agent")
+    require_equal(denied_event["target_id"], credential["id"], "denied action audit event should identify the credential")
+    require_equal(
+        denied_event["metadata"],
+        {"action": "delete_repo", "payload_key_count": 2},
+        "denied action audit metadata should include action and payload key count only",
+    )
+    require_true(payload_key not in str(audit_events), "audit events should not expose denied payload keys")
+    require_true(payload_secret not in str(audit_events), "audit events should not expose denied payload values")
 
 
 def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) -> None:
@@ -712,8 +724,12 @@ def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) 
             "ttl_seconds": 30,
         },
     )
-    assert missing_agent_response.status_code == 403
-    assert missing_agent_response.json()["detail"] == "unknown agent: agent_missing"
+    require_equal(missing_agent_response.status_code, 403, "unknown agent lease requests should fail closed")
+    require_equal(
+        missing_agent_response.json()["detail"],
+        "unknown agent: agent_missing",
+        "unknown agent denial should identify the bad agent reference",
+    )
 
     missing_credential_response = client.post(
         "/credential-leases",
@@ -725,25 +741,35 @@ def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) 
             "ttl_seconds": 30,
         },
     )
-    assert missing_credential_response.status_code == 403
-    assert missing_credential_response.json()["detail"] == "unknown credential: cred_missing"
+    require_equal(missing_credential_response.status_code, 403, "unknown credential lease requests should fail closed")
+    require_equal(
+        missing_credential_response.json()["detail"],
+        "unknown credential: cred_missing",
+        "unknown credential denial should identify the bad credential reference",
+    )
 
     audit_events = client.get("/audit-events").json()
-    assert any(
-        event["type"] == "credential.lease.denied"
-        and event["actor_id"] == "agent_missing"
-        and event["target_id"] == "cred_missing"
-        and event["reason"] == "unknown agent: agent_missing"
-        and event["metadata"] == {"action": "read_repo"}
-        for event in audit_events
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["actor_id"] == "agent_missing"
+            and event["target_id"] == "cred_missing"
+            and event["reason"] == "unknown agent: agent_missing"
+            and event["metadata"] == {"action": "read_repo"}
+            for event in audit_events
+        ),
+        "unknown agent denial should be audited",
     )
-    assert any(
-        event["type"] == "credential.lease.denied"
-        and event["actor_id"] == agent["id"]
-        and event["target_id"] == "cred_missing"
-        and event["reason"] == "unknown credential: cred_missing"
-        and event["metadata"] == {"action": "read_repo"}
-        for event in audit_events
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["actor_id"] == agent["id"]
+            and event["target_id"] == "cred_missing"
+            and event["reason"] == "unknown credential: cred_missing"
+            and event["metadata"] == {"action": "read_repo"}
+            for event in audit_events
+        ),
+        "unknown credential denial should be audited",
     )
 
 def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path) -> None:
@@ -764,8 +790,12 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
         },
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "action is outside this credential policy"
+    require_equal(response.status_code, 403, "unsafe action should be denied")
+    require_equal(
+        response.json()["detail"],
+        "action is outside this credential policy",
+        "unsafe action denial should use the policy denial reason",
+    )
 
     audit_events = client.get("/audit-events").json()
     denied_event = next(
@@ -774,8 +804,12 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
         if event["type"] == "credential.lease.denied"
         and event["reason"] == "action is outside this credential policy"
     )
-    assert denied_event["metadata"] == {"action": "<redacted>"}
-    assert unsafe_action not in str(audit_events)
+    require_equal(
+        denied_event["metadata"],
+        {"action": "<redacted>"},
+        "unsafe action identifier should be redacted in audit metadata",
+    )
+    require_true(unsafe_action not in str(audit_events), "unsafe action identifier should not appear in audit events")
 
     replay_response = client.post(
         "/credential-actions",
@@ -2553,13 +2587,13 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     task = task_response.json()
 
     status_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
-    assert status_response.status_code == 200
+    require_equal(status_response.status_code, 200, "task status update should succeed")
 
     heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": heartbeat_note})
     assert heartbeat.status_code == 201
     heartbeats = client.get("/heartbeats").json()
-    assert heartbeats[0]["task_id"] == task["id"]
-    assert heartbeats[0]["note"] == heartbeat_note
+    require_equal(heartbeats[0]["task_id"], task["id"], "heartbeat should be tied to the task")
+    require_equal(heartbeats[0]["note"], heartbeat_note, "heartbeat history should retain the task-local note")
 
     schedule_response = client.post(
         "/schedules",
@@ -3176,15 +3210,18 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
     assert bad_heartbeat_agent.status_code == 400
     assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
     audit_events = client.get("/audit-events").json()
-    assert any(
-        event["type"] == "task.heartbeat.denied"
-        and event["actor_id"] == "agent_missing"
-        and event["target_id"] == task["id"]
-        and event["reason"] == "agent_id references unknown agent: agent_missing"
-        and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
-        for event in audit_events
+    require_true(
+        any(
+            event["type"] == "task.heartbeat.denied"
+            and event["actor_id"] == "agent_missing"
+            and event["target_id"] == task["id"]
+            and event["reason"] == "agent_id references unknown agent: agent_missing"
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_events
+        ),
+        "denied heartbeat should be audited without the raw note",
     )
-    assert heartbeat_note not in str(audit_events)
+    require_true(heartbeat_note not in str(audit_events), "raw heartbeat note should not appear in denied audit events")
 
 
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
