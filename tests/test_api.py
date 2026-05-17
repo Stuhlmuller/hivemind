@@ -35,6 +35,16 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert "/static/app.js" in response.text
 
 
+def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/control/credentials")
+
+    assert response.status_code == 200
+    assert 'data-page-link="credentials"' in response.text
+    assert "credential broker" in response.text
+
+
 def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://HIVEMIND_DEMO_GITHUB_TOKEN")
     client = client_for(tmp_path)
