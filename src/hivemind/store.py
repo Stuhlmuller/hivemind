@@ -114,7 +114,6 @@ AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
 AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
 REDACTED_VALUE = "[redacted]"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
-TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
@@ -1994,7 +1993,10 @@ class HivemindStore:
     ) -> None:
         now = iso()
         with self.connect() as conn:
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                (status, None, now, task_id),
+            )
             running_task = conn.execute(
                 """
                 SELECT 1

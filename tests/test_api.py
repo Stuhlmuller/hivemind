@@ -881,6 +881,7 @@ def test_local_agent_task_execution_uses_deterministic_adapter_without_network(t
             "title": "Summarize runtime state",
             "description": "Summarize queued work without calling a remote provider.",
             "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
         },
     ).json()
 
@@ -898,6 +899,8 @@ def test_local_agent_task_execution_uses_deterministic_adapter_without_network(t
     require_true("Use the local deterministic adapter." in result["output_text"], "local adapter should echo deterministic output")
     require_true("credential_ref" not in result, "task run response should not expose provider credential refs")
     require_equal(updated_task["status"], "done", "successful execution should mark the task done")
+    require_equal(updated_task["heartbeat_state"], "disabled", "completed task execution should stop heartbeat tracking")
+    require_equal(updated_task["next_heartbeat_at"], None, "completed task execution should clear next heartbeat")
     require_true(
         any(event["type"] == "task.execution.completed" and event["target_id"] == task["id"] for event in audit_events),
         "task execution should be audited",
