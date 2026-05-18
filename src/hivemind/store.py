@@ -805,8 +805,8 @@ class HivemindStore:
         normalized_username = username.strip().lower()
         if len(normalized_username) < 3:
             raise StoreError("username must be at least 3 characters")
-        if len(password) < 12:
-            raise StoreError("admin password must be at least 12 characters")
+        if sum(1 for character in password if not character.isspace()) < 12:
+            raise StoreError("admin password must include at least 12 non-whitespace characters")
         with self.connect() as conn:
             conn.execute(BEGIN_IMMEDIATE_SQL)
             if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
