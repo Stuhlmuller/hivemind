@@ -171,6 +171,7 @@ agents: brokered capabilities</pre>
                 <div><span id="blocked-task-count">0</span><p>blocked tasks</p></div>
                 <div><span id="due-schedule-count">0</span><p>due schedules</p></div>
                 <div><span id="stale-heartbeat-count">0</span><p>stale heartbeats</p></div>
+                <div><span id="missing-heartbeat-count">0</span><p>missing heartbeats</p></div>
               </section>
 
               <section class="workspace overview-workspace">
@@ -258,7 +259,7 @@ agents: brokered capabilities</pre>
                 <div><span id="tasks-page-count">0</span><p>tasks</p></div>
                 <div><span id="tasks-running-count">0</span><p>running</p></div>
                 <div><span id="tasks-blocked-count">0</span><p>blocked</p></div>
-                <div><span id="tasks-stale-count">0</span><p>stale heartbeat</p></div>
+                <div><span id="tasks-stale-count">0</span><p>overdue heartbeat</p></div>
               </section>
 
               <section class="workspace tasks-workspace">
@@ -300,9 +301,10 @@ agents: brokered capabilities</pre>
 
                 <div class="panel">
                   <div class="panel-heading">
-                    <h2>heartbeats</h2>
-                    <p>liveness records</p>
+                    <h2>heartbeat watch</h2>
+                    <p>overdue work and liveness records</p>
                   </div>
+                  <div id="heartbeat-alert-list" class="list"></div>
                   <div id="heartbeats-list" class="timeline"></div>
                 </div>
               </section>

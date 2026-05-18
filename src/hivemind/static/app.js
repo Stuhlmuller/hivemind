@@ -174,6 +174,12 @@ const TASK_TRANSITIONS = {
   cancelled: [],
 };
 const CLOSED_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
+const HEARTBEAT_STATES = {
+  disabled: { label: "off", tone: "neutral" },
+  healthy: { label: "on cadence", tone: "good" },
+  missing: { label: "missing", tone: "warning" },
+  stale: { label: "stale", tone: "error" },
+};
 
 const PAGE_META = {
   overview: "overview / runtime state",
@@ -258,6 +264,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 function readForm(form) {
@@ -517,11 +532,28 @@ function taskHeartbeatLabel(task) {
 }
 
 function taskHeartbeatState(task) {
-  if (!task.heartbeat_seconds) return "manual";
-  if (!task.next_heartbeat_at) return "pending";
+  if (task.heartbeat_state) return task.heartbeat_state;
+  if (!task.heartbeat_seconds) return "disabled";
+  if (!task.next_heartbeat_at) return "healthy";
   const nextHeartbeatAt = Date.parse(task.next_heartbeat_at);
-  if (Number.isNaN(nextHeartbeatAt)) return "pending";
-  return nextHeartbeatAt <= Date.now() ? "stale" : "waiting";
+  if (Number.isNaN(nextHeartbeatAt)) return "healthy";
+  return nextHeartbeatAt <= Date.now() ? "stale" : "healthy";
+}
+
+function taskHeartbeatLabelFor(task) {
+  const state = taskHeartbeatState(task);
+  return HEARTBEAT_STATES[state]?.label || state;
+}
+
+function overdueHeartbeatTasks() {
+  return state.tasks
+    .filter((task) => ["missing", "stale"].includes(taskHeartbeatState(task)))
+    .sort((left, right) => (right.heartbeat_overdue_seconds || 0) - (left.heartbeat_overdue_seconds || 0));
+}
+
+function taskTitle(taskId) {
+  const task = state.tasks.find((item) => item.id === taskId);
+  return task ? task.title : taskId;
 }
 
 function latestHeartbeatsByTask() {
@@ -588,10 +620,15 @@ function renderTaskEditForm(task) {
 function renderTaskHealth() {
   const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0]));
   let staleHeartbeats = 0;
+  let missingHeartbeats = 0;
   for (const task of state.tasks) {
     counts[task.status] = (counts[task.status] || 0) + 1;
-    if (taskHeartbeatState(task) === "stale") {
+    const heartbeatState = taskHeartbeatState(task);
+    if (heartbeatState === "stale") {
       staleHeartbeats += 1;
+    }
+    if (heartbeatState === "missing") {
+      missingHeartbeats += 1;
     }
   }
   const dueSchedules = state.schedules.filter((schedule) => {
@@ -606,12 +643,14 @@ function renderTaskHealth() {
   $("#blocked-task-count").textContent = counts.blocked;
   $("#due-schedule-count").textContent = dueSchedules;
   $("#stale-heartbeat-count").textContent = staleHeartbeats;
+  setText("#missing-heartbeat-count", missingHeartbeats);
   $("#task-health").innerHTML = [
     ["queued", counts.queued],
     ["running", counts.running],
     ["blocked", counts.blocked],
     ["due runs", dueSchedules],
     ["stale hb", staleHeartbeats],
+    ["missing hb", missingHeartbeats],
     ["task audit", taskAudits],
   ]
     .map(
@@ -846,13 +885,17 @@ function renderTasks() {
   setText("#tasks-page-count", state.tasks.length);
   setText("#tasks-running-count", statusCount(state.tasks, "running"));
   setText("#tasks-blocked-count", statusCount(state.tasks, "blocked"));
-  setText("#tasks-stale-count", state.tasks.filter((task) => taskHeartbeatState(task) === "stale").length);
+  setText("#tasks-stale-count", overdueHeartbeatTasks().length);
   setText("#nav-tasks-count", state.tasks.length);
   renderTaskHealth();
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
       const heartbeatState = taskHeartbeatState(task);
       const lastHeartbeat = heartbeatsByTask.get(task.id);
+      const lastHeartbeatAt = task.last_heartbeat_at || lastHeartbeat?.created_at || "none";
+      const overdue = task.heartbeat_overdue_seconds === null || task.heartbeat_overdue_seconds === undefined
+        ? "none"
+        : formatDuration(task.heartbeat_overdue_seconds);
       const editAction = `<button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">${state.editingTaskIds.has(task.id) ? "close edit" : "edit task"}</button>`;
       const heartbeatAction = CLOSED_TASK_STATUSES.has(task.status)
         ? '<span class="meta">Heartbeat closed</span>'
@@ -870,8 +913,8 @@ function renderTasks() {
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Updated: ${escapeHtml(task.updated_at)}`,
-        [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${heartbeatState}`],
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeatAt)}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Overdue: ${escapeHtml(overdue)}<br>Updated: ${escapeHtml(task.updated_at)}`,
+        [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${taskHeartbeatLabelFor(task)}`],
         actions,
       );
     })
@@ -879,9 +922,18 @@ function renderTasks() {
 }
 
 function renderHeartbeats() {
+  $("#heartbeat-alert-list").innerHTML = overdueHeartbeatTasks()
+    .map((task) =>
+      item(
+        task.title,
+        `Task ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Last heartbeat: ${escapeHtml(task.last_heartbeat_at || "none")}<br>Due at: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Overdue: ${escapeHtml(formatDuration(task.heartbeat_overdue_seconds || 0))}`,
+        [task.status, task.priority, `heartbeat:${taskHeartbeatLabelFor(task)}`],
+      ),
+    )
+    .join("") || '<p class="meta">No overdue heartbeat expectations.</p>';
   $("#heartbeats-list").innerHTML = state.heartbeats
     .map((heartbeat) =>
-      `<article class="event"><strong>${escapeHtml(heartbeat.task_id)}</strong><div class="meta">Agent: ${escapeHtml(heartbeat.agent_id || "user")}<br>Note: ${escapeHtml(heartbeat.note)}<br>${escapeHtml(heartbeat.created_at)}</div></article>`,
+      `<article class="event"><strong>${escapeHtml(taskTitle(heartbeat.task_id))}</strong><div class="meta">Task ID: ${escapeHtml(heartbeat.task_id)}<br>Agent: ${escapeHtml(heartbeat.agent_id || "user")}<br>Note: ${escapeHtml(heartbeat.note)}<br>${escapeHtml(heartbeat.created_at)}</div></article>`,
     )
     .join("") || '<p class="meta">No heartbeats yet.</p>';
 }

@@ -359,7 +359,7 @@ main {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px;
 }
 
@@ -657,6 +657,16 @@ select[multiple] {
   padding: 10px;
 }
 
+.item[data-state="missing"] {
+  border-color: rgba(234, 179, 8, 0.34);
+  box-shadow: inset 3px 0 0 rgba(234, 179, 8, 0.4);
+}
+
+.item[data-state="stale"] {
+  border-color: rgba(251, 113, 133, 0.34);
+  box-shadow: inset 3px 0 0 rgba(251, 113, 133, 0.42);
+}
+
 .item strong,
 .event strong {
   display: block;
@@ -690,6 +700,30 @@ select[multiple] {
   padding: 3px 7px;
   font-family: var(--mono);
   font-size: 0.68rem;
+}
+
+.pill[data-tone="good"] {
+  border-color: rgba(104, 211, 145, 0.32);
+  background: rgba(104, 211, 145, 0.12);
+  color: var(--green);
+}
+
+.pill[data-tone="warning"] {
+  border-color: rgba(234, 179, 8, 0.34);
+  background: rgba(234, 179, 8, 0.12);
+  color: var(--yellow);
+}
+
+.pill[data-tone="error"] {
+  border-color: rgba(251, 113, 133, 0.35);
+  background: rgba(251, 113, 133, 0.1);
+  color: var(--red);
+}
+
+.pill[data-tone="neutral"] {
+  border-color: rgba(138, 180, 248, 0.24);
+  background: rgba(138, 180, 248, 0.08);
+  color: var(--blue);
 }
 
 .button-row {
@@ -775,6 +809,12 @@ button:disabled {
   border-color: rgba(251, 113, 133, 0.35);
   background: rgba(251, 113, 133, 0.1);
   color: var(--red);
+}
+
+.status-chip[data-state="warning"] {
+  border-color: rgba(234, 179, 8, 0.34);
+  background: rgba(234, 179, 8, 0.12);
+  color: var(--yellow);
 }
 
 .oauth-note {

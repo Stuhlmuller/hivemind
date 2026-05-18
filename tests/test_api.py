@@ -400,6 +400,9 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         "Admin passwords need at least 12 non-whitespace characters" in response.text,
         "frontend should prompt for a non-blank admin password",
     )
+    for required in ['id="stale-heartbeat-count"', 'id="missing-heartbeat-count"', 'id="heartbeat-alert-list"', 'id="heartbeats-list"']:
+        if required not in response.text:
+            raise AssertionError(f"missing expected heartbeat overview markup: {required}")
 
 
 def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
@@ -3272,6 +3275,9 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     assert task["status"] == "queued"
     assert task["priority"] == "urgent"
     assert task["credential_id"] == credential["id"]
+    assert task["heartbeat_state"] == "healthy"
+    assert task["last_heartbeat_at"] is None
+    assert task["heartbeat_overdue_seconds"] is None
 
     task_list = client.get("/tasks")
     assert task_list.status_code == 200
@@ -3289,6 +3295,10 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     heartbeats = client.get("/heartbeats").json()
     require_equal(heartbeats[0]["task_id"], task["id"], "heartbeat should be tied to the task")
     require_equal(heartbeats[0]["note"], heartbeat_note, "heartbeat history should retain the task-local note")
+    tasks = {item["id"]: item for item in client.get("/tasks").json()}
+    require_equal(tasks[task["id"]]["heartbeat_state"], "healthy", "heartbeat should keep task on cadence")
+    require_equal(tasks[task["id"]]["last_heartbeat_at"], heartbeat.json()["created_at"], "task should expose last heartbeat")
+    require_true(tasks[task["id"]]["next_heartbeat_at"] != task["next_heartbeat_at"], "heartbeat should advance next expected heartbeat")
 
     schedule_response = client.post(
         "/schedules",
@@ -3731,6 +3741,117 @@ def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) ->
         "schedule next_run_at must be a valid ISO datetime",
         "malformed schedule timestamps should not leak parser internals",
     )
+
+
+def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectations(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    missing_task = client.post(
+        "/tasks",
+        json={
+            "title": "Missing heartbeat",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    stale_task = client.post(
+        "/tasks",
+        json={
+            "title": "Stale heartbeat",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    stale_heartbeat = client.post(
+        f"/tasks/{stale_task['id']}/heartbeats",
+        json={"note": "review in progress"},
+    ).json()
+
+    with sqlite3.connect(tmp_path / "hivemind.db") as conn:
+        overdue_at = "2000-01-01T00:00:00+00:00"
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (overdue_at, missing_task["id"]))
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (overdue_at, stale_task["id"]))
+
+    tasks = {item["id"]: item for item in client.get("/tasks").json()}
+    require_equal(tasks[missing_task["id"]]["heartbeat_state"], "missing", "task without a first heartbeat should be marked missing")
+    require_equal(tasks[missing_task["id"]]["last_heartbeat_at"], None, "missing task should not expose a heartbeat timestamp")
+    require_true(tasks[missing_task["id"]]["heartbeat_overdue_seconds"] > 0, "missing task should expose overdue seconds")
+
+    require_equal(tasks[stale_task["id"]]["heartbeat_state"], "stale", "task with an overdue heartbeat should be marked stale")
+    require_equal(tasks[stale_task["id"]]["last_heartbeat_at"], stale_heartbeat["created_at"], "stale task should expose its latest heartbeat")
+    require_true(tasks[stale_task["id"]]["heartbeat_overdue_seconds"] > 0, "stale task should expose overdue seconds")
+
+    done_response = client.patch(f"/tasks/{stale_task['id']}/status", json={"status": "done"})
+    require_equal(done_response.status_code, 200, "terminal task update should succeed")
+    done_task = done_response.json()
+    require_equal(done_task["heartbeat_state"], "disabled", "completed tasks should stop heartbeat tracking")
+    require_equal(done_task["next_heartbeat_at"], None, "completed tasks should clear next heartbeat")
+    require_equal(done_task["heartbeat_overdue_seconds"], None, "completed tasks should not report overdue heartbeats")
+    terminal_heartbeat = client.post(
+        f"/tasks/{stale_task['id']}/heartbeats",
+        json={"note": "terminal follow-up"},
+    )
+    require_equal(terminal_heartbeat.status_code, 400, "terminal tasks should reject heartbeat notes")
+    require_equal(
+        terminal_heartbeat.json()["detail"],
+        "cannot record heartbeat for task in terminal status: done",
+        "terminal heartbeat rejection should explain the terminal task state",
+    )
+    terminal_task = next(item for item in client.get("/tasks").json() if item["id"] == stale_task["id"])
+    require_equal(terminal_task["heartbeat_state"], "disabled", "terminal heartbeat rejection should keep tracking disabled")
+    require_equal(terminal_task["next_heartbeat_at"], None, "terminal heartbeat rejection should not restore next heartbeat")
+    require_equal(terminal_task["heartbeat_overdue_seconds"], None, "terminal heartbeat rejection should keep overdue state disabled")
+
+
+def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat boundary",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(task_response.status_code, 201, "boundary task should be created")
+    task = task_response.json()
+    stale_task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Stale heartbeat boundary",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(stale_task_response.status_code, 201, "stale boundary task should be created")
+    stale_task = stale_task_response.json()
+    stale_heartbeat = client.post(f"/tasks/{stale_task['id']}/heartbeats", json={"note": "working"})
+    require_equal(stale_heartbeat.status_code, 201, "stale boundary task should accept its initial heartbeat")
+    deadline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with store.connect() as conn:
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (deadline.isoformat(), task["id"]))
+        conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", (deadline.isoformat(), stale_task["id"]))
+        row = store.get_task_row(conn, task["id"])
+        stale_row = store.get_task_row(conn, stale_task["id"])
+
+        early = store.public_task(conn, row, now=deadline - timedelta(milliseconds=500))
+        late = store.public_task(conn, row, now=deadline + timedelta(milliseconds=500))
+        stale_early = store.public_task(conn, stale_row, now=deadline - timedelta(milliseconds=500))
+        stale_late = store.public_task(conn, stale_row, now=deadline + timedelta(milliseconds=500))
+
+    require_equal(early["heartbeat_state"], "healthy", "sub-second pre-deadline task should stay healthy")
+    require_equal(early["heartbeat_overdue_seconds"], None, "sub-second pre-deadline task should not report overdue seconds")
+    require_equal(late["heartbeat_state"], "missing", "sub-second post-deadline task should be overdue")
+    require_equal(late["heartbeat_overdue_seconds"], 0, "sub-second post-deadline overdue value should round down")
+    require_equal(stale_early["heartbeat_state"], "healthy", "sub-second pre-deadline heartbeat task should stay healthy")
+    require_equal(stale_late["heartbeat_state"], "stale", "sub-second post-deadline heartbeat task should be stale")
+    require_equal(stale_late["heartbeat_overdue_seconds"], 0, "sub-second post-deadline stale value should round down")
 
 
 def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_path: Path) -> None:
