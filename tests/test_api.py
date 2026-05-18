@@ -373,6 +373,18 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "API helper should use formatted error messages",
     )
     require_true("setupKnown: false" in response.text, "frontend should start without assuming setup is incomplete")
+    require_true(
+        "const hadSetupState = state.setupKnown" in response.text,
+        "frontend should remember whether setup state was already loaded",
+    )
+    require_true(
+        "if (!hadSetupState)" in response.text,
+        "frontend should only return to boot mode when the initial setup-state load fails",
+    )
+    require_true(
+        "state.setupKnown = false;" not in response.text,
+        "frontend should not collapse loaded sessions into boot mode after transient setup-state failures",
+    )
     require_true("function validateAuthPayload" in response.text, "frontend should validate auth form state")
     require_true("admin password must include at least 12 non-whitespace characters" in response.text, "frontend should reject blank setup passwords")
     require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")

@@ -994,12 +994,14 @@ async function loadSetupState() {
 }
 
 async function refresh() {
+  const hadSetupState = state.setupKnown;
   try {
     await loadSetupState();
   } catch (error) {
-    state.setupKnown = false;
-    render();
-    throw error;
+    if (!hadSetupState) {
+      render();
+      throw error;
+    }
   }
   try {
     state.me = await api("/me");
