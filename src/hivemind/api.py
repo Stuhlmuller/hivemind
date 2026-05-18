@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,12 +23,12 @@ from hivemind.oauth import (
     load_oauth_providers_from_env,
 )
 from hivemind.models import TaskPriority, TaskStatus
-from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError
+from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError, iso
 
 
 SESSION_COOKIE = "hivemind_session"
 OAUTH_FAILED_EVENT = "credential.oauth.failed"
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("hivemind.runtime")
 SCHEDULER_INTERVAL_SECONDS = 5
 SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 5
 SCHEDULER_LOCK_WAIT_SECONDS = 0.1
@@ -40,7 +40,12 @@ class _SchedulerHandle:
     stop: Event
 
 
-def _scheduler_loop(db: HivemindStore, scheduler_stop: Event, scheduler_run_lock: Lock) -> None:
+def _scheduler_loop(
+    app: FastAPI,
+    db: HivemindStore,
+    scheduler_stop: Event,
+    scheduler_run_lock: Lock,
+) -> None:
     while not scheduler_stop.is_set():
         if not scheduler_run_lock.acquire(timeout=SCHEDULER_LOCK_WAIT_SECONDS):
             continue
@@ -49,7 +54,10 @@ def _scheduler_loop(db: HivemindStore, scheduler_stop: Event, scheduler_run_lock
                 return
             try:
                 db.run_due_schedules_once()
+                app.state.scheduler_last_run_at = iso()
+                app.state.scheduler_last_error = None
             except Exception as exc:
+                app.state.scheduler_last_error = "scheduled task run failed"
                 LOGGER.warning("background scheduler pass failed: %s", exc.__class__.__name__)
         finally:
             scheduler_run_lock.release()
@@ -63,11 +71,11 @@ def _should_start_background_scheduler(start_scheduler: bool | None) -> bool:
     return should_start
 
 
-def _start_background_scheduler(db: HivemindStore, scheduler_run_lock: Lock) -> _SchedulerHandle:
+def _start_background_scheduler(app: FastAPI, db: HivemindStore, scheduler_run_lock: Lock) -> _SchedulerHandle:
     scheduler_stop = Event()
     thread = Thread(
         target=_scheduler_loop,
-        args=(db, scheduler_stop, scheduler_run_lock),
+        args=(app, db, scheduler_stop, scheduler_run_lock),
         name="hivemind-scheduler",
         daemon=True,
     )
@@ -84,7 +92,7 @@ def _reuse_or_start_background_scheduler(app: FastAPI, db: HivemindStore, schedu
         if existing_handle.thread.is_alive():
             LOGGER.warning("background scheduler is still stopping; starting replacement scheduler thread")
 
-    handle = _start_background_scheduler(db, scheduler_run_lock)
+    handle = _start_background_scheduler(app, db, scheduler_run_lock)
     app.state.scheduler_handle = handle
     app.state.scheduler_thread = handle.thread
     return handle
@@ -112,7 +120,9 @@ def _scheduler_lifespan(db: HivemindStore, start_scheduler: bool | None, schedul
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         handle: _SchedulerHandle | None = None
-        if _should_start_background_scheduler(start_scheduler):
+        should_start = _should_start_background_scheduler(start_scheduler)
+        app.state.scheduler_enabled = should_start
+        if should_start:
             handle = _reuse_or_start_background_scheduler(app, db, scheduler_run_lock)
         try:
             yield
@@ -255,10 +265,39 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         lifespan=_scheduler_lifespan(db, start_scheduler, scheduler_run_lock),
     )
     app.state.store = db
+    app.state.scheduler_enabled = False
+    app.state.scheduler_last_error = None
+    app.state.scheduler_last_run_at = None
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     def serve_frontend() -> FileResponse:
         return FileResponse(static_dir.joinpath("index.html"))
+
+    def scheduler_status() -> dict[str, Any]:
+        enabled = getattr(app.state, "scheduler_enabled", False)
+        thread = getattr(app.state, "scheduler_thread", None)
+        last_run_at = getattr(app.state, "scheduler_last_run_at", None)
+        last_error = getattr(app.state, "scheduler_last_error", None)
+        if not enabled:
+            status = "disabled"
+            detail = "background scheduler disabled for this process"
+        elif last_error:
+            status = "error"
+            detail = "background scheduler loop failing"
+        elif thread is not None and thread.is_alive():
+            status = "running"
+            detail = "background scheduler loop active"
+        else:
+            status = "stopped"
+            detail = "background scheduler expected but thread is not running"
+        payload: dict[str, Any] = {
+            "status": status,
+            "detail": detail,
+            "last_run_at": last_run_at,
+        }
+        if last_error:
+            payload["last_error"] = last_error
+        return payload
 
     def require_user(session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> SessionUser:
         user = db.get_session_user(session)
@@ -293,9 +332,26 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def frontend_control(path: str = "") -> FileResponse:
         return serve_frontend()
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": "hivemind"}
+    @app.get("/health", response_model=None)
+    def health() -> dict[str, Any]:
+        scheduler = scheduler_status()
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "service": "hivemind",
+            "checked_at": iso(),
+            "db": {"status": "ok"},
+            "scheduler": scheduler,
+        }
+        try:
+            db.ping()
+        except Exception as exc:
+            LOGGER.warning("health database check failed: %s", type(exc).__name__)
+            payload["status"] = "error"
+            payload["db"] = {"status": "error", "detail": "database unavailable"}
+            return JSONResponse(status_code=503, content=payload)
+        if scheduler["status"] in {"error", "stopped"}:
+            payload["status"] = "degraded"
+        return payload
 
     @app.get("/setup-state")
     def setup_state() -> dict[str, bool]:
@@ -661,6 +717,28 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return {"created_tasks": db.run_due_schedules_once(actor_id=user.id)}
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/runtime/overview")
+    def runtime_overview(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        scheduler = scheduler_status()
+        try:
+            overview = db.runtime_overview()
+        except Exception as exc:
+            LOGGER.warning("runtime overview unavailable: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="runtime overview unavailable") from exc
+        return {
+            "status": "degraded" if scheduler["status"] in {"error", "stopped"} else "ok",
+            "service": "hivemind",
+            "checked_at": overview["checked_at"],
+            "db": {"status": "ok"},
+            "scheduler": scheduler,
+            "counts": overview["counts"],
+            "due_schedule_ids": overview["due_schedule_ids"],
+            "stale_heartbeat_task_ids": overview["stale_heartbeat_task_ids"],
+            "due_schedules": overview["due_schedules"],
+            "stale_heartbeats": overview["stale_heartbeats"],
+            "failed_tasks": overview["failed_tasks"],
+        }
 
     @app.get("/audit-events")
     def list_audit_events(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:

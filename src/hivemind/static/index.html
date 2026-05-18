@@ -175,6 +175,66 @@ agents: brokered capabilities</pre>
               </section>
 
               <section class="workspace overview-workspace">
+                <div class="panel panel-span-3" id="runtime-health-panel">
+                  <div class="panel-heading">
+                    <h2>node health</h2>
+                    <p id="runtime-health-summary">db reachability, scheduler state, and overdue work at a glance.</p>
+                  </div>
+                  <div class="health-status">
+                    <div class="status-stack">
+                      <div class="status-line">
+                        <span>runtime</span>
+                        <span id="runtime-status" class="status-chip">loading</span>
+                      </div>
+                      <div class="status-line">
+                        <span>db</span>
+                        <span id="runtime-db-status" class="status-chip">loading</span>
+                      </div>
+                      <div class="status-line">
+                        <span>scheduler</span>
+                        <span id="runtime-scheduler-status" class="status-chip">loading</span>
+                      </div>
+                    </div>
+                    <p id="runtime-health-detail" class="meta">Waiting for runtime snapshot.</p>
+                    <p class="meta">Last refresh: <span id="runtime-updated-at">pending</span></p>
+                  </div>
+                  <section class="metrics runtime-metrics" aria-label="Node health summary">
+                    <div><span id="runtime-active-leases-count">0</span><p>active leases</p></div>
+                    <div><span id="runtime-due-schedules-count">0</span><p>due schedules</p></div>
+                    <div><span id="runtime-stale-heartbeats-count">0</span><p>stale heartbeats</p></div>
+                    <div><span id="runtime-failed-tasks-count">0</span><p>failed tasks</p></div>
+                  </section>
+                  <section class="health-lists">
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>due schedules</h3>
+                          <p>enabled schedules waiting to run</p>
+                        </div>
+                      </div>
+                      <div id="due-schedules-health-list" class="list"></div>
+                    </div>
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>stale heartbeats</h3>
+                          <p>tasks that missed their next heartbeat</p>
+                        </div>
+                      </div>
+                      <div id="stale-heartbeats-health-list" class="list"></div>
+                    </div>
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>failed tasks</h3>
+                          <p>recent task failures on this node</p>
+                        </div>
+                      </div>
+                      <div id="failed-tasks-health-list" class="list"></div>
+                    </div>
+                  </section>
+                </div>
+
                 <div class="panel">
                   <div class="panel-heading">
                     <h2>agents</h2>

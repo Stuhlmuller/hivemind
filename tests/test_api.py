@@ -6,6 +6,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 from threading import Barrier, Event
 from time import sleep
@@ -400,7 +401,15 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         "Admin passwords need at least 12 non-whitespace characters" in response.text,
         "frontend should prompt for a non-blank admin password",
     )
-    for required in ['id="stale-heartbeat-count"', 'id="missing-heartbeat-count"', 'id="heartbeat-alert-list"', 'id="heartbeats-list"']:
+    for required in [
+        'id="stale-heartbeat-count"',
+        'id="missing-heartbeat-count"',
+        'id="heartbeat-alert-list"',
+        'id="heartbeats-list"',
+        'id="runtime-health-panel"',
+        'id="runtime-stale-heartbeats-count"',
+        'id="runtime-due-schedules-count"',
+    ]:
         if required not in response.text:
             raise AssertionError(f"missing expected heartbeat overview markup: {required}")
 
@@ -439,9 +448,10 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "frontend should treat runtime API loading as a recoverable batch",
     )
     require_true(
-        "const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = runtimePayload" in response.text,
+        "const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
         "frontend should render a recoverable shell if runtime data loading fails",
     )
+    require_true("loadRuntimeOverview()" in response.text, "frontend should fetch runtime overview without breaking core loading")
     require_true("function validateAuthPayload" in response.text, "frontend should validate auth form state")
     require_true("admin password must include at least 12 non-whitespace characters" in response.text, "frontend should reject blank setup passwords")
     require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")
@@ -2557,11 +2567,12 @@ def test_approval_decision_audit_redacts_legacy_unsafe_action_identifier(tmp_pat
     require_true(unsafe_action not in str(audit_events), "unsafe action should not appear in audit events")
 
 
-def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path) -> None:
+def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path, caplog) -> None:
     db_path = tmp_path / "persisted-approval-status.db"
     store = HivemindStore(db_path)
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
     agent = client.get("/agents").json()[0]
     secret_ref_value = f"env://GITHUB_WRITE_{secrets.token_hex(4).upper()}"
     credential = client.post(
@@ -2640,6 +2651,31 @@ def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_pa
         "credential lease request was denied",
         "denied lease rejection should explain denial state",
     )
+    audit_events = client.get("/audit-events").json()
+    action_denials = [event for event in audit_events if event["type"] == "credential.action.denied"]
+    require_equal(len(action_denials), 2, "denied credential actions should be audited")
+    require_true(
+        any(
+            event["reason"] == "credential lease is pending approval"
+            and event["metadata"]["lease_id"] == "lease_pending_known_hash"
+            and event["metadata"]["lease_status"] == "pending"
+            and "lease_token" not in event["metadata"]
+            for event in action_denials
+        ),
+        "pending lease action denial should be audited without storing the token",
+    )
+    require_true(
+        any(
+            event["reason"] == "credential lease request was denied"
+            and event["metadata"]["lease_id"] == "lease_denied_known_hash"
+            and event["metadata"]["lease_status"] == "denied"
+            and "lease_token" not in event["metadata"]
+            for event in action_denials
+        ),
+        "denied lease action denial should be audited without storing the token",
+    )
+    require_true(lease_values["pending"] not in caplog.text, "pending lease token should not appear in structured logs")
+    require_true(lease_values["denied"] not in caplog.text, "denied lease token should not appear in structured logs")
 
 
 def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
@@ -3741,6 +3777,245 @@ def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) ->
         "schedule next_run_at must be a valid ISO datetime",
         "malformed schedule timestamps should not leak parser internals",
     )
+
+
+def test_health_reports_db_and_scheduler_state(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/health")
+
+    payload = response.json()
+    require_equal(response.status_code, 200, "health should be available")
+    require_equal(payload["status"], "ok", "health should report ok")
+    require_equal(payload["db"]["status"], "ok", "health should report db ok")
+    require_equal(payload["scheduler"]["status"], "disabled", "health should report disabled test scheduler")
+
+
+def test_health_reports_scheduler_run_loop_failures(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "scheduler-health.db")
+    app = create_app(store, start_scheduler=False)
+
+    class AliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    with TestClient(app) as client:
+        app.state.scheduler_enabled = True
+        app.state.scheduler_thread = AliveThread()
+        app.state.scheduler_last_error = "scheduled task run failed"
+
+        response = client.get("/health")
+
+    payload = response.json()
+    require_equal(response.status_code, 200, "scheduler failures should keep health endpoint reachable")
+    require_equal(payload["status"], "degraded", "scheduler failures should degrade runtime health")
+    require_equal(payload["scheduler"]["status"], "error", "scheduler status should report run-loop failures")
+    require_equal(payload["scheduler"]["last_error"], "scheduled task run failed", "scheduler failure should keep operator-safe detail")
+
+
+def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    store = HivemindStore(tmp_path / "health.db")
+    app = create_app(store, start_scheduler=False)
+
+    def broken_ping() -> None:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(store, "ping", broken_ping)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    payload = response.json()
+    require_equal(response.status_code, 503, "health should report an unavailable database")
+    require_equal(payload["status"], "error", "health status should fail")
+    require_equal(payload["db"]["status"], "error", "db status should fail")
+    require_equal(payload["db"]["detail"], "database unavailable", "db detail should be operator-safe")
+    require_true("unable to open database file" not in response.text, "health response should not leak raw DB errors")
+
+
+def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_and_failed_tasks(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "runtime.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Inspect repository state for runtime health reporting.",
+            "ttl_seconds": 300,
+        },
+    )
+    require_equal(lease_response.status_code, 201, "lease creation should succeed")
+
+    running_task = client.post(
+        "/tasks",
+        json={
+            "title": "Heartbeat-bound task",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    ).json()
+    client.patch(f"/tasks/{running_task['id']}/status", json={"status": "running"})
+    failed_task = client.post(
+        "/tasks",
+        json={
+            "title": "Failed task",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+    client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Overdue review",
+            "interval_seconds": 60,
+            "task_title": "Scheduled review",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2000-01-01T00:00:00+00:00",
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed")
+    schedule = schedule_response.json()
+
+    with store.connect() as conn:
+        conn.execute("UPDATE schedules SET next_run_at = ? WHERE id = ?", ("2000-01-01T00:00:00", schedule["id"]))
+        conn.execute(
+            "UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00", "2000-01-01T00:00:00", running_task["id"]),
+        )
+
+    response = client.get("/runtime/overview")
+
+    require_equal(response.status_code, 200, "runtime overview should be available")
+    payload = response.json()
+    require_equal(payload["status"], "ok", "runtime overview should report ok")
+    require_equal(
+        payload["counts"],
+        {
+            "active_leases": 1,
+            "due_schedules": 1,
+            "stale_heartbeats": 1,
+            "failed_tasks": 1,
+        },
+        "runtime overview should count active and overdue work",
+    )
+    require_equal(payload["scheduler"]["status"], "disabled", "runtime overview should include scheduler status")
+    require_equal(payload["due_schedule_ids"], [schedule["id"]], "runtime overview should include all due schedule ids")
+    require_equal(payload["stale_heartbeat_task_ids"], [running_task["id"]], "runtime overview should include all stale task ids")
+    require_equal(payload["due_schedules"][0]["name"], "Overdue review", "runtime overview should list overdue schedule")
+    require_true(payload["due_schedules"][0]["overdue_seconds"] > 0, "due schedule should include overdue seconds")
+    require_equal(payload["stale_heartbeats"][0]["id"], running_task["id"], "runtime overview should list stale heartbeat")
+    require_true(payload["stale_heartbeats"][0]["overdue_seconds"] > 0, "stale heartbeat should include overdue seconds")
+    require_equal(payload["failed_tasks"][0]["id"], failed_task["id"], "runtime overview should list failed task")
+
+
+def test_runtime_overview_exposes_full_due_and_stale_id_sets(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "runtime-ids.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    due_schedule_ids = []
+    stale_task_ids = []
+
+    for index in range(2):
+        task = client.post(
+            "/tasks",
+            json={
+                "title": f"Heartbeat-bound task {index}",
+                "assigned_agent_id": agent["id"],
+                "heartbeat_seconds": 60,
+            },
+        ).json()
+        client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
+        stale_task_ids.append(task["id"])
+        schedule = client.post(
+            "/schedules",
+            json={
+                "name": f"Overdue review {index}",
+                "interval_seconds": 60,
+                "task_title": "Scheduled review",
+                "assigned_agent_id": agent["id"],
+                "next_run_at": f"2000-01-01T00:0{index}:00+00:00",
+            },
+        ).json()
+        due_schedule_ids.append(schedule["id"])
+
+    with store.connect() as conn:
+        for task_id in stale_task_ids:
+            conn.execute("UPDATE tasks SET next_heartbeat_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", task_id))
+
+    overview = store.runtime_overview(limit=1)
+
+    require_equal(overview["counts"]["due_schedules"], 2, "runtime overview should count all due schedules")
+    require_equal(overview["counts"]["stale_heartbeats"], 2, "runtime overview should count all stale heartbeats")
+    require_equal(len(overview["due_schedules"]), 1, "runtime detail list should still honor the display limit")
+    require_equal(len(overview["stale_heartbeats"]), 1, "stale heartbeat detail list should still honor the display limit")
+    require_equal(set(overview["due_schedule_ids"]), set(due_schedule_ids), "runtime overview should expose all due schedule ids")
+    require_equal(set(overview["stale_heartbeat_task_ids"]), set(stale_task_ids), "runtime overview should expose all stale task ids")
+
+
+def test_runtime_overview_uses_operator_safe_error_detail(tmp_path: Path, monkeypatch) -> None:
+    store = HivemindStore(tmp_path / "runtime-error.db")
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+
+    def broken_runtime_overview() -> dict[str, object]:
+        raise sqlite3.OperationalError("raw database path /tmp/secret.db")
+
+    monkeypatch.setattr(store, "runtime_overview", broken_runtime_overview)
+
+    response = client.get("/runtime/overview")
+
+    require_equal(response.status_code, 503, "runtime overview should report unavailable store state")
+    require_equal(response.json()["detail"], "runtime overview unavailable", "runtime overview detail should be operator-safe")
+    require_true("secret.db" not in response.text, "runtime overview response should not leak raw DB errors")
+
+
+def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, caplog) -> None:
+    store = HivemindStore(tmp_path / "audit.db")
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
+
+    store.audit(
+        "credential.lease.issued",
+        "agent_demo",
+        "cred_demo",
+        "allowed",
+        "lease granted",
+        {
+            "action": "read_repo",
+            "lease_token": "hvl_secret_token",
+            "secret_ref": "env://demo-ref",
+        },
+    )
+
+    records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
+
+    require_equal(records[-1]["event"], "audit.decision", "audit log should identify decision events")
+    require_equal(records[-1]["type"], "credential.lease.issued", "audit log should include event type")
+    require_equal(records[-1]["metadata"]["action"], "read_repo", "audit log should preserve non-secret action")
+    require_equal(records[-1]["metadata"]["lease_token"], "[redacted]", "audit log should redact lease tokens")
+    require_equal(records[-1]["metadata"]["secret_ref"], "[redacted]", "audit log should redact secret refs")
+    require_true("hvl_secret_token" not in caplog.text, "audit log should not leak lease token values")
+    require_true("demo-ref" not in caplog.text, "audit log should not leak secret ref values")
+    stored_event = store.list_audit_events()[0]
+    require_equal(stored_event["metadata"]["lease_token"], "[redacted]", "persisted audit event should redact lease tokens")
+    require_equal(stored_event["metadata"]["secret_ref"], "[redacted]", "persisted audit event should redact secret refs")
+    store.audit(
+        "task.heartbeat",
+        "agent_demo",
+        "task_demo",
+        "allowed",
+        "heartbeat recorded",
+        {"note": "operator pasted password=hunter2"},
+    )
+    records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
+    require_equal([record["type"] for record in records], ["credential.lease.issued"], "structured logs should stay scoped to broker decisions")
+    require_true("hunter2" not in caplog.text, "runtime note content should not be emitted to structured broker logs")
 
 
 def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectations(tmp_path: Path) -> None:
