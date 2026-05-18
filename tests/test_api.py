@@ -5,6 +5,7 @@ import sqlite3
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from threading import Barrier, Event
 from time import sleep
@@ -22,6 +23,7 @@ from hivemind.providers import AgentProviderError, ProviderRunRequest, ProviderR
 from hivemind.store import (
     AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
     HivemindStore,
+    LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX,
     SCHEDULE_BACKFILL_BATCH_LIMIT,
     StoreError,
     hash_password,
@@ -272,6 +274,46 @@ def create_provider_credential(
             "metadata": {"credential_kind": "generic_reference", "purpose": "agent_provider"},
         }
     )
+
+
+def create_legacy_provider_credential(
+    store: HivemindStore,
+    agent_id: str,
+    *,
+    credential_id: str = PROVIDER_CREDENTIAL_ID,
+) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "id": credential_id,
+        "name": "OpenRouter Provider Credential",
+        "provider": "openrouter",
+        "secret_ref": "env://OPENROUTER_API_KEY",
+        "allowed_agents": json.dumps([agent_id]),
+        "allowed_actions": json.dumps([f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter"]),
+        "approval_required_actions": json.dumps([]),
+        "max_ttl_seconds": 300,
+        "require_intent": 1,
+        "metadata": json.dumps({"credential_kind": "generic_reference", "purpose": "agent_provider"}),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO credentials (
+                id, name, provider, secret_ref, allowed_agents, allowed_actions,
+                approval_required_actions, max_ttl_seconds, require_intent, metadata,
+                created_at, updated_at
+            )
+            VALUES (
+                :id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions,
+                :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata,
+                :created_at, :updated_at
+            )
+            """,
+            row,
+        )
+    return store.public_credential(store.get_credential(credential_id))
 
 
 def latest_schedule_run_event(client: TestClient, schedule_id: str) -> dict[str, object]:
@@ -722,6 +764,8 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     setup(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
+    payload_key = f"token-{secrets.token_hex(8)}"
+    payload_secret = f"demo-{secrets.token_hex(8)}"
 
     assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]
     lease_response = client.post(
@@ -740,32 +784,178 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
 
     action_response = client.post(
         "/credential-actions",
-        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+        json={
+            "lease_token": lease["lease_token"],
+            "action": "read_repo",
+            "payload": {"repo": "hivemind", payload_key: payload_secret},
+        },
     )
     assert action_response.status_code == 200
     assert action_response.json()["ok"] is True
-
-    replay_response = client.post(
-        "/credential-actions",
-        json={"lease_token": lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
-    )
-    require_equal(replay_response.status_code, 403, "replayed lease use should be denied")
+    audit_events = client.get("/audit-events").json()
+    performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
+    require_equal(performed_event["actor_id"], agent["id"], "performed audit event should identify the agent")
+    require_equal(performed_event["target_id"], credential["id"], "performed audit event should identify the credential")
     require_equal(
-        replay_response.json()["detail"],
-        "credential lease is expired or revoked",
-        "replayed lease use should expose the revoke/expiry reason",
+        performed_event["metadata"],
+        {"action": "read_repo", "payload_key_count": 2},
+        "performed audit metadata should include action and payload key count only",
     )
+    require_true(payload_key not in str(audit_events), "audit events should not expose payload keys")
+    require_true(payload_secret not in str(audit_events), "audit events should not expose payload values")
 
-    stored_lease = client.get("/credential-leases").json()[0]
-    require_equal(stored_lease["status"], "revoked", "successful broker use should consume the lease")
-    require_true("lease_token" not in stored_lease, "public lease views must not expose the raw token")
+
+def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    payload_key = f"token-{secrets.token_hex(8)}"
+    payload_secret = f"demo-{secrets.token_hex(8)}"
+
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    require_equal(lease_response.status_code, 201, "lease request should succeed before denied action")
+    lease = lease_response.json()
+
+    action_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": lease["lease_token"],
+            "action": "delete_repo",
+            "payload": {"repo": "hivemind", payload_key: payload_secret},
+        },
+    )
+    require_equal(action_response.status_code, 403, "wrong action should be denied")
+    require_equal(
+        action_response.json()["detail"],
+        "credential lease does not allow this action",
+        "wrong action denial should explain the lease action mismatch",
+    )
 
     audit_events = client.get("/audit-events").json()
-    credential_events = [event for event in audit_events if event["target_id"] == credential["id"]]
-    require_equal(credential_events[0]["type"], "credential.action.denied", "replay denial should be audited")
-    require_equal(credential_events[0]["decision"], "denied", "replay denial audit should be marked denied")
-    require_equal(credential_events[1]["type"], "credential.action.performed", "successful broker use should be audited")
-    require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
+    denied_event = next(event for event in audit_events if event["type"] == "credential.action.denied")
+    require_equal(denied_event["decision"], "denied", "denied action audit event should record the decision")
+    require_equal(denied_event["actor_id"], agent["id"], "denied action audit event should identify the agent")
+    require_equal(denied_event["target_id"], credential["id"], "denied action audit event should identify the credential")
+    require_equal(
+        denied_event["metadata"],
+        {"action": "delete_repo", "payload_key_count": 2},
+        "denied action audit metadata should include action and payload key count only",
+    )
+    require_true(payload_key not in str(audit_events), "audit events should not expose denied payload keys")
+    require_true(payload_secret not in str(audit_events), "audit events should not expose denied payload values")
+
+
+def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    missing_agent_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": "cred_missing",
+            "agent_id": "agent_missing",
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    require_equal(missing_agent_response.status_code, 403, "unknown agent lease requests should fail closed")
+    require_equal(
+        missing_agent_response.json()["detail"],
+        "unknown agent: agent_missing",
+        "unknown agent denial should identify the bad agent reference",
+    )
+
+    missing_credential_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": "cred_missing",
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    require_equal(missing_credential_response.status_code, 403, "unknown credential lease requests should fail closed")
+    require_equal(
+        missing_credential_response.json()["detail"],
+        "unknown credential: cred_missing",
+        "unknown credential denial should identify the bad credential reference",
+    )
+
+    audit_events = client.get("/audit-events").json()
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["actor_id"] == "agent_missing"
+            and event["target_id"] == "cred_missing"
+            and event["reason"] == "unknown agent: agent_missing"
+            and event["metadata"] == {"action": "read_repo"}
+            for event in audit_events
+        ),
+        "unknown agent denial should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["actor_id"] == agent["id"]
+            and event["target_id"] == "cred_missing"
+            and event["reason"] == "unknown credential: cred_missing"
+            and event["metadata"] == {"action": "read_repo"}
+            for event in audit_events
+        ),
+        "unknown credential denial should be audited",
+    )
+
+def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    unsafe_action = f"token-{secrets.token_hex(8)}"
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": unsafe_action,
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 403, "unsafe action should be denied")
+    require_equal(
+        response.json()["detail"],
+        "action is outside this credential policy",
+        "unsafe action denial should use the policy denial reason",
+    )
+
+    audit_events = client.get("/audit-events").json()
+    denied_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied"
+        and event["reason"] == "action is outside this credential policy"
+    )
+    require_equal(
+        denied_event["metadata"],
+        {"action": "<redacted>"},
+        "unsafe action identifier should be redacted in audit metadata",
+    )
+    require_true(unsafe_action not in str(audit_events), "unsafe action identifier should not appear in audit events")
 
 
 def test_unknown_lease_agent_is_rejected(tmp_path: Path) -> None:
@@ -1112,7 +1302,7 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         any(
             event["type"] == "credential.action.performed"
             and event["target_id"] == PROVIDER_CREDENTIAL_ID
-            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            and event["metadata"]["payload_key_count"] == 4
             for event in audit_events
         ),
         "provider credential use should consume a brokered credential action",
@@ -1121,13 +1311,67 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         any(
             event["type"] == "credential.action.performed"
             and event["target_id"] == credential["id"]
-            and event["metadata"]["payload_keys"] == ["capability", "model", "provider", "task_id"]
+            and event["metadata"]["payload_key_count"] == 4
             for event in audit_events
         ),
         "task tool credential use should consume a brokered credential action",
     )
     require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
+
+
+def test_agent_provider_credential_accepts_legacy_action_prefix(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Legacy provider runner",
+            "role": "run through an upgraded provider credential",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        },
+    ).json()
+    create_legacy_provider_credential(store, agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Run with legacy provider action",
+            "description": "Existing provider credentials should remain usable after upgrade.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 201, "legacy provider credential action should still authorize")
+    require_equal(len(adapter.requests), 1, "provider adapter should receive the authorized legacy credential request")
+    provider_request = adapter.requests[0]
+    require_equal(
+        provider_request.credential_action["action"],
+        f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}openrouter",
+        "adapter should receive the exact legacy brokered action",
+    )
+    require_true(
+        "lease_token" not in provider_request.credential_action,
+        "legacy provider action should not expose raw lease tokens",
+    )
+    require_true(
+        not any(
+            event["type"] == "credential.lease.denied" and event["target_id"] == PROVIDER_CREDENTIAL_ID
+            for event in audit_events
+        ),
+        "legacy provider credentials should not emit a denied lease before succeeding",
+    )
 
 
 def test_agent_provider_credential_policy_denial_fails_before_adapter(tmp_path: Path, monkeypatch) -> None:
@@ -2092,6 +2336,40 @@ def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -
     require_true("LEAKME_ACCESS_TOKEN" not in response.text, "credential metadata should not expose token-like metadata values")
 
 
+def test_credential_actions_accept_digits_after_first_character(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "GitHub Versioned Actions",
+            "provider": "github",
+            "secret_ref": "env://GITHUB_VERSIONED_ACTION_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo_v2", "oauth2_exchange"],
+            "approval_required_actions": ["oauth2_exchange"],
+            "max_ttl_seconds": 120,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+
+    require_equal(response.status_code, 201, "action names should allow digits after the first character")
+    credential = response.json()
+    require_equal(
+        credential["policy"]["allowed_actions"],
+        ["oauth2_exchange", "read_repo_v2"],
+        "credential policy should preserve normalized versioned action names",
+    )
+    require_equal(
+        credential["policy"]["approval_required_actions"],
+        ["oauth2_exchange"],
+        "approval policy should preserve normalized versioned action names",
+    )
+
+
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -2191,6 +2469,89 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         and event["reason"] == "operator denied lease request"
         for event in audit_events
     )
+
+
+def test_approval_decision_audit_redacts_legacy_unsafe_action_identifier(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-unsafe-approval-action.db"
+    store = HivemindStore(db_path)
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential_id = "cred_legacy_unsafe_action"
+    unsafe_action = f"token-{secrets.token_hex(8)}"
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=60)
+    lease_ids = ("lease_unsafe_pending_approve", "lease_unsafe_pending_deny")
+
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO credentials
+            (
+              id, name, provider, secret_ref, allowed_agents, allowed_actions,
+              approval_required_actions, max_ttl_seconds, require_intent,
+              metadata, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                credential_id,
+                "Legacy Unsafe Action",
+                "github",
+                "env://LEGACY_UNSAFE_ACTION_TOKEN",
+                json.dumps([agent["id"]]),
+                json.dumps([unsafe_action]),
+                json.dumps([unsafe_action]),
+                60,
+                1,
+                "{}",
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        for lease_id in lease_ids:
+            lease_secret = f"hvp_{secrets.token_urlsafe(18)}"
+            conn.execute(
+                """
+                INSERT INTO leases
+                (
+                  id, token_hash, token_preview, credential_id, agent_id,
+                  action, intent, ttl_seconds, status, issued_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    store.hash_token(lease_secret),
+                    "not issued",
+                    credential_id,
+                    agent["id"],
+                    unsafe_action,
+                    "Approve or deny a legacy pending lease without exposing its action value.",
+                    60,
+                    "pending",
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+
+    approve_response = client.post(f"/credential-leases/{lease_ids[0]}/approve")
+    deny_response = client.post(f"/credential-leases/{lease_ids[1]}/deny")
+
+    require_equal(approve_response.status_code, 200, "legacy pending lease approval should still work")
+    require_equal(deny_response.status_code, 200, "legacy pending lease denial should still work")
+
+    audit_events = client.get("/audit-events").json()
+    approved_event = next(event for event in audit_events if event["type"] == "credential.lease.approved")
+    denied_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied" and event["reason"] == "operator denied lease request"
+    )
+
+    require_equal(approved_event["metadata"]["action"], "<redacted>", "approval audit action should be redacted")
+    require_equal(denied_event["metadata"]["action"], "<redacted>", "denial audit action should be redacted")
+    require_true(unsafe_action not in str(audit_events), "unsafe action should not appear in audit events")
 
 
 def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_path: Path) -> None:
@@ -2406,8 +2767,12 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "secret_ref must use env://, file://, vault://, oauth://, or secret://"
+    require_equal(response.status_code, 400, "invalid secret refs should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "secret_ref must use env://, file://, vault://, oauth://, or secret://",
+        "invalid secret ref errors should list supported schemes",
+    )
 
 
 def test_create_credential_rejects_client_supplied_secret_ref(tmp_path: Path) -> None:
@@ -2718,6 +3083,40 @@ def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
     assert "code_verifier" in captured["data"]
 
 
+def test_codex_oauth_start_rejects_invalid_actions_before_redirect(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["repo-read"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+
+    require_equal(response.status_code, 400, "OAuth start should reject invalid actions before provider redirect")
+    require_equal(
+        response.json()["detail"],
+        "actions must use lowercase snake_case names",
+        "OAuth action validation should match credential creation",
+    )
+    conn = sqlite3.connect(tmp_path / "hivemind.db")
+    oauth_state_count = conn.execute("SELECT COUNT(*) FROM oauth_states").fetchone()[0]
+    conn.close()
+    require_equal(oauth_state_count, 0, "invalid OAuth starts should not persist callback state")
+
+
 def test_codex_oauth_flow_rejects_non_object_token_response(
     tmp_path: Path,
     monkeypatch,
@@ -2853,6 +3252,7 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
+    heartbeat_note = f"token={secrets.token_hex(8)}"
 
     task_response = client.post(
         "/tasks",
@@ -2881,9 +3281,14 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     assert task_status.status_code == 200
     assert task_status.json()["status"] == "blocked"
 
-    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": "policy review started"})
+    status_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
+    require_equal(status_response.status_code, 200, "task status update should succeed")
+
+    heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": heartbeat_note})
     assert heartbeat.status_code == 201
-    assert client.get("/heartbeats").json()[0]["task_id"] == task["id"]
+    heartbeats = client.get("/heartbeats").json()
+    require_equal(heartbeats[0]["task_id"], task["id"], "heartbeat should be tied to the task")
+    require_equal(heartbeats[0]["note"], heartbeat_note, "heartbeat history should retain the task-local note")
 
     schedule_response = client.post(
         "/schedules",
@@ -2950,9 +3355,51 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
     require_equal(schedule_run_event["target_id"], schedule["id"], "schedule audit should target the schedule id")
     require_equal(schedule_run_event["decision"], "allowed", "schedule audit should record an allowed decision")
     require_equal(schedule_run_event["reason"], "scheduled task created", "schedule audit should describe the created task")
-    audit_types = [event["type"] for event in client.get("/audit-events").json()]
-    require_true("task.created" in audit_types, "task creation should be audited")
-    require_true("task.status.updated" in audit_types, "task status changes should be audited")
+    audit_events = client.get("/audit-events")
+    require_equal(audit_events.status_code, 200, "audit event listing should succeed")
+    audit_event_list = audit_events.json()
+    require_true(
+        any(
+            event["type"] == "task.created"
+            and event["target_id"] == task["id"]
+            and event["metadata"]["status"] == "queued"
+            and event["metadata"]["priority"] == "urgent"
+            and event["metadata"]["assigned_agent_id"] == agent["id"]
+            and event["metadata"]["credential_id"] == credential["id"]
+            for event in audit_event_list
+        ),
+        "task creation should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "task.status.updated"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"from_status": "blocked", "to_status": "running"}
+            for event in audit_event_list
+        ),
+        "task status update should be audited",
+    )
+    require_true(
+        any(
+            event["type"] == "task.heartbeat"
+            and event["target_id"] == task["id"]
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_event_list
+        ),
+        "heartbeat audit should include only structured note metadata",
+    )
+    require_true(
+        any(
+            event["type"] == "schedule.created"
+            and event["target_id"] == schedule["id"]
+            and event["metadata"]["interval_seconds"] == 60
+            and event["metadata"]["catch_up_policy"] == "run_once"
+            and event["metadata"]["enabled"] is True
+            for event in audit_event_list
+        ),
+        "schedule creation should be audited",
+    )
+    require_true(heartbeat_note not in str(audit_event_list), "raw heartbeat note should not appear in audit events")
 
 
 def test_due_schedule_run_is_atomic_across_overlapping_store_instances(tmp_path: Path) -> None:
@@ -3365,8 +3812,8 @@ def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_pat
     assert task_audit_events[0]["decision"] == "allowed"
     assert task_audit_events[0]["reason"] == "heartbeat recorded"
     assert task_audit_events[0]["metadata"] == {
-        "agent_id": agent["id"],
-        "note": "operator verified the task is active",
+        "note_present": True,
+        "note_length": len("operator verified the task is active"),
     }
     assert task_audit_events[1]["actor_id"] == me["id"]
     assert task_audit_events[1]["decision"] == "allowed"
@@ -3585,7 +4032,10 @@ def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> No
         "task.created",
     ]
     assert persisted_task_events[0]["actor_id"] == first_user["id"]
-    assert persisted_task_events[0]["metadata"] == {"agent_id": agent["id"], "note": "restart-safe heartbeat"}
+    assert persisted_task_events[0]["metadata"] == {
+        "note_present": True,
+        "note_length": len("restart-safe heartbeat"),
+    }
     assert persisted_task_events[1]["actor_id"] == first_user["id"]
     assert persisted_task_events[1]["reason"] == "task marked blocked"
     assert persisted_task_events[1]["metadata"] == {"from_status": "queued", "to_status": "blocked"}
@@ -3932,6 +4382,7 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         },
     ).json()
     credential = client.get("/credentials").json()[0]
+    heartbeat_note = f"token={secrets.token_hex(8)}"
 
     bad_task_agent = client.post(
         "/tasks",
@@ -4070,7 +4521,7 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
     ).json()
     bad_heartbeat_agent = client.post(
         f"/tasks/{task['id']}/heartbeats",
-        json={"agent_id": "agent_missing", "note": "still working"},
+        json={"agent_id": "agent_missing", "note": heartbeat_note},
     )
     require_equal(bad_heartbeat_agent.status_code, 400, "unknown heartbeat agent should be rejected")
     require_equal(
@@ -4078,10 +4529,23 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         "agent_id references unknown agent: agent_missing",
         "heartbeat rejection should explain the missing agent reference",
     )
+    audit_events = client.get("/audit-events").json()
+    require_true(
+        any(
+            event["type"] == "task.heartbeat.denied"
+            and event["actor_id"].startswith("user_")
+            and event["target_id"] == task["id"]
+            and event["reason"] == "agent_id references unknown agent: agent_missing"
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_events
+        ),
+        "denied heartbeat should be audited without the raw note",
+    )
+    require_true(heartbeat_note not in str(audit_events), "raw heartbeat note should not appear in denied audit events")
 
     mismatched_heartbeat_agent = client.post(
         f"/tasks/{task['id']}/heartbeats",
-        json={"agent_id": secondary_agent["id"], "note": "still working"},
+        json={"agent_id": secondary_agent["id"], "note": heartbeat_note},
     )
     require_equal(mismatched_heartbeat_agent.status_code, 400, "mismatched heartbeat agent should be rejected")
     require_equal(
@@ -4089,6 +4553,18 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         f"agent_id does not match assigned agent for task {task['id']}: {secondary_agent['id']}",
         "heartbeat rejection should explain the assigned-agent mismatch",
     )
+    audit_events = client.get("/audit-events").json()
+    require_true(
+        any(
+            event["type"] == "task.heartbeat.denied"
+            and event["target_id"] == task["id"]
+            and event["reason"] == f"agent_id does not match assigned agent for task {task['id']}: {secondary_agent['id']}"
+            and event["metadata"] == {"note_present": True, "note_length": len(heartbeat_note)}
+            for event in audit_events
+        ),
+        "mismatched heartbeat should be audited without the raw note",
+    )
+    require_true(heartbeat_note not in str(audit_events), "raw heartbeat note should not appear in denied audit events")
 
 
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:
