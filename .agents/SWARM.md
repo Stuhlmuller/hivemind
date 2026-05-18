@@ -7,11 +7,11 @@ aliases.
 
 ## Roles
 
-- `reviewer`: audits the repository, open PRs, tests, docs, CI, and release posture, then prefers refining existing issues before opening rare grounded follow-up issues without implementing code.
+- `reviewer`: audits the repository, oldest open PRs, tests, docs, CI, and release posture, then prefers refining existing issues before opening rare grounded follow-up issues without implementing code.
 - `feature-requester`: audits product, operator, docs, and developer-experience gaps, then prefers refining existing backlog issues before opening rare focused feature issues without implementation.
 - `worker`: owns one issue branch at a time in its dedicated worktree and ships implementation updates.
 - `scout`: audits the repository and shipped default-branch behavior, prefers refining existing issues, and is the only role allowed to use the Codex browser tool.
-- `beekeeper`: keeps the PR queue healthy by fixing clear CI failures on idle PR branches and merging ready work.
+- `beekeeper`: keeps the PR queue healthy by reviewing oldest PRs first, fixing clear CI failures on idle PR branches, merging ready work, and closing irrelevant PRs with an explicit reason.
 - Every loop prepends a shared subagent delegation policy, and each top-level role may fan out bounded subagents whenever useful while staying responsible for final GitHub mutations.
 
 ## Compatibility aliases
@@ -52,6 +52,7 @@ For "open laptop and let it keep going" development on macOS:
 - The official top-level roles are `reviewer`, `feature-requester`, `worker`, `scout`, and `beekeeper`.
 - Legacy names are kept only as compatibility aliases for older commands or launchd configurations.
 - Worker loops open or update PRs, but the beekeeper is responsible for merges and cross-branch CI cleanup.
+- Beekeeper loops should review the oldest open PRs first and close irrelevant or obsolete PRs completely after confirming there is no active worker ownership.
 - After a PR is merged or closed, the worker or beekeeper loop should clean up that branch in its dedicated worktree and return to the default-branch base before picking new work.
 - Reviewer, feature-requester, worker, scout, and beekeeper runs should use bounded subagents aggressively for reconnaissance or disjoint sidecar work whenever the runtime supports delegation.
 - `swarm.sh run` is the endless supervisor mode. It keeps the selected role loops running and restarts them when they exit.
@@ -64,6 +65,7 @@ For "open laptop and let it keep going" development on macOS:
 
 - `HIVEMIND_SWARM_WORKTREE_ROOT`: override the base directory for loop worktrees.
 - `HIVEMIND_SWARM_RUNTIME_ROOT`: override where logs and pid files are stored.
+- `HIVEMIND_WORKER_PRIORITY_LABELS`: comma-separated label names that worker loops prefer before the default smallest-eligible-issue fallback. Defaults to `security,bug,help wanted`; set it to an empty string to disable label priority. Workers still skip issues with active branches, open PRs, or out-of-lane ownership before applying label priority.
 - `HIVEMIND_SWARM_SUPERVISOR_SLEEP_SECONDS`
 - `HIVEMIND_REVIEWER_SLEEP_SECONDS`
 - `HIVEMIND_WORKER_SLEEP_SECONDS`
