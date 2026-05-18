@@ -108,6 +108,37 @@ class PolicyEngine:
             normalized_intent=normalized_intent,
         )
 
+    def review_deterministic_request(self, request: PolicyReviewInput) -> IntentReview:
+        normalized_action = request.action.strip().lower()
+        normalized_intent = request.intent.strip()
+        return self._review_deterministic_policy(
+            request=request,
+            normalized_action=normalized_action,
+            normalized_intent=normalized_intent,
+        )
+
+    def review_deterministic_intent(
+        self,
+        *,
+        credential: CredentialRecord,
+        agent_id: str,
+        action: str,
+        intent: str,
+    ) -> IntentReview:
+        return self.review_deterministic_request(
+            PolicyReviewInput(
+                credential_id=credential.id,
+                credential_provider=credential.provider,
+                allowed_agents=credential.policy.allowed_agents,
+                allowed_actions=credential.policy.allowed_actions,
+                require_intent=credential.policy.require_intent,
+                agent_id=agent_id,
+                action=action,
+                intent=intent,
+                credential_metadata=credential.metadata,
+            )
+        )
+
     def _review_deterministic_policy(
         self,
         *,

@@ -73,6 +73,12 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
             "allowed_actions": ["read_repo"],
             "max_ttl_seconds": 180,
             "require_intent": True,
+            "agent_lease_limit": 3,
+            "credential_lease_limit": 7,
+            "credential_action_limit": 11,
+            "rate_limit_window_seconds": 900,
+            "provider_token_budget": 5000,
+            "provider_cost_budget_cents": 250,
             "metadata": {"purpose": "backup coverage"},
         }
     )
@@ -205,6 +211,17 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
     require_true(
         managed_credential["id"] not in exported_credential_ids,
         "broker-managed credentials should be excluded",
+    )
+    exported_credential = next(row for row in bundle["tables"]["credentials"] if row["id"] == credential["id"])
+    require_equal(exported_credential["agent_lease_limit"], 3, "agent lease limits should be exported")
+    require_equal(exported_credential["credential_lease_limit"], 7, "credential lease limits should be exported")
+    require_equal(exported_credential["credential_action_limit"], 11, "credential action limits should be exported")
+    require_equal(exported_credential["rate_limit_window_seconds"], 900, "rate windows should be exported")
+    require_equal(exported_credential["provider_token_budget"], 5000, "provider token budgets should be exported")
+    require_equal(
+        exported_credential["provider_cost_budget_cents"],
+        250,
+        "provider cost budgets should be exported",
     )
     exported_tasks = {row["id"]: row for row in bundle["tables"]["tasks"]}
     exported_schedules = {row["id"]: row for row in bundle["tables"]["schedules"]}
@@ -466,6 +483,41 @@ def test_restore_accepts_v1_backup_without_hive_fields(tmp_path: Path) -> None:
     restored_schedule = next(row for row in restored_schedules if row["id"] == schedule["id"])
     require_equal(restored_task["hive_id"], None, "legacy tasks should restore without hive assignment")
     require_equal(restored_schedule["hive_id"], None, "legacy schedules should restore without hive assignment")
+
+
+def test_restore_applies_defaults_for_legacy_credential_rate_limit_columns(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    bundle = source.export_backup_bundle()
+    credential = bundle["tables"]["credentials"][0]
+    for field_name in (
+        "agent_lease_limit",
+        "credential_lease_limit",
+        "credential_action_limit",
+        "rate_limit_window_seconds",
+        "provider_token_budget",
+        "provider_cost_budget_cents",
+    ):
+        credential.pop(field_name)
+
+    target = HivemindStore(tmp_path / "target.db")
+    target.restore_backup_bundle(bundle)
+    restored = table_rows(tmp_path / "target.db", "credentials")[0]
+
+    require_equal(restored["agent_lease_limit"], None, "legacy restores should default agent lease limits")
+    require_equal(
+        restored["credential_lease_limit"],
+        None,
+        "legacy restores should default credential lease limits",
+    )
+    require_equal(
+        restored["credential_action_limit"],
+        None,
+        "legacy restores should default credential action limits",
+    )
+    require_equal(restored["rate_limit_window_seconds"], 60, "legacy restores should default rate windows")
+    require_equal(restored["provider_token_budget"], None, "legacy restores should default token budgets")
+    require_equal(restored["provider_cost_budget_cents"], None, "legacy restores should default cost budgets")
 
 
 def test_restore_rejects_unsafe_tool_action_identifiers(tmp_path: Path) -> None:

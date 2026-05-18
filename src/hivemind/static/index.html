@@ -612,6 +612,18 @@ agents: brokered capabilities</pre>
                         <label>allowed actions<input name="allowed_actions" value="agent_provider" autocomplete="off" /></label>
                         <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" value="900" /></label>
                       </div>
+                      <div class="two-col">
+                        <label>rate window<input name="rate_limit_window_seconds" type="number" min="1" max="86400" value="60" /></label>
+                        <label>agent lease cap<input name="agent_lease_limit" type="number" min="1" /></label>
+                      </div>
+                      <div class="two-col">
+                        <label>credential lease cap<input name="credential_lease_limit" type="number" min="1" /></label>
+                        <label>credential action cap<input name="credential_action_limit" type="number" min="1" /></label>
+                      </div>
+                      <div class="two-col">
+                        <label>token budget placeholder<input name="provider_token_budget" type="number" min="1" /></label>
+                        <label>cost budget placeholder<input name="provider_cost_budget_cents" type="number" min="1" /></label>
+                      </div>
                       <label>approval required actions<input name="approval_required_actions" value="" autocomplete="off" /></label>
                       <p class="field-hint">Use a narrower comma-separated list when an action must stop for operator approval before a token is issued.</p>
                       <label class="check"><input name="require_intent" type="checkbox" checked /> require intent</label>
@@ -649,6 +661,18 @@ agents: brokered capabilities</pre>
                       <div class="two-col">
                         <label>allowed actions<input name="allowed_actions" autocomplete="off" /></label>
                         <label>max ttl<input name="max_ttl_seconds" type="number" min="1" max="3600" /></label>
+                      </div>
+                      <div class="two-col">
+                        <label>rate window<input name="rate_limit_window_seconds" type="number" min="1" max="86400" value="60" /></label>
+                        <label>agent lease cap<input name="agent_lease_limit" type="number" min="1" /></label>
+                      </div>
+                      <div class="two-col">
+                        <label>credential lease cap<input name="credential_lease_limit" type="number" min="1" /></label>
+                        <label>credential action cap<input name="credential_action_limit" type="number" min="1" /></label>
+                      </div>
+                      <div class="two-col">
+                        <label>token budget placeholder<input name="provider_token_budget" type="number" min="1" /></label>
+                        <label>cost budget placeholder<input name="provider_cost_budget_cents" type="number" min="1" /></label>
                       </div>
                       <label>approval required actions<input name="approval_required_actions" autocomplete="off" /></label>
                       <p class="field-hint">List only the actions that should enter the operator approval queue before Hivemind issues a lease token.</p>

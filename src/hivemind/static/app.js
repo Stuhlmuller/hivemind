@@ -326,6 +326,11 @@ function normalizeTaskPayload(payload) {
   };
 }
 
+function optionalNumber(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized ? Number(normalized) : null;
+}
+
 function setText(selector, value) {
   const node = $(selector);
   if (node) {
@@ -379,8 +384,13 @@ function credentialAgentScope(credential) {
     : "none";
 }
 
+function credentialLimitLabel(value) {
+  return value == null ? "none" : String(value);
+}
+
 function credentialDetailRows(credential) {
   const metadata = credential.metadata || {};
+  const policy = credential.policy;
   const rows = [
     `ID: ${escapeHtml(credential.id)}`,
     `Type: ${escapeHtml(credentialTypeLabel(credential))}`,
@@ -411,8 +421,20 @@ function credentialDetailRows(credential) {
       credential.policy.approval_required_actions.length ? credential.policy.approval_required_actions.join(", ") : "none",
     )}`,
   );
-  rows.push(`Max TTL: ${escapeHtml(credential.policy.max_ttl_seconds)}s`);
-  rows.push(`Intent review: ${escapeHtml(credential.policy.require_intent ? "required" : "optional")}`);
+  rows.push(`Max TTL: ${escapeHtml(policy.max_ttl_seconds)}s`);
+  rows.push(`Rate window: ${escapeHtml(policy.rate_limit_window_seconds)}s`);
+  rows.push(
+    `Lease caps: agent ${escapeHtml(credentialLimitLabel(policy.agent_lease_limit))} / credential ${escapeHtml(
+      credentialLimitLabel(policy.credential_lease_limit),
+    )}`,
+  );
+  rows.push(`Action cap: ${escapeHtml(credentialLimitLabel(policy.credential_action_limit))}`);
+  rows.push(
+    `Budget placeholder: ${escapeHtml(credentialLimitLabel(policy.provider_token_budget))} tokens / ${escapeHtml(
+      credentialLimitLabel(policy.provider_cost_budget_cents),
+    )} cents`,
+  );
+  rows.push(`Intent review: ${escapeHtml(policy.require_intent ? "required" : "optional")}`);
   return rows.join("<br>");
 }
 
@@ -447,6 +469,12 @@ function applyCredentialTemplate(reset = false) {
   form.elements.name.value = template.defaults.name;
   form.elements.allowed_actions.value = template.defaults.allowedActions;
   form.elements.max_ttl_seconds.value = String(template.defaults.maxTtlSeconds);
+  form.elements.rate_limit_window_seconds.value = "60";
+  form.elements.agent_lease_limit.value = "";
+  form.elements.credential_lease_limit.value = "";
+  form.elements.credential_action_limit.value = "";
+  form.elements.provider_token_budget.value = "";
+  form.elements.provider_cost_budget_cents.value = "";
   form.elements.require_intent.checked = template.defaults.requireIntent;
 }
 
@@ -927,6 +955,12 @@ function renderCredentials() {
         credential.policy.require_intent ? "intent required" : "intent optional",
         ...credential.policy.allowed_actions,
       ];
+      if (credential.policy.agent_lease_limit || credential.policy.credential_lease_limit) {
+        pills.push(`lease cap ${credentialLimitLabel(credential.policy.agent_lease_limit)}/${credentialLimitLabel(credential.policy.credential_lease_limit)}`);
+      }
+      if (credential.policy.credential_action_limit) {
+        pills.push(`action cap ${credential.policy.credential_action_limit}`);
+      }
       if (credential.metadata?.auth_type === "oauth") {
         pills.push(credential.metadata?.oauth_refreshable ? "refreshable" : "access-only");
       }
@@ -1485,6 +1519,12 @@ $("#credential-form").addEventListener("submit", async (event) => {
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.approval_required_actions = splitCsv(payload.approval_required_actions);
   payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
+  payload.agent_lease_limit = optionalNumber(payload.agent_lease_limit);
+  payload.credential_lease_limit = optionalNumber(payload.credential_lease_limit);
+  payload.credential_action_limit = optionalNumber(payload.credential_action_limit);
+  payload.rate_limit_window_seconds = Number(payload.rate_limit_window_seconds || 60);
+  payload.provider_token_budget = optionalNumber(payload.provider_token_budget);
+  payload.provider_cost_budget_cents = optionalNumber(payload.provider_cost_budget_cents);
   payload.require_intent = form.elements.require_intent.checked;
   payload.metadata = templatePayload.metadata;
   try {
@@ -1512,6 +1552,12 @@ $("#oauth-credential-form").addEventListener("submit", async (event) => {
   payload.allowed_actions = splitCsv(payload.allowed_actions);
   payload.approval_required_actions = splitCsv(payload.approval_required_actions);
   payload.max_ttl_seconds = Number(payload.max_ttl_seconds);
+  payload.agent_lease_limit = optionalNumber(payload.agent_lease_limit);
+  payload.credential_lease_limit = optionalNumber(payload.credential_lease_limit);
+  payload.credential_action_limit = optionalNumber(payload.credential_action_limit);
+  payload.rate_limit_window_seconds = Number(payload.rate_limit_window_seconds || 60);
+  payload.provider_token_budget = optionalNumber(payload.provider_token_budget);
+  payload.provider_cost_budget_cents = optionalNumber(payload.provider_cost_budget_cents);
   payload.require_intent = form.elements.require_intent.checked;
   payload.metadata = {};
   try {
