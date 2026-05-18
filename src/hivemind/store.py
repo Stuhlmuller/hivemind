@@ -18,6 +18,13 @@ from threading import RLock
 from typing import Any, Iterator
 
 from hivemind.config import HivemindConfig
+from hivemind.models import (
+    INITIAL_TASK_STATUSES,
+    TASK_STATUS_TRANSITIONS,
+    TERMINAL_TASK_STATUSES,
+    TaskPriority,
+    TaskStatus,
+)
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
 from hivemind.providers import (
@@ -112,10 +119,43 @@ class StoreValidationError(StoreError):
 LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
-AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
+AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider_"
+LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
 REDACTED_VALUE = "[redacted]"
+SENSITIVE_LOG_KEY_FRAGMENTS = (
+    "authorization",
+    "ciphertext",
+    "code_verifier",
+    "password",
+    "secret",
+    "token",
+)
+AUDIT_LOGGER = logging.getLogger("hivemind.audit")
+STRUCTURED_AUDIT_LOG_PREFIXES = ("credential.lease.", "credential.action.")
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
+AGENT_STATUS_ALIASES = {"working": "running"}
+AGENT_STATUS_VALUES = frozenset({"idle", "queued", "running", "blocked", "done", "failed"})
+FINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
+AGENT_STATUS_UPDATE_SQL = "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
+VALID_TASK_PRIORITIES = frozenset(priority.value for priority in TaskPriority)
+VALID_TASK_STATUSES = frozenset(status.value for status in TaskStatus)
+VALID_INITIAL_TASK_STATUSES = frozenset(status.value for status in INITIAL_TASK_STATUSES)
+TERMINAL_TASK_STATUS_VALUES = frozenset(status.value for status in TERMINAL_TASK_STATUSES)
+EDITABLE_TASK_FIELDS = (
+    "title",
+    "description",
+    "priority",
+    "assigned_agent_id",
+    "credential_id",
+    "action",
+    "intent",
+    "heartbeat_seconds",
+)
+VALID_TASK_STATUS_TRANSITIONS = {
+    status.value: frozenset(next_status.value for next_status in next_statuses)
+    for status, next_statuses in TASK_STATUS_TRANSITIONS.items()
+}
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
@@ -125,6 +165,7 @@ CREDENTIAL_INSERT_SQL = """
     (id, name, provider, secret_ref, allowed_agents, allowed_actions, approval_required_actions, max_ttl_seconds, require_intent, metadata, created_at, updated_at)
     VALUES (:id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions, :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata, :created_at, :updated_at)
 """
+SAFE_ACTION_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 BACKUP_FORMAT = "hivemind-logical-backup"
 BACKUP_FORMAT_VERSION = 1
 BACKUP_TABLE_QUERIES: dict[str, str] = {
@@ -332,19 +373,6 @@ def redact_public_metadata_value(value: Any) -> Any:
             for key, item in value.items()
         }
     return value
-
-
-TERMINAL_TASK_STATUSES = ("done", "failed", "cancelled")
-SENSITIVE_LOG_KEY_FRAGMENTS = (
-    "authorization",
-    "ciphertext",
-    "code_verifier",
-    "password",
-    "secret",
-    "token",
-)
-AUDIT_LOGGER = logging.getLogger("hivemind.audit")
-STRUCTURED_AUDIT_LOG_PREFIXES = ("credential.lease.", "credential.action.")
 
 
 def is_sensitive_log_key(key: str) -> bool:
@@ -580,11 +608,15 @@ class HivemindStore:
                 );
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_agent_id ON tasks(assigned_agent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_schedules_assigned_agent_id ON schedules(assigned_agent_id)")
             self._migrate_sessions_to_token_hashes(conn)
             self._migrate_users_to_username(conn)
+            self._migrate_legacy_agent_statuses(conn)
             self._migrate_schedules_to_catch_up_policy(conn)
             self._migrate_credentials_to_approval_actions(conn)
             self._migrate_leases_to_store_ttl(conn)
+            self._migrate_terminal_task_heartbeats(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -630,6 +662,14 @@ class HivemindStore:
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
+    def _migrate_legacy_agent_statuses(self, conn: sqlite3.Connection) -> None:
+        if conn.execute("SELECT 1 FROM agents WHERE status = 'working' LIMIT 1").fetchone() is None:
+            return
+        conn.execute(
+            "UPDATE agents SET status = 'running', updated_at = ? WHERE status = 'working'",
+            (iso(),),
+        )
+
     def _migrate_credentials_to_approval_actions(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(credentials)")}
         if "approval_required_actions" in columns:
@@ -649,6 +689,18 @@ class HivemindStore:
             if issued_at is not None and expires_at is not None:
                 ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
             conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
+
+    def _migrate_terminal_task_heartbeats(self, conn: sqlite3.Connection) -> None:
+        terminal_statuses = tuple(sorted(TERMINAL_TASK_STATUS_VALUES))
+        conn.execute(
+            """
+            UPDATE tasks
+            SET next_heartbeat_at = NULL
+            WHERE status IN (?, ?, ?)
+              AND next_heartbeat_at IS NOT NULL
+            """,
+            terminal_statuses,
+        )
 
     def _migrate_schedules_to_catch_up_policy(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
@@ -801,8 +853,8 @@ class HivemindStore:
         normalized_username = username.strip().lower()
         if len(normalized_username) < 3:
             raise StoreError("username must be at least 3 characters")
-        if len(password) < 12:
-            raise StoreError("admin password must be at least 12 characters")
+        if sum(1 for character in password if not character.isspace()) < 12:
+            raise StoreError("admin password must include at least 12 non-whitespace characters")
         with self.connect() as conn:
             conn.execute(BEGIN_IMMEDIATE_SQL)
             if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
@@ -912,9 +964,10 @@ class HivemindStore:
 
     def list_agents(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM agents ORDER BY created_at DESC")]
+            rows = conn.execute("SELECT * FROM agents ORDER BY created_at DESC").fetchall()
+            return self.public_agents(conn, rows)
 
-    def create_agent(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_agent(self, data: dict[str, Any], *, actor_id: str = "user") -> dict[str, Any]:
         now = iso()
         provider = normalize_agent_provider_id(data.get("provider") or "local")
         row = {
@@ -936,14 +989,134 @@ class HivemindStore:
                 """,
                 row,
             )
-        return row
+            public_row = self.public_agent(conn, row)
+        self.audit("agent.created", actor_id, row["id"], "allowed", "agent created", {"status": row["status"]})
+        return public_row
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-            if row is None:
-                raise StoreNotFoundError(f"unknown agent: {agent_id}")
-            return dict(row)
+            row = self.get_agent_row(conn, agent_id)
+            return self.public_agent(conn, row)
+
+    def update_agent_status(self, agent_id: str, status: str, *, actor_id: str = "user") -> dict[str, Any]:
+        normalized_status = AGENT_STATUS_ALIASES.get(status.strip().lower(), status.strip().lower())
+        if normalized_status not in AGENT_STATUS_VALUES:
+            raise StoreValidationError(f"unsupported agent status: {status}")
+        updated_at = iso()
+        with self.connect() as conn:
+            row = self.get_agent_row(conn, agent_id)
+            conn.execute(AGENT_STATUS_UPDATE_SQL, (normalized_status, updated_at, agent_id))
+            updated = self.public_agent(conn, {**dict(row), "status": normalized_status, "updated_at": updated_at})
+        self.audit("agent.status.updated", actor_id, agent_id, "allowed", f"agent marked {normalized_status}", {"status": normalized_status})
+        return updated
+
+    def get_agent_row(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"unknown agent: {agent_id}")
+        return row
+
+    def public_agents(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[sqlite3.Row] | list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        agents = [dict(row) for row in rows]
+        if not agents:
+            return []
+        agent_ids = [str(agent["id"]) for agent in agents]
+        agent_ids_json = dumps(agent_ids)
+        assigned_tasks_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for task_row in conn.execute(
+            """
+            SELECT tasks.assigned_agent_id, tasks.id, tasks.title, tasks.status, tasks.priority, tasks.updated_at
+            FROM tasks
+            JOIN json_each(?) AS requested_agents
+              ON tasks.assigned_agent_id = requested_agents.value
+            ORDER BY tasks.updated_at DESC, tasks.created_at DESC
+            """,
+            (agent_ids_json,),
+        ):
+            assigned_tasks_by_agent[str(task_row["assigned_agent_id"])].append(
+                {
+                    "id": task_row["id"],
+                    "title": task_row["title"],
+                    "status": task_row["status"],
+                    "priority": task_row["priority"],
+                    "updated_at": task_row["updated_at"],
+                }
+            )
+        assigned_schedules_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for schedule_row in conn.execute(
+            """
+            SELECT schedules.assigned_agent_id, schedules.id, schedules.name, schedules.enabled, schedules.interval_seconds, schedules.next_run_at, schedules.task_title
+            FROM schedules
+            JOIN json_each(?) AS requested_agents
+              ON schedules.assigned_agent_id = requested_agents.value
+            ORDER BY schedules.updated_at DESC, schedules.created_at DESC
+            """,
+            (agent_ids_json,),
+        ):
+            assigned_schedules_by_agent[str(schedule_row["assigned_agent_id"])].append(
+                {
+                    "id": schedule_row["id"],
+                    "name": schedule_row["name"],
+                    "enabled": bool(schedule_row["enabled"]),
+                    "interval_seconds": schedule_row["interval_seconds"],
+                    "next_run_at": schedule_row["next_run_at"],
+                    "task_title": schedule_row["task_title"],
+                }
+            )
+        credential_policies_by_agent = {agent_id: [] for agent_id in agent_ids}
+        for credential_row in conn.execute(
+            """
+            SELECT id, name, provider, allowed_agents, allowed_actions, max_ttl_seconds, require_intent
+            FROM credentials
+            ORDER BY created_at DESC
+            """
+        ):
+            policy = {
+                "id": credential_row["id"],
+                "name": credential_row["name"],
+                "provider": credential_row["provider"],
+                "allowed_actions": loads(credential_row["allowed_actions"], []),
+                "max_ttl_seconds": credential_row["max_ttl_seconds"],
+                "require_intent": bool(credential_row["require_intent"]),
+            }
+            for allowed_agent_id in loads(credential_row["allowed_agents"], []):
+                if allowed_agent_id in credential_policies_by_agent:
+                    credential_policies_by_agent[allowed_agent_id].append(policy)
+        return [
+            self._build_public_agent(
+                row=agent,
+                assigned_tasks=assigned_tasks_by_agent[agent["id"]],
+                assigned_schedules=assigned_schedules_by_agent[agent["id"]],
+                credential_policies=credential_policies_by_agent[agent["id"]],
+            )
+            for agent in agents
+        ]
+
+    def public_agent(self, conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return self.public_agents(conn, [row])[0]
+
+    def _build_public_agent(
+        self,
+        *,
+        row: sqlite3.Row | dict[str, Any],
+        assigned_tasks: list[dict[str, Any]],
+        assigned_schedules: list[dict[str, Any]],
+        credential_policies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        agent = dict(row)
+        agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
+        agent["assigned_task_count"] = len(assigned_tasks)
+        agent["active_task_count"] = sum(1 for task in assigned_tasks if task["status"] not in FINAL_TASK_STATUSES)
+        agent["assigned_schedule_count"] = len(assigned_schedules)
+        agent["credential_policy_count"] = len(credential_policies)
+        agent["assigned_tasks"] = assigned_tasks
+        agent["assigned_schedules"] = assigned_schedules
+        agent["credential_policies"] = credential_policies
+        return agent
 
     def list_credentials(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1003,11 +1176,11 @@ class HivemindStore:
         allow_managed_secret_metadata: bool = False,
     ) -> dict[str, Any]:
         now = iso()
-        actions = sorted(set(action.strip().lower() for action in data["allowed_actions"] if action.strip()))
-        agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
-        approval_required_actions = sorted(
-            set(action.strip().lower() for action in (data.get("approval_required_actions") or []) if action.strip())
+        actions, approval_required_actions = self.normalize_credential_action_policy(
+            data["allowed_actions"],
+            data.get("approval_required_actions") or [],
         )
+        agents = sorted(set(agent.strip() for agent in (data.get("allowed_agents") or []) if agent.strip()))
         provider = str(data["provider"]).strip().lower()
         name = str(data["name"]).strip()
         secret_ref = str(data.get("secret_ref") or "").strip()
@@ -1017,10 +1190,6 @@ class HivemindStore:
                 validate_external_credential_metadata(metadata)
             except ValueError as exc:
                 raise StoreError(str(exc)) from exc
-        if not actions:
-            raise StoreError("credential must allow at least one action")
-        if not set(approval_required_actions).issubset(actions):
-            raise StoreError("approval_required_actions must be a subset of allowed_actions")
         if not name:
             raise StoreError("credential name is required")
         if not provider:
@@ -1047,6 +1216,29 @@ class HivemindStore:
             raise StoreError(str(exc)) from exc
         return row
 
+    def normalize_action_name(self, action: str) -> str:
+        normalized = action.strip().lower()
+        if not normalized:
+            raise StoreError("action is required")
+        if len(normalized) > 64 or SAFE_ACTION_NAME.fullmatch(normalized) is None:
+            raise StoreError("actions must use lowercase snake_case names")
+        return normalized
+
+    def normalize_credential_action_policy(
+        self,
+        allowed_actions: Sequence[str],
+        approval_required_actions: Sequence[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        actions = sorted(set(self.normalize_action_name(action) for action in allowed_actions if action.strip()))
+        approvals = sorted(
+            set(self.normalize_action_name(action) for action in (approval_required_actions or []) if action.strip())
+        )
+        if not actions:
+            raise StoreError("credential must allow at least one action")
+        if not set(approvals).issubset(actions):
+            raise StoreError("approval_required_actions must be a subset of allowed_actions")
+        return actions, approvals
+
     def create_credential(self, data: dict[str, Any]) -> dict[str, Any]:
         row = self._prepare_credential_row(data)
         try:
@@ -1054,6 +1246,11 @@ class HivemindStore:
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
         with self.connect() as conn:
+            self.validate_agent_scope(
+                conn,
+                field_name="allowed_agents",
+                values=loads(row["allowed_agents"], []),
+            )
             conn.execute(CREDENTIAL_INSERT_SQL, row)
         return self.public_credential(row)
 
@@ -1085,6 +1282,11 @@ class HivemindStore:
             "updated_at": credential_row["updated_at"],
         }
         with self.connect() as conn:
+            self.validate_agent_scope(
+                conn,
+                field_name="allowed_agents",
+                values=loads(credential_row["allowed_agents"], []),
+            )
             conn.execute(CREDENTIAL_INSERT_SQL, credential_row)
             conn.execute(
                 """
@@ -1196,6 +1398,11 @@ class HivemindStore:
             "updated_at": credential_row["updated_at"],
         }
         with self.connect() as conn:
+            self.validate_agent_scope(
+                conn,
+                field_name="allowed_agents",
+                values=loads(credential_row["allowed_agents"], []),
+            )
             conn.execute(CREDENTIAL_INSERT_SQL, credential_row)
             conn.execute(
                 """
@@ -1268,9 +1475,43 @@ class HivemindStore:
         *,
         audit_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
-        self.get_agent(agent_id)
-        credential = self.get_credential(credential_id)
+        normalized_action = action.strip().lower()
         base_audit_metadata = dict(audit_metadata or {})
+
+        def lease_audit_metadata(*, ttl_seconds: int | None = None, lease_id: str | None = None) -> dict[str, Any]:
+            metadata = {
+                **base_audit_metadata,
+                **self.audit_action_metadata(normalized_action, ttl_seconds=ttl_seconds),
+            }
+            if lease_id is not None:
+                metadata["lease_id"] = lease_id
+            return metadata
+
+        try:
+            with self.connect() as conn:
+                self.get_agent_row(conn, agent_id)
+        except StoreError as exc:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                str(exc),
+                lease_audit_metadata(),
+            )
+            raise
+        try:
+            credential = self.get_credential(credential_id)
+        except StoreError as exc:
+            self.audit(
+                LEASE_DENIED_EVENT,
+                agent_id,
+                credential_id,
+                "denied",
+                str(exc),
+                lease_audit_metadata(),
+            )
+            raise
         approval_required_actions = set(loads(credential["approval_required_actions"], []))
         review = self._policy_engine.review_request(
             PolicyReviewInput(
@@ -1293,7 +1534,7 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 review.reason,
-                {"action": normalized_action, **base_audit_metadata},
+                lease_audit_metadata(),
             )
             raise StoreError(review.reason)
         ttl = min(int(ttl_seconds or credential["max_ttl_seconds"]), int(credential["max_ttl_seconds"]))
@@ -1328,7 +1569,7 @@ class HivemindStore:
                 credential_id,
                 "pending",
                 "action requires operator approval",
-                {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+                lease_audit_metadata(ttl_seconds=ttl, lease_id=row["id"]),
             )
             return None, self.public_lease(row)
         self.audit(
@@ -1337,78 +1578,90 @@ class HivemindStore:
             credential_id,
             "allowed",
             review.reason,
-            {"action": normalized_action, "lease_id": row["id"], "ttl_seconds": ttl, **base_audit_metadata},
+            lease_audit_metadata(ttl_seconds=ttl, lease_id=row["id"]),
         )
         public = self.public_lease(row)
         public["lease_token"] = token
         return token, public
 
-    def credential_action_denial(
-        self,
-        lease: dict[str, Any] | None,
-        normalized_action: str,
-        credential_found: bool,
-    ) -> tuple[str, str, str, dict[str, Any]] | None:
-        if lease is None:
-            return (
-                "unknown",
-                "credential-actions",
-                "unknown credential lease token",
-                {"action": normalized_action},
-            )
-        metadata = {
-            "action": normalized_action,
-            "lease_id": lease["id"],
-            "lease_status": lease["status"],
-        }
-        if lease["status"] == "pending":
-            return (lease["agent_id"], lease["credential_id"], "credential lease is pending approval", metadata)
-        if lease["status"] == "denied":
-            return (lease["agent_id"], lease["credential_id"], "credential lease request was denied", metadata)
-        if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
-            return (lease["agent_id"], lease["credential_id"], "credential lease is expired or revoked", metadata)
-        if lease["action"] != normalized_action:
-            return (
-                lease["agent_id"],
-                lease["credential_id"],
-                "credential lease does not allow this action",
-                {**metadata, "lease_action": lease["action"]},
-            )
-        if not credential_found:
-            return (lease["agent_id"], lease["credential_id"], "credential no longer exists", metadata)
-        return None
-
     def perform_credential_action(self, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         token_hash = self.hash_token(lease_token)
         normalized_action = action.strip().lower()
+        payload_key_count = len(payload)
         error_detail: str | None = None
         result: dict[str, Any] | None = None
         with self.connect() as conn:
             lease = conn.execute("SELECT * FROM leases WHERE token_hash = ?", (token_hash,)).fetchone()
-            credential_found = False
-            if lease is not None:
-                credential_found = (
-                    conn.execute("SELECT 1 FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
-                    is not None
+            if lease is None:
+                error_detail = "unknown credential lease token"
+                self._insert_unknown_credential_action_denial(
+                    conn,
+                    normalized_action,
+                    error_detail,
+                    payload_key_count,
                 )
-            denial = self.credential_action_denial(
-                dict(lease) if lease is not None else None,
-                normalized_action,
-                credential_found,
-            )
-            if denial is not None:
-                actor_id, target_id, reason, metadata = denial
-                self._insert_audit(conn, ACTION_DENIED_EVENT, actor_id, target_id, "denied", reason, metadata)
-                error_detail = reason
-            elif lease is not None:
-                result, error_detail = self._consume_credential_action(conn, lease, normalized_action, payload)
             else:
-                error_detail = "credential action could not be evaluated"
+                error_detail = self._credential_action_denial_reason(lease, normalized_action)
+                if error_detail is not None:
+                    self._insert_credential_action_denial(
+                        conn,
+                        lease,
+                        normalized_action,
+                        error_detail,
+                        payload_key_count,
+                    )
+                else:
+                    result, error_detail = self._consume_credential_action(
+                        conn,
+                        lease,
+                        normalized_action,
+                        payload_key_count,
+                    )
         if error_detail is not None:
             raise StoreError(error_detail)
         if result is None:
             raise RuntimeError("credential action flow ended without a result")
         return result
+
+    def _credential_action_denial_reason(self, lease: sqlite3.Row, normalized_action: str) -> str | None:
+        if lease["status"] == "pending":
+            return "credential lease is pending approval"
+        if lease["status"] == "denied":
+            return "credential lease request was denied"
+        if lease["status"] != "active" or parse_dt(lease["expires_at"]) <= utcnow():
+            return "credential lease is expired or revoked"
+        if lease["action"] != normalized_action:
+            return "credential lease does not allow this action"
+        return None
+
+    def _insert_unknown_credential_action_denial(
+        self,
+        conn: sqlite3.Connection,
+        normalized_action: str,
+        error_detail: str,
+        payload_key_count: int,
+    ) -> None:
+        self._insert_audit(
+            conn,
+            ACTION_DENIED_EVENT,
+            "unknown",
+            "credential_lease",
+            "denied",
+            error_detail,
+            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
+        )
+
+    def credential_action_denial_metadata(
+        self,
+        lease: sqlite3.Row,
+        normalized_action: str,
+        payload_key_count: int,
+    ) -> dict[str, Any]:
+        metadata = self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count)
+        if lease["status"] in {"pending", "denied"}:
+            metadata["lease_id"] = lease["id"]
+            metadata["lease_status"] = lease["status"]
+        return metadata
 
     def _insert_credential_action_denial(
         self,
@@ -1416,6 +1669,7 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         error_detail: str,
+        payload_key_count: int,
     ) -> None:
         self._insert_audit(
             conn,
@@ -1424,11 +1678,7 @@ class HivemindStore:
             lease["credential_id"],
             "denied",
             error_detail,
-            {
-                "action": normalized_action,
-                "lease_id": lease["id"],
-                "lease_status": lease["status"],
-            },
+            self.credential_action_denial_metadata(lease, normalized_action, payload_key_count),
         )
 
     def _consume_credential_action(
@@ -1436,12 +1686,12 @@ class HivemindStore:
         conn: sqlite3.Connection,
         lease: sqlite3.Row,
         normalized_action: str,
-        payload: dict[str, Any],
+        payload_key_count: int,
     ) -> tuple[dict[str, Any] | None, str | None]:
         credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
         if credential is None:
             error_detail = "credential no longer exists"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
             return None, error_detail
         consumed_at = utcnow()
         cursor = conn.execute(
@@ -1457,7 +1707,7 @@ class HivemindStore:
         )
         if cursor.rowcount != 1:
             error_detail = "credential lease is expired or revoked"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail)
+            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
             return None, error_detail
         self._insert_audit(
             conn,
@@ -1466,7 +1716,7 @@ class HivemindStore:
             lease["credential_id"],
             "allowed",
             "action matched active credential lease",
-            {"action": normalized_action, "payload_keys": sorted(payload.keys())},
+            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
         )
         return (
             {
@@ -1503,18 +1753,16 @@ class HivemindStore:
             updated["status"] = "active"
             updated["issued_at"] = iso(now)
             updated["expires_at"] = iso(expires_at)
+        approval_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
+        approval_metadata["agent_id"] = updated["agent_id"]
+        approval_metadata["lease_id"] = updated["id"]
         self.audit(
             "credential.lease.approved",
             actor_id,
             updated["credential_id"],
             "allowed",
             "operator approved lease request",
-            {
-                "action": updated["action"],
-                "agent_id": updated["agent_id"],
-                "lease_id": updated["id"],
-                "ttl_seconds": updated["ttl_seconds"],
-            },
+            approval_metadata,
         )
         public = self.public_lease(updated)
         public["lease_token"] = token
@@ -1530,18 +1778,16 @@ class HivemindStore:
             conn.execute("UPDATE leases SET status = ? WHERE id = ?", ("denied", lease_id))
             updated = dict(lease)
             updated["status"] = "denied"
+        denial_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
+        denial_metadata["agent_id"] = updated["agent_id"]
+        denial_metadata["lease_id"] = updated["id"]
         self.audit(
             LEASE_DENIED_EVENT,
             actor_id,
             updated["credential_id"],
             "denied",
             "operator denied lease request",
-            {
-                "action": updated["action"],
-                "agent_id": updated["agent_id"],
-                "lease_id": updated["id"],
-                "ttl_seconds": updated["ttl_seconds"],
-            },
+            denial_metadata,
         )
         return self.public_lease(updated)
 
@@ -1559,6 +1805,7 @@ class HivemindStore:
     def runtime_overview(self, *, limit: int = 5) -> dict[str, Any]:
         now = utcnow()
         now_iso = iso(now)
+        terminal_statuses = tuple(sorted(TERMINAL_TASK_STATUS_VALUES))
         with self.connect() as conn:
             active_leases = conn.execute(
                 "SELECT COUNT(*) FROM leases WHERE status = 'active' AND expires_at > ?",
@@ -1589,7 +1836,7 @@ class HivemindStore:
                   AND next_heartbeat_at <= ?
                   AND lower(status) NOT IN (?, ?, ?)
                 """,
-                (now_iso, *TERMINAL_TASK_STATUSES),
+                (now_iso, *terminal_statuses),
             ).fetchone()[0]
             stale_heartbeat_task_ids = [
                 row["id"]
@@ -1602,7 +1849,7 @@ class HivemindStore:
                       AND lower(status) NOT IN (?, ?, ?)
                     ORDER BY next_heartbeat_at ASC
                     """,
-                    (now_iso, *TERMINAL_TASK_STATUSES),
+                    (now_iso, *terminal_statuses),
                 )
             ]
             stale_heartbeat_rows = list(
@@ -1616,7 +1863,7 @@ class HivemindStore:
                     ORDER BY next_heartbeat_at ASC
                     LIMIT ?
                     """,
-                    (now_iso, *TERMINAL_TASK_STATUSES, limit),
+                    (now_iso, *terminal_statuses, limit),
                 )
             )
             failed_task_count = conn.execute(
@@ -1629,6 +1876,8 @@ class HivemindStore:
                     ("failed", limit),
                 )
             )
+            stale_heartbeats = [self.runtime_task_view(conn, row, "next_heartbeat_at", now) for row in stale_heartbeat_rows]
+            failed_tasks = [self.runtime_task_view(conn, row, "updated_at", now) for row in failed_task_rows]
         return {
             "checked_at": now_iso,
             "counts": {
@@ -1640,8 +1889,8 @@ class HivemindStore:
             "due_schedule_ids": due_schedule_ids,
             "stale_heartbeat_task_ids": stale_heartbeat_task_ids,
             "due_schedules": [self.runtime_schedule_view(row, now) for row in due_schedule_rows],
-            "stale_heartbeats": [self.runtime_task_view(row, "next_heartbeat_at", now) for row in stale_heartbeat_rows],
-            "failed_tasks": [self.runtime_task_view(row, "updated_at", now) for row in failed_task_rows],
+            "stale_heartbeats": stale_heartbeats,
+            "failed_tasks": failed_tasks,
         }
 
     def overdue_seconds(self, timestamp: str | None, now: datetime) -> int:
@@ -1657,8 +1906,14 @@ class HivemindStore:
         schedule["overdue_seconds"] = self.overdue_seconds(schedule["next_run_at"], now)
         return schedule
 
-    def runtime_task_view(self, row: sqlite3.Row | dict[str, Any], timestamp_key: str, now: datetime) -> dict[str, Any]:
-        task = dict(row)
+    def runtime_task_view(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row | dict[str, Any],
+        timestamp_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        task = self.public_task(conn, row, now=now)
         task["overdue_seconds"] = self.overdue_seconds(task.get(timestamp_key), now)
         return task
 
@@ -1679,6 +1934,33 @@ class HivemindStore:
             "token_preview": row["token_preview"] if status not in {"pending", "denied"} else "not issued",
         }
 
+    def audit_action_metadata(
+        self,
+        action: str,
+        *,
+        ttl_seconds: int | None = None,
+        payload_key_count: int | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"action": self.audit_action_label(action)}
+        if ttl_seconds is not None:
+            metadata["ttl_seconds"] = ttl_seconds
+        if payload_key_count is not None:
+            metadata["payload_key_count"] = payload_key_count
+        return metadata
+
+    def audit_action_label(self, action: str) -> str:
+        normalized = action.strip().lower()
+        if normalized and len(normalized) <= 64 and SAFE_ACTION_NAME.fullmatch(normalized):
+            return normalized
+        return "<redacted>"
+
+    def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
+        normalized_note = note.strip()
+        return {
+            "note_present": bool(normalized_note),
+            "note_length": len(normalized_note),
+        }
+
     def get_task_row(self, conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
         row = conn.execute(TASK_BY_ID_QUERY, (task_id,)).fetchone()
         if row is None:
@@ -1690,6 +1972,53 @@ class HivemindStore:
         if row is None:
             raise StoreNotFoundError(f"unknown schedule: {schedule_id}")
         return row
+
+    def public_task(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row | dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        item = dict(row)
+        last_heartbeat_at = self.task_last_heartbeat_at(conn, item)
+        heartbeat_state, heartbeat_overdue_seconds = self.task_heartbeat_state(
+            item,
+            last_heartbeat_at,
+            now=now,
+        )
+        item["last_heartbeat_at"] = last_heartbeat_at
+        item["heartbeat_state"] = heartbeat_state
+        item["heartbeat_overdue_seconds"] = heartbeat_overdue_seconds
+        return item
+
+    def task_last_heartbeat_at(self, conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
+        if "last_heartbeat_at" in item:
+            return item["last_heartbeat_at"]
+        last_heartbeat_row = conn.execute(
+            "SELECT created_at FROM heartbeat_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            (item["id"],),
+        ).fetchone()
+        return last_heartbeat_row["created_at"] if last_heartbeat_row else None
+
+    def task_heartbeat_state(
+        self,
+        item: dict[str, Any],
+        last_heartbeat_at: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[str, int | None]:
+        if not item["heartbeat_seconds"] or item["status"] in TERMINAL_TASK_STATUS_VALUES:
+            return ("disabled", None)
+        deadline = parse_dt(item["next_heartbeat_at"])
+        if deadline is None:
+            return ("healthy", None)
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        elapsed_seconds = ((now or utcnow()) - deadline).total_seconds()
+        if elapsed_seconds < 0:
+            return ("healthy", None)
+        return ("stale" if last_heartbeat_at else "missing", int(elapsed_seconds))
 
     def validate_optional_agent_reference(
         self,
@@ -1704,6 +2033,16 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown agent: {value}")
 
+    def validate_agent_scope(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        values: list[str],
+    ) -> None:
+        for value in values:
+            self.validate_optional_agent_reference(conn, field_name=field_name, value=value)
+
     def validate_optional_credential_reference(
         self,
         conn: sqlite3.Connection,
@@ -1717,7 +2056,129 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown credential: {value}")
 
-    def _insert_task(self, conn: sqlite3.Connection, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    def validate_agent_credential_binding(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        assigned_agent_id: str | None,
+        credential_id: str | None,
+    ) -> None:
+        if assigned_agent_id is None or credential_id is None:
+            return
+        row = conn.execute("SELECT allowed_agents FROM credentials WHERE id = ?", (credential_id,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"credential_id references unknown credential: {credential_id}")
+        allowed_agents = set(loads(row["allowed_agents"], []))
+        if assigned_agent_id not in allowed_agents:
+            raise StoreValidationError(
+                f"assigned_agent_id is not allowed to use credential {credential_id}: {assigned_agent_id}"
+            )
+
+    def validate_task_priority(self, priority: str) -> None:
+        if priority not in VALID_TASK_PRIORITIES:
+            choices = ", ".join(sorted(VALID_TASK_PRIORITIES))
+            raise StoreValidationError(f"priority must be one of: {choices}")
+
+    def validate_task_status(self, status: str) -> None:
+        if status not in VALID_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_TASK_STATUSES))
+            raise StoreValidationError(f"status must be one of: {choices}")
+
+    def validate_initial_task_status(self, status: str) -> None:
+        if status not in VALID_INITIAL_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_INITIAL_TASK_STATUSES))
+            raise StoreValidationError(f"new tasks must start in one of: {choices}")
+
+    def validate_task_transition(self, current_status: str, next_status: str) -> None:
+        if current_status == next_status:
+            return
+        allowed_statuses = VALID_TASK_STATUS_TRANSITIONS.get(current_status)
+        if allowed_statuses is None or next_status not in allowed_statuses:
+            raise StoreValidationError(f"cannot transition task from {current_status} to {next_status}")
+
+    def validate_task_update_data(self, conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+        if "priority" in data:
+            if data["priority"] is None:
+                raise StoreValidationError("priority must not be null")
+            self.validate_task_priority(str(data["priority"]))
+        if "assigned_agent_id" in data:
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="assigned_agent_id",
+                value=data["assigned_agent_id"] or None,
+            )
+        if "credential_id" in data:
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="credential_id",
+                value=data["credential_id"] or None,
+            )
+
+    def normalize_task_update_value(self, field: str, value: Any) -> Any:
+        if field == "title" and value is None:
+            raise StoreValidationError("title must not be null")
+        if field in {"description", "action", "intent"} and value is None:
+            return ""
+        if field in {"assigned_agent_id", "credential_id"}:
+            return value or None
+        return value
+
+    def apply_task_update_field(
+        self,
+        row: sqlite3.Row,
+        updated: dict[str, Any],
+        *,
+        field: str,
+        next_value: Any,
+        now: datetime,
+    ) -> bool:
+        if field == "heartbeat_seconds":
+            if next_value == row[field]:
+                return False
+            updated[field] = next_value
+            updated["next_heartbeat_at"] = iso(now + timedelta(seconds=int(next_value))) if next_value else None
+            return True
+        if next_value == row[field]:
+            return False
+        updated[field] = next_value
+        return True
+
+    def normalize_schedule_priority(
+        self,
+        conn: sqlite3.Connection,
+        schedule_row: sqlite3.Row,
+        *,
+        actor_id: str,
+        now: datetime,
+    ) -> str:
+        priority = str(schedule_row["priority"] or "")
+        if priority in VALID_TASK_PRIORITIES:
+            return priority
+        normalized = TaskPriority.NORMAL.value
+        conn.execute(
+            "UPDATE schedules SET priority = ?, updated_at = ? WHERE id = ?",
+            (normalized, iso(now), schedule_row["id"]),
+        )
+        self._insert_audit(
+            conn,
+            "schedule.priority.normalized",
+            actor_id,
+            str(schedule_row["id"]),
+            "allowed",
+            "legacy schedule priority normalized",
+            {"from_priority": priority, "to_priority": normalized},
+            now=now,
+        )
+        return normalized
+
+    def _insert_task(
+        self,
+        conn: sqlite3.Connection,
+        data: dict[str, Any],
+        *,
+        actor_id: str = "system",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         task_time = now or utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
         row = {
@@ -1735,6 +2196,9 @@ class HivemindStore:
             "created_at": iso(task_time),
             "updated_at": iso(task_time),
         }
+        self.validate_task_status(str(row["status"]))
+        self.validate_initial_task_status(str(row["status"]))
+        self.validate_task_priority(str(row["priority"]))
         self.validate_optional_agent_reference(
             conn,
             field_name="assigned_agent_id",
@@ -1744,6 +2208,11 @@ class HivemindStore:
             conn,
             field_name="credential_id",
             value=row["credential_id"],
+        )
+        self.validate_agent_credential_binding(
+            conn,
+            assigned_agent_id=row["assigned_agent_id"],
+            credential_id=row["credential_id"],
         )
         try:
             conn.execute(
@@ -1759,34 +2228,135 @@ class HivemindStore:
         self._insert_audit(
             conn,
             "task.created",
-            row["assigned_agent_id"] or "user",
+            actor_id,
             row["id"],
             "allowed",
             "task created",
-            {"status": row["status"]},
+            {
+                "status": row["status"],
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "heartbeat_seconds": row["heartbeat_seconds"],
+            },
             now=task_time,
         )
-        return row
+        return self.public_task(conn, row, now=task_time)
 
-    def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_task(self, data: dict[str, Any], *, actor_id: str = "system") -> dict[str, Any]:
         with self.connect() as conn:
-            return self._insert_task(conn, data)
+            return self._insert_task(conn, data, actor_id=actor_id)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
+            rows = conn.execute(
+                """
+                SELECT tasks.*, latest_heartbeats.last_heartbeat_at
+                FROM tasks
+                LEFT JOIN (
+                    SELECT task_id, MAX(created_at) AS last_heartbeat_at
+                    FROM heartbeat_events
+                    GROUP BY task_id
+                ) AS latest_heartbeats ON latest_heartbeats.task_id = tasks.id
+                ORDER BY tasks.created_at DESC
+                """
+            ).fetchall()
+            return [self.public_task(conn, row) for row in rows]
 
-    def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
-        now = iso()
+    def update_task(self, task_id: str, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        now = utcnow()
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
-        self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
+            requested_fields = tuple(field for field in EDITABLE_TASK_FIELDS if field in data)
+            if not requested_fields:
+                raise StoreValidationError("task update requires at least one editable field")
+            updated = dict(row)
+            changes: list[str] = []
+            self.validate_task_update_data(conn, data)
+
+            for field in requested_fields:
+                next_value = self.normalize_task_update_value(field, data[field])
+                if self.apply_task_update_field(row, updated, field=field, next_value=next_value, now=now):
+                    changes.append(field)
+
+            if not changes:
+                return self.public_task(conn, row, now=now)
+
+            if {"assigned_agent_id", "credential_id"} & set(changes):
+                self.validate_agent_credential_binding(
+                    conn,
+                    assigned_agent_id=updated["assigned_agent_id"],
+                    credential_id=updated["credential_id"],
+                )
+            if str(updated["status"]) in TERMINAL_TASK_STATUS_VALUES:
+                updated["next_heartbeat_at"] = None
+            updated["updated_at"] = iso(now)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET title = ?, description = ?, priority = ?, assigned_agent_id = ?, credential_id = ?, action = ?, intent = ?, heartbeat_seconds = ?, next_heartbeat_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updated["title"],
+                    updated["description"],
+                    updated["priority"],
+                    updated["assigned_agent_id"],
+                    updated["credential_id"],
+                    updated["action"],
+                    updated["intent"],
+                    updated["heartbeat_seconds"],
+                    updated["next_heartbeat_at"],
+                    updated["updated_at"],
+                    task_id,
+                ),
+            )
+        self.audit(
+            "task.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            "task details updated",
+            {"fields": changes},
+        )
+        return self.get_task(task_id)
+
+    def update_task_status(self, task_id: str, status: str, *, actor_id: str) -> dict[str, Any]:
+        now_dt = utcnow()
+        now = iso(now_dt)
+        next_status = str(status)
+        self.validate_task_status(next_status)
+        with self.connect() as conn:
+            row = self.get_task_row(conn, task_id)
+            current_status = str(row["status"])
+            self.validate_task_transition(current_status, next_status)
+            if current_status == next_status:
+                return self.public_task(conn, row, now=now_dt)
+            if next_status in TERMINAL_TASK_STATUS_VALUES:
+                next_heartbeat_at = None
+            elif row["heartbeat_seconds"] and row["next_heartbeat_at"] is None:
+                next_heartbeat_at = iso(now_dt + timedelta(seconds=int(row["heartbeat_seconds"])))
+            else:
+                next_heartbeat_at = row["next_heartbeat_at"]
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                (next_status, next_heartbeat_at, now, task_id),
+            )
+        self.audit(
+            "task.status.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            f"task marked {next_status}",
+            {"from_status": current_status, "to_status": next_status},
+        )
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as conn:
-            return dict(self.get_task_row(conn, task_id))
+            return self.public_task(conn, self.get_task_row(conn, task_id))
 
     def run_task(self, task_id: str, operator_input: str | None = None) -> dict[str, Any]:
         with self.connect() as conn:
@@ -1804,7 +2374,7 @@ class HivemindStore:
             model = agent["model"] or provider_config.model
             now = iso()
             self.claim_queued_task_for_execution(conn, task_id, now)
-            conn.execute("UPDATE agents SET status = ?, updated_at = ? WHERE id = ?", ("working", now, agent["id"]))
+            conn.execute(AGENT_STATUS_UPDATE_SQL, ("running", now, agent["id"]))
             self._insert_audit(
                 conn,
                 "task.execution.started",
@@ -1924,7 +2494,7 @@ class HivemindStore:
         model: str,
         credential_id: str,
     ) -> dict[str, Any]:
-        action = f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        action = self.agent_provider_credential_action(credential_id=credential_id, provider_id=provider_id)
         intent = f"Run task {task_id} through the {provider_id} agent provider using model {model}."
         try:
             token, lease = self.request_lease(
@@ -1983,6 +2553,18 @@ class HivemindStore:
                     },
                 )
             raise
+
+    def agent_provider_credential_action(self, *, credential_id: str, provider_id: str) -> str:
+        action = f"{AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        legacy_action = f"{LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX}{provider_id}"
+        try:
+            credential = self.get_credential(credential_id)
+        except StoreError:
+            return action
+        allowed_actions = set(loads(credential["allowed_actions"], []))
+        if action not in allowed_actions and legacy_action in allowed_actions:
+            return legacy_action
+        return action
 
     def authorize_task_provider_tool_request(
         self,
@@ -2080,7 +2662,10 @@ class HivemindStore:
     ) -> None:
         now = iso()
         with self.connect() as conn:
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = NULL, updated_at = ? WHERE id = ?",
+                (status, now, task_id),
+            )
             running_task = conn.execute(
                 """
                 SELECT 1
@@ -2094,41 +2679,60 @@ class HivemindStore:
             ).fetchone()
             if running_task is None:
                 conn.execute(
-                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?",
-                    ("idle", now, agent_id),
+                    "UPDATE agents SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                    ("idle", now, agent_id, "running"),
                 )
         event_type = "task.execution.completed" if status == "done" else "task.execution.failed"
         self.audit(event_type, agent_id, task_id, decision, reason, metadata)
 
-    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
+    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str, *, actor_id: str = "system") -> dict[str, Any]:
         now = utcnow()
-        with self.connect() as conn:
-            task = self.get_task_row(conn, task_id)
-            provided_agent_id = agent_id or None
-            self.validate_optional_agent_reference(
-                conn,
-                field_name="agent_id",
-                value=provided_agent_id,
-            )
-            next_heartbeat = None
-            if task["heartbeat_seconds"]:
-                next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
-            event = {
-                "id": f"hb_{secrets.token_urlsafe(10)}",
-                "task_id": task_id,
-                "agent_id": provided_agent_id or task["assigned_agent_id"],
-                "note": note,
-                "created_at": iso(now),
-            }
-            try:
-                conn.execute(
-                    "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
-                    event,
+        provided_agent_id = agent_id or None
+        audit_metadata = self.heartbeat_audit_metadata(note)
+        try:
+            with self.connect() as conn:
+                task = self.get_task_row(conn, task_id)
+                if task["status"] in TERMINAL_TASK_STATUS_VALUES:
+                    raise StoreValidationError(f"cannot record heartbeat for task in terminal status: {task['status']}")
+                self.validate_optional_agent_reference(
+                    conn,
+                    field_name="agent_id",
+                    value=provided_agent_id,
                 )
-            except sqlite3.IntegrityError as exc:
-                raise StoreValidationError("agent_id references unknown agent") from exc
-            conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
-        self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
+                assigned_agent_id = task["assigned_agent_id"]
+                if assigned_agent_id and provided_agent_id and provided_agent_id != assigned_agent_id:
+                    raise StoreValidationError(
+                        f"agent_id does not match assigned agent for task {task_id}: {provided_agent_id}"
+                    )
+                next_heartbeat = None
+                if task["heartbeat_seconds"]:
+                    next_heartbeat = iso(now + timedelta(seconds=int(task["heartbeat_seconds"])))
+                event = {
+                    "id": f"hb_{secrets.token_urlsafe(10)}",
+                    "task_id": task_id,
+                    "agent_id": provided_agent_id or assigned_agent_id,
+                    "note": note,
+                    "created_at": iso(now),
+                }
+                try:
+                    conn.execute(
+                        "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) VALUES (:id, :task_id, :agent_id, :note, :created_at)",
+                        event,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StoreValidationError("agent_id references unknown agent") from exc
+                conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
+        except StoreError as exc:
+            self.audit("task.heartbeat.denied", actor_id, task_id, "denied", str(exc), audit_metadata)
+            raise
+        self.audit(
+            "task.heartbeat",
+            actor_id,
+            task_id,
+            "allowed",
+            "heartbeat recorded",
+            self.heartbeat_audit_metadata(note),
+        )
         return event
 
     def list_heartbeats(self, task_id: str | None = None) -> list[dict[str, Any]]:
@@ -2139,7 +2743,7 @@ class HivemindStore:
                 rows = conn.execute("SELECT * FROM heartbeat_events ORDER BY created_at DESC")
             return [dict(row) for row in rows]
 
-    def create_schedule(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_schedule(self, data: dict[str, Any], *, actor_id: str = "system") -> dict[str, Any]:
         now = utcnow()
         interval = int(data["interval_seconds"])
         if interval < 60:
@@ -2171,6 +2775,7 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
+            self.validate_task_priority(str(row["priority"]))
             self.validate_optional_agent_reference(
                 conn,
                 field_name="assigned_agent_id",
@@ -2180,6 +2785,11 @@ class HivemindStore:
                 conn,
                 field_name="credential_id",
                 value=row["credential_id"],
+            )
+            self.validate_agent_credential_binding(
+                conn,
+                assigned_agent_id=row["assigned_agent_id"],
+                credential_id=row["credential_id"],
             )
             try:
                 conn.execute(
@@ -2194,11 +2804,20 @@ class HivemindStore:
                 raise StoreValidationError("schedule references an unknown agent or credential") from exc
         self.audit(
             "schedule.created",
-            row["assigned_agent_id"] or "user",
+            actor_id,
             row["id"],
             "allowed",
             "schedule created",
-            {"interval_seconds": interval, "catch_up_policy": catch_up_policy},
+            {
+                "interval_seconds": interval,
+                "catch_up_policy": catch_up_policy,
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "enabled": bool(row["enabled"]),
+            },
         )
         return self.public_schedule(row)
 
@@ -2219,7 +2838,7 @@ class HivemindStore:
         self.audit("schedule.enabled.updated", actor, schedule_id, "allowed", reason, {"enabled": enabled})
         return self.get_schedule(schedule_id)
 
-    def run_due_schedules_once(self) -> list[dict[str, Any]]:
+    def run_due_schedules_once(self, *, actor_id: str = "scheduler") -> list[dict[str, Any]]:
         now = utcnow()
         created: list[dict[str, Any]] = []
         with self._lock:
@@ -2238,6 +2857,7 @@ class HivemindStore:
                     catch_up_policy = row["catch_up_policy"] or "run_once"
                     if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
                         raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+                    priority = self.normalize_schedule_priority(conn, row, actor_id=actor_id, now=now)
                     missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
                     if catch_up_policy == "backfill":
                         run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
@@ -2263,13 +2883,14 @@ class HivemindStore:
                             {
                                 "title": row["task_title"],
                                 "description": row["task_description"],
-                                "priority": row["priority"],
+                                "priority": priority,
                                 "assigned_agent_id": row["assigned_agent_id"],
                                 "credential_id": row["credential_id"],
                                 "action": row["action"],
                                 "intent": row["intent"],
                                 "heartbeat_seconds": None,
                             },
+                            actor_id=actor_id,
                             now=now,
                         )
                         created.append(task)
@@ -2281,7 +2902,7 @@ class HivemindStore:
                     self._insert_audit(
                         conn,
                         "schedule.ran",
-                        row["assigned_agent_id"] or "scheduler",
+                        actor_id,
                         row["id"],
                         "allowed",
                         "scheduled task created",

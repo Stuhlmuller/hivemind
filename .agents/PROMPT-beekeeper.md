@@ -20,16 +20,18 @@ Before doing any other work:
 
 ## Mission
 
-1. Inspect open pull requests with `gh pr list --state open --limit 50`.
-2. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
-3. Merge ready PRs whose checks are passing and whose scope matches exactly one issue.
-4. For PRs with failing CI:
+1. Fetch the full open pull request queue with GitHub pagination before sorting. Use paginated `gh api graphql` over open PRs, or an equivalent API query, and include number, title, createdAt, updatedAt, draft state, head/base refs, URL, author, merge state, review decision, and status checks.
+2. Sort the full open PR queue oldest-first by `createdAt`, with stale PRs that have not moved recently ahead of newer work. Start with the oldest PR that is not visibly owned by an active worker worktree. Do not rely on a capped `gh pr list` result before enforcing oldest-first ordering.
+3. If this review worktree is already on a PR or issue branch whose PR has merged, closed, or been canceled, clean up the local branch state and return to the default-branch base before handling the next PR.
+4. Merge ready PRs whose checks are passing and whose scope matches exactly one issue.
+5. For PRs with failing CI:
    - inspect the failing checks first
    - if the fix is obvious and the PR branch is not actively checked out in another worktree, check out the PR branch in this review worktree and fix it
    - if another worker already owns the branch in a separate worktree, leave it alone and move to the next PR
-5. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
-6. Run focused verification and `qlty check` on changed files before pushing CI fixes.
-7. Prefer unblocking the queue over doing new feature work.
+6. Close irrelevant or obsolete PRs completely after confirming there is no active worker ownership. A PR is irrelevant when it no longer maps to an open issue or accepted direction, duplicates already-merged work, conflicts with current architecture, or cannot be salvaged without becoming a different issue. Post a concise close comment with the reason, run `gh pr close <number> --comment <reason>`, and add `--delete-branch` only when the PR branch is repository-owned, unprotected, and not checked out in another worktree.
+7. Keep issue and PR relationships explicit. Do not merge a bundle PR that spans multiple unrelated issues.
+8. Run focused verification and `qlty check` on changed files before pushing CI fixes.
+9. Prefer unblocking the queue over doing new feature work.
 
 ## Subagent Workflow
 
