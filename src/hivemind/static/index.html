@@ -27,14 +27,38 @@
         </nav>
         <nav aria-label="Primary">
           <a href="/docs">openapi</a>
-          <button id="refresh-button" type="button">sync</button>
-          <button id="logout-button" type="button">logout</button>
+          <button id="refresh-button" type="button" hidden>sync</button>
+          <button id="logout-button" type="button" hidden>logout</button>
         </nav>
       </div>
     </header>
 
     <main>
-      <section id="auth-view" class="auth-shell">
+      <section id="boot-view" class="auth-shell auth-boot">
+        <div class="terminal-card">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <strong>bootstrap</strong>
+          </div>
+          <pre>runtime: local
+auth-state: checking setup
+session: waiting
+secrets: broker separated
+leases: scoped + ttl</pre>
+        </div>
+        <section class="panel stack" aria-live="polite">
+          <div class="panel-heading auth-heading">
+            <div class="heading-lockup">
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <h2>checking setup</h2>
+            </div>
+            <p>local node</p>
+          </div>
+          <p class="field-hint">Reading setup state before showing the admin console.</p>
+        </section>
+      </section>
+
+      <section id="auth-view" class="auth-shell" hidden>
         <div class="terminal-card">
           <div class="terminal-bar">
             <span></span><span></span><span></span>
@@ -47,7 +71,7 @@ secrets: refs or broker-encrypted
 leases: scoped + ttl
 agents: brokered capabilities</pre>
         </div>
-        <form id="auth-form" class="panel stack">
+        <form id="auth-form" class="panel stack" aria-describedby="auth-detail password-policy auth-error">
           <div class="panel-heading auth-heading">
             <div class="heading-lockup">
               <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
@@ -66,6 +90,7 @@ agents: brokered capabilities</pre>
               type="password"
               placeholder="create admin password"
               autocomplete="new-password"
+              minlength="12"
               required
             />
           </label>
@@ -76,9 +101,12 @@ agents: brokered capabilities</pre>
               type="password"
               placeholder="repeat admin password"
               autocomplete="new-password"
+              minlength="12"
             />
           </label>
           <p id="auth-detail" class="field-hint">Create the first local operator account for this Hivemind node.</p>
+          <p id="password-policy" class="field-hint">Admin passwords need at least 12 non-whitespace characters and are stored as local hashes.</p>
+          <p id="auth-error" class="field-error" role="alert" hidden></p>
           <button id="auth-submit" type="submit">create admin</button>
         </form>
       </section>

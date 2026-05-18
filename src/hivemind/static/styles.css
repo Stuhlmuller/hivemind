@@ -190,6 +190,10 @@ main {
   padding-top: 8vh;
 }
 
+.auth-boot {
+  min-height: 46vh;
+}
+
 .terminal-card,
 .panel,
 .metrics div,
@@ -496,11 +500,24 @@ main {
 }
 
 .callout p,
-.field-hint {
+.field-hint,
+.field-error {
   margin: 0;
-  color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.5;
+}
+
+.field-hint {
+  color: var(--muted);
+}
+
+.field-error {
+  border: 1px solid rgba(251, 113, 133, 0.28);
+  border-radius: 6px;
+  background: rgba(251, 113, 133, 0.08);
+  color: var(--red);
+  padding: 8px 10px;
+  font-family: var(--mono);
 }
 
 .callout code,
