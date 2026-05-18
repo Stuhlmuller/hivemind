@@ -39,6 +39,18 @@ DEFAULT_TOOL_ACTIONS = (
         },
     },
     {
+        "name": "open_feature_request",
+        "description": "Open a feature request in a tracker.",
+        "required_credential_action": "open_feature_request",
+        "risk_level": "high",
+        "input_schema": {
+            "type": "object",
+            "properties": {"repo": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": True,
+        },
+    },
+    {
         "name": "issue_installation_token",
         "description": "Issue a short-lived GitHub App installation token.",
         "required_credential_action": "issue_installation_token",

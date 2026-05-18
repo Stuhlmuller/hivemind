@@ -435,6 +435,10 @@ main {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.hives-workspace {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+
 .panel-span-2 {
   grid-column: span 2;
 }
@@ -941,7 +945,8 @@ button:disabled {
   .agents-workspace,
   .tasks-workspace,
   .schedules-workspace,
-  .credentials-workspace {
+  .credentials-workspace,
+  .hives-workspace {
     grid-template-columns: 1fr;
   }
 

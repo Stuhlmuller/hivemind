@@ -449,7 +449,7 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "frontend should treat runtime API loading as a recoverable batch",
     )
     require_true(
-        "const [config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
+        "const [config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
         "frontend should render a recoverable shell if runtime data loading fails",
     )
     require_true("loadRuntimeOverview()" in response.text, "frontend should fetch runtime overview without breaking core loading")
@@ -473,6 +473,33 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
     require_true('name="agent_lease_limit"' in response.text, "agent lease limit field should be present")
     require_true('name="credential_action_limit"' in response.text, "action limit field should be present")
     require_true('id="pending-approvals-list"' in response.text, "pending approvals list should be present")
+
+
+def test_hives_frontend_route_is_served(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    response = client.get("/control/hives")
+    script_response = client.get("/static/app.js")
+
+    require_equal(response.status_code, 200, "hives frontend route should render")
+    require_equal(script_response.status_code, 200, "frontend script should render")
+    require_true('data-page-link="hives"' in response.text, "hives route should expose navigation")
+    require_true('id="hive-form"' in response.text, "hives route should expose the hive form")
+    require_true('id="hive-issue-form"' in response.text, "hives route should expose issue request form")
+    require_true(
+        'name="issue_rate_limit_per_hour"' in response.text,
+        "hives route should expose issue rate controls",
+    )
+    require_true('name="can_spawn_subagents"' in response.text, "hives route should expose subagent controls")
+    require_true(
+        "$('#hive-issue-form select[name=\"hive_id\"]').innerHTML = optionList(state.hives);"
+        in script_response.text,
+        "issue request hive selector should default to a concrete hive",
+    )
+    require_true(
+        'toast("Create a hive before queueing issue requests.")' in script_response.text,
+        "issue request flow should guard missing hives before posting",
+    )
 
 
 def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
@@ -3102,6 +3129,161 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
     )
 
 
+def test_hive_tracker_config_and_agent_issue_rate_limits(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    hive_response = client.post(
+        "/hives",
+        json={
+            "name": "Linear Release Hive",
+            "project_ref": "local://hivemind/release",
+            "tracker_provider": "linear",
+            "tracker_project": "HVM",
+            "tracker_base_url": "https://linear.example.test",
+            "guidance": "Queue only evidence-backed feature requests.",
+        },
+    )
+    require_equal(hive_response.status_code, 201, "hive creation should succeed")
+    hive = hive_response.json()
+    require_equal(hive["tracker_provider"], "linear", "hive should store the tracker provider")
+    require_equal(hive["tracker_project"], "HVM", "hive should store the tracker project")
+    require_equal(hive["agent_count"], 0, "new hive should start without assigned agents")
+
+    unassigned_issue_agent_response = client.post(
+        "/agents",
+        json={
+            "name": "unassigned feature requester",
+            "role": "Should not queue issues without a hive.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "issue_creation_enabled": True,
+            "issue_kind": "feature_request",
+            "issue_rate_limit_per_hour": 1,
+        },
+    )
+    require_equal(
+        unassigned_issue_agent_response.status_code,
+        400,
+        "issue creation agents should require a hive assignment",
+    )
+    require_equal(
+        unassigned_issue_agent_response.json()["detail"],
+        "issue creation agents require hive_id",
+        "missing hive denial should be explicit",
+    )
+
+    agent_response = client.post(
+        "/agents",
+        json={
+            "name": "feature requester",
+            "role": "Convert verified gaps into tracker-ready feature requests.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Keep feature requests concise and evidence-backed.",
+            "hive_id": hive["id"],
+            "can_spawn_subagents": True,
+            "max_subagents": 2,
+            "issue_creation_enabled": True,
+            "issue_kind": "feature_request",
+            "issue_rate_limit_per_hour": 1,
+            "issue_labels": ["feature", "needs-triage"],
+        },
+    )
+    require_equal(agent_response.status_code, 201, "agent creation should succeed")
+    agent = agent_response.json()
+    require_equal(agent["hive_id"], hive["id"], "agent should be assigned to the hive")
+    require_true(agent["can_spawn_subagents"], "agent should expose the subagent toggle")
+    require_equal(agent["max_subagents"], 2, "agent should expose the subagent cap")
+    require_true(agent["issue_creation_enabled"], "agent should expose issue creation toggle")
+    require_equal(agent["issue_rate_limit_per_hour"], 1, "agent should expose issue rate")
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Linear writer",
+            "provider": "linear",
+            "secret_ref": "env://LINEAR_API_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["open_feature_request"],
+            "max_ttl_seconds": 120,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(credential_response.status_code, 201, "tracker credential should be stored as a reference")
+    credential = credential_response.json()
+
+    update_response = client.patch(
+        f"/hives/{hive['id']}",
+        json={"tracker_credential_id": credential["id"]},
+    )
+    require_equal(update_response.status_code, 200, "hive should accept tracker credential binding")
+    require_equal(
+        update_response.json()["tracker_credential_id"],
+        credential["id"],
+        "hive should expose the credential id without secret material",
+    )
+
+    request_response = client.post(
+        "/issue-requests",
+        json={
+            "hive_id": hive["id"],
+            "agent_id": agent["id"],
+            "kind": "feature_request",
+            "title": "Expose hive-level swarm activity",
+            "description": "Operators need tracker-scoped visibility and rate-limited issue request agents.",
+            "labels": ["operator"],
+        },
+    )
+    require_equal(request_response.status_code, 201, "first issue request should be queued")
+    task = request_response.json()
+    require_equal(task["hive_id"], hive["id"], "issue request task should stay bound to the hive")
+    require_equal(task["assigned_agent_id"], agent["id"], "issue request task should stay bound to the agent")
+    require_equal(task["credential_id"], credential["id"], "issue request task should use the hive tracker credential")
+    require_equal(task["action"], "open_feature_request", "feature request agents should queue the feature action")
+    require_true(
+        'Requested labels JSON: ["feature","needs-triage","operator"].' in task["intent"],
+        "issue request task intent should persist merged labels for downstream execution",
+    )
+
+    limited_response = client.post(
+        "/issue-requests",
+        json={
+            "hive_id": hive["id"],
+            "agent_id": agent["id"],
+            "kind": "feature_request",
+            "title": "Second feature request inside the same hour",
+        },
+    )
+    require_equal(limited_response.status_code, 429, "second request should hit the per-agent rate limit")
+    require_equal(
+        limited_response.json()["detail"],
+        "agent issue request rate limit exceeded",
+        "rate limit denial should be explicit",
+    )
+
+    refreshed_hive = next(item for item in client.get("/hives").json() if item["id"] == hive["id"])
+    require_equal(refreshed_hive["agent_count"], 1, "hive should count assigned agents")
+    require_equal(refreshed_hive["issue_agent_count"], 1, "hive should count issue-enabled agents")
+    require_equal(refreshed_hive["subagent_enabled_count"], 1, "hive should count subagent-enabled agents")
+    require_equal(refreshed_hive["open_task_count"], 1, "hive should count queued issue request tasks")
+
+    audit_events = client.get("/audit-events").json()
+    created_event = next(event for event in audit_events if event["type"] == "issue.request.created")
+    denied_event = next(event for event in audit_events if event["type"] == "issue.request.denied")
+    require_equal(created_event["actor_id"], agent["id"], "issue request audit should name the agent")
+    require_equal(created_event["target_id"], hive["id"], "issue request audit should name the hive")
+    require_equal(created_event["metadata"]["task_id"], task["id"], "issue request audit should link the task")
+    require_equal(created_event["metadata"]["remaining_this_hour"], 0, "issue request audit should expose rate budget")
+    require_equal(
+        denied_event["reason"],
+        "agent issue request rate limit exceeded",
+        "rate-limited issue request should keep a denial audit row",
+    )
+    require_true("LINEAR_API_TOKEN" not in str(audit_events), "audit events must not expose tracker secret refs")
+
+
 def test_approval_decision_audit_redacts_legacy_unsafe_action_identifier(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy-unsafe-approval-action.db"
     store = HivemindStore(db_path)
@@ -3302,6 +3484,18 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
     protected_requests = [
         ("GET", "/me", None),
         ("GET", "/config", None),
+        ("GET", "/hives", None),
+        (
+            "POST",
+            "/hives",
+            {
+                "name": "Release hive",
+                "project_ref": "local://hivemind",
+                "tracker_provider": "github",
+                "tracker_project": "owner/repo",
+            },
+        ),
+        ("PATCH", "/hives/hive_demo", {"status": "paused"}),
         ("GET", "/agents", None),
         (
             "POST",
@@ -3378,6 +3572,16 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "action": "",
                 "intent": "",
                 "heartbeat_seconds": None,
+            },
+        ),
+        (
+            "POST",
+            "/issue-requests",
+            {
+                "hive_id": "hive_demo",
+                "agent_id": "agent_demo",
+                "title": "Capture a verified feature request",
+                "kind": "feature_request",
             },
         ),
         (
@@ -5842,6 +6046,7 @@ def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_pat
     assert task_audit_events[2]["metadata"] == {  # nosec B101
         "status": "queued",
         "priority": "urgent",
+        "hive_id": agent["hive_id"],
         "assigned_agent_id": agent["id"],
         "credential_id": credential["id"],
         "action": "read_repo",
@@ -6060,6 +6265,7 @@ def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> No
     assert persisted_task_events[2]["metadata"] == {  # nosec B101
         "status": "queued",
         "priority": "normal",
+        "hive_id": agent["hive_id"],
         "assigned_agent_id": agent["id"],
         "credential_id": credential["id"],
         "action": "read_repo",

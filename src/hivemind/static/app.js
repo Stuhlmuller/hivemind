@@ -5,6 +5,7 @@ const state = {
   authError: "",
   me: null,
   config: null,
+  hives: [],
   agents: [],
   toolActions: [],
   credentials: [],
@@ -160,6 +161,7 @@ const credentialKindLabels = {
 
 const ROUTES = {
   overview: "/",
+  hives: "/control/hives",
   agents: "/control/agents",
   tasks: "/control/tasks",
   schedules: "/control/schedules",
@@ -185,6 +187,7 @@ const HEARTBEAT_STATES = {
 
 const PAGE_META = {
   overview: "overview / runtime state",
+  hives: "hives / projects, trackers, issue request rates",
   agents: "agents / registry, provider, status",
   tasks: "tasks / queue, intent, heartbeat",
   schedules: "schedules / intervals, due work",
@@ -515,6 +518,11 @@ function currentPage() {
   return route ? route[0] : "overview";
 }
 
+function hiveName(hiveId) {
+  const hive = state.hives.find((item) => item.id === hiveId);
+  return hive ? hive.name : hiveId || "unassigned";
+}
+
 function statusChipState(status) {
   const normalized = String(status || "").toLowerCase();
   if (["ok", "ready", "running"].includes(normalized)) return "ready";
@@ -822,6 +830,14 @@ function renderAuth() {
 
 function renderSelectors() {
   for (const selector of [
+    '#spawn-form select[name="hive_id"]',
+    '#task-form select[name="hive_id"]',
+    '#schedule-form select[name="hive_id"]',
+  ]) {
+    $(selector).innerHTML = optionList(state.hives, "name", true);
+  }
+  $('#hive-issue-form select[name="hive_id"]').innerHTML = optionList(state.hives);
+  for (const selector of [
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
     '#oauth-credential-form select[name="allowed_agents"]',
@@ -831,6 +847,7 @@ function renderSelectors() {
   for (const selector of [
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
+    '#hive-issue-form select[name="agent_id"]',
   ]) {
     $(selector).innerHTML = optionList(state.agents, "name", true, true);
   }
@@ -838,12 +855,55 @@ function renderSelectors() {
     '#lease-form select[name="credential_id"]',
     '#task-form select[name="credential_id"]',
     '#schedule-form select[name="credential_id"]',
+    '#hive-form select[name="tracker_credential_id"]',
   ]) {
-    $(selector).innerHTML = optionList(state.credentials, "name", selector !== '#lease-form select[name="credential_id"]');
+    $(selector).innerHTML = optionList(
+      state.credentials,
+      "name",
+      selector !== '#lease-form select[name="credential_id"]',
+    );
   }
   $("#tool-action-options").innerHTML = state.toolActions
     .map((action) => `<option value="${escapeHtml(action.name)}">${escapeHtml(action.required_credential_action)}</option>`)
     .join("");
+}
+
+function renderHives() {
+  const active = state.hives.filter((hive) => hive.status === "active").length;
+  const issueAgents = state.hives.reduce((total, hive) => total + Number(hive.issue_agent_count || 0), 0);
+  const subagentEnabled = state.hives.reduce((total, hive) => total + Number(hive.subagent_enabled_count || 0), 0);
+  const openTasks = state.hives.reduce((total, hive) => total + Number(hive.open_task_count || 0), 0);
+  $("#hive-count").textContent = state.hives.length;
+  $("#hive-active-count").textContent = active;
+  $("#hive-paused-count").textContent = state.hives.length - active;
+  $("#hive-agent-count").textContent = state.hives.reduce((total, hive) => total + Number(hive.agent_count || 0), 0);
+  $("#hive-issue-agent-count").textContent = issueAgents;
+  $("#hive-subagent-count").textContent = subagentEnabled;
+  $("#hive-open-task-count").textContent = openTasks;
+  $("#hives-list").innerHTML = state.hives
+    .map((hive) => {
+      const trackerProject = hive.tracker_project || hive.project_ref;
+      const credential = hive.tracker_credential_id ? credentialName(hive.tracker_credential_id) : "no tracker credential";
+      const actions = `
+        <div class="button-row">
+          <button data-hive-status="${escapeHtml(hive.id)}" data-status="${hive.status === "active" ? "paused" : "active"}" type="button">
+            ${hive.status === "active" ? "Pause" : "Activate"}
+          </button>
+        </div>`;
+      return item(
+        hive.name,
+        `ID: ${escapeHtml(hive.id)}<br>Project: ${escapeHtml(hive.project_ref)}<br>Tracker: ${escapeHtml(hive.tracker_provider)} / ${escapeHtml(trackerProject)}<br>Credential: ${escapeHtml(credential)}<br>Guidance: ${escapeHtml(hive.guidance || "none")}`,
+        [
+          hive.status,
+          `${Number(hive.agent_count || 0)} agents`,
+          `${Number(hive.issue_agent_count || 0)} issue agents`,
+          `${Number(hive.subagent_enabled_count || 0)} subagent-enabled`,
+          `${Number(hive.open_task_count || 0)} open tasks`,
+        ],
+        actions,
+      );
+    })
+    .join("") || '<p class="meta">No hives yet.</p>';
 }
 
 function renderAgents() {
@@ -866,11 +926,13 @@ function renderAgents() {
         </div>`;
       return item(
         agent.name,
-        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Prompt: ${escapeHtml(agent.system_prompt || "none")}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
+        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Hive: ${escapeHtml(hiveName(agent.hive_id))}<br>Prompt: ${escapeHtml(agent.system_prompt || "none")}<br>Issue rate: ${escapeHtml(agent.issue_creation_enabled ? `${agent.issue_rate_limit_per_hour}/hour` : "disabled")}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
         [
           agent.status,
           agent.provider,
           agent.model,
+          agent.can_spawn_subagents ? `subagents ${agent.max_subagents}` : "subagents off",
+          agent.issue_creation_enabled ? agent.issue_kind : "issues off",
           `${agent.assigned_task_count} tasks`,
           `${agent.credential_policy_count} policies`,
         ],
@@ -1069,7 +1131,7 @@ function renderTasks() {
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeatAt)}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Overdue: ${escapeHtml(overdue)}<br>Updated: ${escapeHtml(task.updated_at)}`,
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Hive: ${escapeHtml(hiveName(task.hive_id))}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeatAt)}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Overdue: ${escapeHtml(overdue)}<br>Updated: ${escapeHtml(task.updated_at)}`,
         [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${taskHeartbeatLabelFor(task)}`],
         actions,
       );
@@ -1114,7 +1176,7 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(assignedAgent)}<br>Credential: ${escapeHtml(credential)}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
+        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Hive: ${escapeHtml(hiveName(schedule.hive_id))}<br>Agent: ${escapeHtml(assignedAgent)}<br>Credential: ${escapeHtml(credential)}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
         [
           schedule.enabled ? "enabled" : "paused",
           schedule.priority,
@@ -1218,6 +1280,7 @@ function render() {
   renderRuntimeOverview();
   renderSelectors();
   renderOAuthProviders();
+  renderHives();
   renderAgents();
   renderCredentials();
   renderToolActions();
@@ -1271,6 +1334,7 @@ async function refresh() {
   try {
     runtimePayload = await Promise.all([
       api("/config"),
+      api("/hives"),
       api("/agents"),
       api("/tool-actions"),
       api("/credentials"),
@@ -1286,8 +1350,8 @@ async function refresh() {
     render();
     throw error;
   }
-  const [config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
-  Object.assign(state, { config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
+  const [config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
+  Object.assign(state, { config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
   render();
   consumeOAuthStatus();
 }
@@ -1371,9 +1435,55 @@ window.addEventListener("popstate", () => {
 
 $("#spawn-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
+  const form = event.currentTarget;
+  const payload = readForm(form);
+  payload.can_spawn_subagents = form.elements.can_spawn_subagents.checked;
+  payload.max_subagents = Number(payload.max_subagents);
+  payload.issue_creation_enabled = form.elements.issue_creation_enabled.checked;
+  payload.issue_rate_limit_per_hour = Number(payload.issue_rate_limit_per_hour);
+  payload.issue_labels = splitCsv(payload.issue_labels);
+  await api("/agents", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Agent registered.");
+});
+
+$("#hive-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = readForm(event.currentTarget);
+  payload.tracker_credential_id = payload.tracker_credential_id || null;
+  await api("/hives", { method: "POST", body: JSON.stringify(payload) });
+  event.currentTarget.reset();
+  await refresh();
+  toast("Hive created.");
+});
+
+$("#hive-issue-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = readForm(event.currentTarget);
+  if (!payload.hive_id) {
+    toast("Create a hive before queueing issue requests.");
+    return;
+  }
+  if (!payload.agent_id) {
+    toast("Register an agent before queueing issue requests.");
+    return;
+  }
+  payload.labels = splitCsv(payload.labels);
+  await api("/issue-requests", { method: "POST", body: JSON.stringify(payload) });
+  await refresh();
+  toast("Issue request queued.");
+});
+
+$("#hives-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) return;
+  if (!target.dataset.hiveStatus) return;
+  await api(`/hives/${target.dataset.hiveStatus}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: target.dataset.status }),
+  });
+  await refresh();
+  toast(target.dataset.status === "active" ? "Hive activated." : "Hive paused.");
 });
 
 $("#agents-list").addEventListener("click", async (event) => {

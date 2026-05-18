@@ -154,6 +154,35 @@ class SpawnAgentRequest(BaseModel):
     provider: str = Field(default="local", min_length=1)
     model: str | None = Field(default=None, min_length=1)
     system_prompt: str = ""
+    hive_id: str | None = None
+    can_spawn_subagents: bool = False
+    max_subagents: int = Field(default=0, ge=0, le=64)
+    issue_creation_enabled: bool = False
+    issue_kind: Literal["issue", "feature_request", "bug", "chore"] = "issue"
+    issue_rate_limit_per_hour: int = Field(default=0, ge=0, le=200)
+    issue_labels: list[str] = Field(default_factory=list)
+
+
+class CreateHiveRequest(BaseModel):
+    name: str = Field(min_length=1)
+    project_ref: str = Field(min_length=1)
+    tracker_provider: Literal["github", "jira", "linear", "custom"] = "github"
+    tracker_project: str = ""
+    tracker_base_url: str = ""
+    tracker_credential_id: str | None = None
+    guidance: str = ""
+    status: Literal["active", "paused"] = "active"
+
+
+class UpdateHiveRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    project_ref: str | None = Field(default=None, min_length=1)
+    tracker_provider: Literal["github", "jira", "linear", "custom"] | None = None
+    tracker_project: str | None = None
+    tracker_base_url: str | None = None
+    tracker_credential_id: str | None = None
+    guidance: str | None = None
+    status: Literal["active", "paused"] | None = None
 
 
 class UpdateAgentStatusRequest(BaseModel):
@@ -223,11 +252,22 @@ class CreateTaskRequest(BaseModel):
     description: str = ""
     status: TaskStatus = TaskStatus.QUEUED
     priority: TaskPriority = TaskPriority.NORMAL
+    hive_id: str | None = None
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
     intent: str = ""
     heartbeat_seconds: int | None = Field(default=None, ge=30)
+
+
+class CreateIssueRequestTask(BaseModel):
+    hive_id: str
+    agent_id: str
+    title: str = Field(min_length=1)
+    description: str = ""
+    kind: Literal["issue", "feature_request", "bug", "chore"] | None = None
+    labels: list[str] = Field(default_factory=list)
+    priority: TaskPriority = TaskPriority.NORMAL
 
 
 class UpdateTaskRequest(BaseModel):
@@ -264,6 +304,7 @@ class CreateScheduleRequest(BaseModel):
     task_title: str = Field(min_length=1)
     task_description: str = ""
     priority: TaskPriority = TaskPriority.NORMAL
+    hive_id: str | None = None
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
@@ -460,13 +501,42 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def read_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         return config.public_view()
 
+    @app.get("/hives")
+    def list_hives(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
+        return db.list_hives()
+
+    @app.post("/hives", status_code=201)
+    def create_hive(request: CreateHiveRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.create_hive(request.model_dump())
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/hives/{hive_id}")
+    def update_hive(hive_id: str, request: UpdateHiveRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_hive(hive_id, request.model_dump(exclude_unset=True))
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/agents")
     def list_agents(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
         return db.list_agents()
 
     @app.post("/agents", status_code=201)
     def spawn_agent(request: SpawnAgentRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return db.create_agent(request.model_dump(), actor_id=user.id)
+        try:
+            return db.create_agent(request.model_dump(), actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.patch("/agents/{agent_id}/status")
     def update_agent_status(
@@ -733,6 +803,18 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return db.create_task(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/issue-requests", status_code=201)
+    def create_issue_request(request: CreateIssueRequestTask, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.create_issue_request(request.model_dump())
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            status = 429 if str(exc) == "agent issue request rate limit exceeded" else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.patch("/tasks/{task_id}")
     def update_task(task_id: str, request: UpdateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:

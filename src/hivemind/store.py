@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 from hivemind.config import HivemindConfig
 from hivemind.models import (
@@ -55,6 +56,15 @@ from hivemind.tool_registry import (
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
+HIVE_TRACKER_PROVIDERS = ("github", "jira", "linear", "custom")
+HIVE_STATUSES = ("active", "paused")
+ISSUE_KINDS = ("issue", "feature_request", "bug", "chore")
+ISSUE_ACTION_BY_KIND = {
+    "issue": "open_issue",
+    "feature_request": "open_feature_request",
+    "bug": "open_issue",
+    "chore": "open_issue",
+}
 LEASE_DENIED_EVENT = "credential.lease.denied"
 LEASE_REQUEST_COUNTED_METADATA_KEY = "lease_request_counted"
 LEASE_REQUEST_RATE_LIMIT_EVENTS = (
@@ -134,6 +144,7 @@ class StoreValidationError(StoreError):
 
 
 ACTION_DENIED_EVENT = "credential.action.denied"
+ISSUE_REQUEST_DENIED_EVENT = "issue.request.denied"
 AGENT_PROVIDER_FAILED_CLOSED_REASON = "agent provider failed closed"
 AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider_"
 LEGACY_AGENT_PROVIDER_CREDENTIAL_ACTION_PREFIX = "agent_provider:"
@@ -175,6 +186,7 @@ VALID_TASK_STATUS_TRANSITIONS = {
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
+AGENT_BY_ID_QUERY = "SELECT * FROM agents WHERE id = ?"
 BROKER_SECRET_SCHEME = ALLOWED_SECRET_REF_SCHEMES[-1]
 CREDENTIAL_INSERT_SQL = """
     INSERT INTO credentials
@@ -195,24 +207,40 @@ CREDENTIAL_INSERT_SQL = """
 """
 SAFE_ACTION_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 BACKUP_FORMAT = "hivemind-logical-backup"
+BACKUP_LEGACY_FORMAT_VERSION = 1
 BACKUP_FORMAT_VERSION = 2
+BACKUP_SUPPORTED_FORMAT_VERSIONS = (BACKUP_LEGACY_FORMAT_VERSION, BACKUP_FORMAT_VERSION)
 BACKUP_TABLE_QUERIES: dict[str, str] = {
     "users": "SELECT id, username, password_hash, role, created_at FROM users ORDER BY id",
-    "agents": "SELECT * FROM agents ORDER BY id",
     "credentials": (
         "SELECT * FROM credentials "
         "WHERE secret_ref NOT LIKE 'oauth://%' AND secret_ref NOT LIKE 'secret://%' "
         "ORDER BY id"
     ),
+    "hives": (
+        "SELECT id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, "
+        "tracker_credential_id, guidance, status, created_at, updated_at FROM hives ORDER BY id"
+    ),
+    "agents": (
+        "SELECT id, name, role, provider, model, status, system_prompt, hive_id, "
+        "can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, "
+        "issue_rate_limit_per_hour, issue_labels, created_at, updated_at FROM agents ORDER BY id"
+    ),
     "tool_actions": "SELECT * FROM tool_actions ORDER BY name",
-    "tasks": "SELECT * FROM tasks ORDER BY id",
-    "schedules": "SELECT * FROM schedules ORDER BY id",
+    "tasks": (
+        "SELECT id, title, description, status, priority, hive_id, assigned_agent_id, credential_id, "
+        "action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at FROM tasks ORDER BY id"
+    ),
+    "schedules": (
+        "SELECT id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, "
+        "priority, hive_id, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, "
+        "created_at, updated_at FROM schedules ORDER BY id"
+    ),
     "heartbeat_events": "SELECT * FROM heartbeat_events ORDER BY id",
     "audit_events": "SELECT * FROM audit_events ORDER BY id",
 }
 BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "users": ("id", "username", "password_hash", "role", "created_at"),
-    "agents": ("id", "name", "role", "provider", "model", "status", "system_prompt", "created_at", "updated_at"),
     "credentials": (
         "id",
         "name",
@@ -233,6 +261,74 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "updated_at",
     ),
+    "hives": (
+        "id",
+        "name",
+        "project_ref",
+        "tracker_provider",
+        "tracker_project",
+        "tracker_base_url",
+        "tracker_credential_id",
+        "guidance",
+        "status",
+        "created_at",
+        "updated_at",
+    ),
+    "agents": (
+        "id",
+        "name",
+        "role",
+        "provider",
+        "model",
+        "status",
+        "system_prompt",
+        "hive_id",
+        "can_spawn_subagents",
+        "max_subagents",
+        "issue_creation_enabled",
+        "issue_kind",
+        "issue_rate_limit_per_hour",
+        "issue_labels",
+        "created_at",
+        "updated_at",
+    ),
+    "tasks": (
+        "id",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "hive_id",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "heartbeat_seconds",
+        "next_heartbeat_at",
+        "created_at",
+        "updated_at",
+    ),
+    "schedules": (
+        "id",
+        "name",
+        "enabled",
+        "interval_seconds",
+        "catch_up_policy",
+        "task_title",
+        "task_description",
+        "priority",
+        "hive_id",
+        "assigned_agent_id",
+        "credential_id",
+        "action",
+        "intent",
+        "next_run_at",
+        "last_run_at",
+        "created_at",
+        "updated_at",
+    ),
+    "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
+    "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
     "tool_actions": (
         "name",
         "description",
@@ -242,6 +338,11 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "updated_at",
     ),
+}
+BACKUP_LEGACY_V1_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "users": BACKUP_TABLE_COLUMNS["users"],
+    "credentials": BACKUP_TABLE_COLUMNS["credentials"],
+    "agents": ("id", "name", "role", "provider", "model", "status", "system_prompt", "created_at", "updated_at"),
     "tasks": (
         "id",
         "title",
@@ -275,8 +376,8 @@ BACKUP_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "updated_at",
     ),
-    "heartbeat_events": ("id", "task_id", "agent_id", "note", "created_at"),
-    "audit_events": ("id", "type", "actor_id", "target_id", "decision", "reason", "metadata", "created_at"),
+    "heartbeat_events": BACKUP_TABLE_COLUMNS["heartbeat_events"],
+    "audit_events": BACKUP_TABLE_COLUMNS["audit_events"],
 }
 BACKUP_CREDENTIAL_ROW_DEFAULTS: dict[str, Any] = {
     "agent_lease_limit": None,
@@ -291,10 +392,6 @@ BACKUP_INSERT_STATEMENTS: dict[str, str] = {
         "INSERT INTO users (id, username, password_hash, role, created_at) "
         "VALUES (:id, :username, :password_hash, :role, :created_at)"
     ),
-    "agents": (
-        "INSERT INTO agents (id, name, role, provider, model, status, system_prompt, created_at, updated_at) "
-        "VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :created_at, :updated_at)"
-    ),
     "credentials": (
         "INSERT INTO credentials (id, name, provider, secret_ref, allowed_agents, allowed_actions, "
         "approval_required_actions, max_ttl_seconds, require_intent, "
@@ -307,21 +404,35 @@ BACKUP_INSERT_STATEMENTS: dict[str, str] = {
         ":rate_limit_window_seconds, :provider_token_budget, :provider_cost_budget_cents, "
         ":metadata, :created_at, :updated_at)"
     ),
+    "hives": (
+        "INSERT INTO hives (id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, "
+        "tracker_credential_id, guidance, status, created_at, updated_at) "
+        "VALUES (:id, :name, :project_ref, :tracker_provider, :tracker_project, :tracker_base_url, "
+        ":tracker_credential_id, :guidance, :status, :created_at, :updated_at)"
+    ),
+    "agents": (
+        "INSERT INTO agents (id, name, role, provider, model, status, system_prompt, hive_id, "
+        "can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, issue_rate_limit_per_hour, "
+        "issue_labels, created_at, updated_at) "
+        "VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :hive_id, "
+        ":can_spawn_subagents, :max_subagents, :issue_creation_enabled, :issue_kind, "
+        ":issue_rate_limit_per_hour, :issue_labels, :created_at, :updated_at)"
+    ),
     "tool_actions": (
         "INSERT INTO tool_actions (name, description, input_schema, required_credential_action, risk_level, created_at, updated_at) "
         "VALUES (:name, :description, :input_schema, :required_credential_action, :risk_level, :created_at, :updated_at)"
     ),
     "tasks": (
-        "INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, credential_id, "
+        "INSERT INTO tasks (id, title, description, status, priority, hive_id, assigned_agent_id, credential_id, "
         "action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at) "
-        "VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, "
+        "VALUES (:id, :title, :description, :status, :priority, :hive_id, :assigned_agent_id, :credential_id, "
         ":action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)"
     ),
     "schedules": (
         "INSERT INTO schedules (id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority, "
-        "assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at) "
+        "hive_id, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at) "
         "VALUES (:id, :name, :enabled, :interval_seconds, :catch_up_policy, :task_title, :task_description, :priority, "
-        ":assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)"
+        ":hive_id, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)"
     ),
     "heartbeat_events": (
         "INSERT INTO heartbeat_events (id, task_id, agent_id, note, created_at) "
@@ -342,12 +453,17 @@ BACKUP_DELETE_STATEMENTS = (
     "DELETE FROM schedules",
     "DELETE FROM tasks",
     "DELETE FROM audit_events",
+    "DELETE FROM agents",
+    "DELETE FROM hives",
     "DELETE FROM credentials",
     "DELETE FROM tool_actions",
-    "DELETE FROM agents",
     "DELETE FROM users",
 )
-BACKUP_CREDENTIAL_REFERENCE_TABLES = ("tasks", "schedules")
+BACKUP_CREDENTIAL_REFERENCE_FIELDS = {
+    "hives": "tracker_credential_id",
+    "tasks": "credential_id",
+    "schedules": "credential_id",
+}
 SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
     {
         "accesstoken",
@@ -551,6 +667,20 @@ class HivemindStore:
                   expires_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS hives (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  project_ref TEXT NOT NULL,
+                  tracker_provider TEXT NOT NULL,
+                  tracker_project TEXT NOT NULL,
+                  tracker_base_url TEXT NOT NULL,
+                  tracker_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+                  guidance TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS agents (
                   id TEXT PRIMARY KEY,
                   name TEXT NOT NULL,
@@ -559,6 +689,13 @@ class HivemindStore:
                   model TEXT NOT NULL,
                   status TEXT NOT NULL,
                   system_prompt TEXT NOT NULL DEFAULT '',
+                  hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL,
+                  can_spawn_subagents INTEGER NOT NULL DEFAULT 0,
+                  max_subagents INTEGER NOT NULL DEFAULT 0,
+                  issue_creation_enabled INTEGER NOT NULL DEFAULT 0,
+                  issue_kind TEXT NOT NULL DEFAULT 'issue',
+                  issue_rate_limit_per_hour INTEGER NOT NULL DEFAULT 0,
+                  issue_labels TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -642,6 +779,7 @@ class HivemindStore:
                   description TEXT NOT NULL,
                   status TEXT NOT NULL,
                   priority TEXT NOT NULL,
+                  hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL,
                   assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
                   credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
                   action TEXT NOT NULL,
@@ -661,6 +799,7 @@ class HivemindStore:
                   task_title TEXT NOT NULL,
                   task_description TEXT NOT NULL,
                   priority TEXT NOT NULL,
+                  hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL,
                   assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
                   credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
                   action TEXT NOT NULL,
@@ -691,6 +830,7 @@ class HivemindStore:
                 );
                 """
             )
+            self._migrate_hive_control_tables(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_agent_id ON tasks(assigned_agent_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_schedules_assigned_agent_id ON schedules(assigned_agent_id)")
             self._migrate_sessions_to_token_hashes(conn)
@@ -727,6 +867,44 @@ class HivemindStore:
             ],
         )
         conn.execute("DROP TABLE sessions_legacy")
+
+    def _migrate_hive_control_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hives (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              project_ref TEXT NOT NULL,
+              tracker_provider TEXT NOT NULL,
+              tracker_project TEXT NOT NULL,
+              tracker_base_url TEXT NOT NULL,
+              tracker_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+              guidance TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        agent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
+        agent_additions = {
+            "hive_id": "ALTER TABLE agents ADD COLUMN hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL",
+            "can_spawn_subagents": "ALTER TABLE agents ADD COLUMN can_spawn_subagents INTEGER NOT NULL DEFAULT 0",
+            "max_subagents": "ALTER TABLE agents ADD COLUMN max_subagents INTEGER NOT NULL DEFAULT 0",
+            "issue_creation_enabled": "ALTER TABLE agents ADD COLUMN issue_creation_enabled INTEGER NOT NULL DEFAULT 0",
+            "issue_kind": "ALTER TABLE agents ADD COLUMN issue_kind TEXT NOT NULL DEFAULT 'issue'",
+            "issue_rate_limit_per_hour": "ALTER TABLE agents ADD COLUMN issue_rate_limit_per_hour INTEGER NOT NULL DEFAULT 0",
+            "issue_labels": "ALTER TABLE agents ADD COLUMN issue_labels TEXT NOT NULL DEFAULT '[]'",
+        }
+        for column, statement in agent_additions.items():
+            if column not in agent_columns:
+                conn.execute(statement)
+        task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        if "hive_id" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL")
+        schedule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
+        if "hive_id" not in schedule_columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN hive_id TEXT REFERENCES hives(id) ON DELETE SET NULL")
 
     def _migrate_users_to_username(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
@@ -842,11 +1020,11 @@ class HivemindStore:
     ) -> dict[str, list[dict[str, Any]]]:
         credential_ids = {row["id"] for row in tables.get("credentials", [])}
         normalized = dict(tables)
-        for table in BACKUP_CREDENTIAL_REFERENCE_TABLES:
+        for table, field in BACKUP_CREDENTIAL_REFERENCE_FIELDS.items():
             normalized[table] = [
                 {
                     **row,
-                    "credential_id": row["credential_id"] if row.get("credential_id") in credential_ids else None,
+                    field: row[field] if row.get(field) in credential_ids else None,
                 }
                 for row in normalized.get(table, [])
             ]
@@ -920,6 +1098,11 @@ class HivemindStore:
         if not isinstance(rows, list):
             raise StoreValidationError(f"backup table {table} must be a JSON array")
         allowed_columns = set(columns)
+        row_validator = {
+            "credentials": self.validate_backup_credential_row,
+            "tool_actions": self.validate_backup_tool_action_row,
+            "schedules": self.validate_backup_schedule_row,
+        }.get(table)
         normalized_rows: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
@@ -936,14 +1119,107 @@ class HivemindStore:
             if missing_columns:
                 missing = ", ".join(missing_columns)
                 raise StoreValidationError(f"backup table {table} row {index} is missing columns: {missing}")
-            if table == "credentials":
-                row_dict = self.validate_backup_credential_row(row_dict)
-            if table == "tool_actions":
-                row_dict = self.validate_backup_tool_action_row(row_dict)
-            if table == "schedules":
-                row_dict = self.validate_backup_schedule_row(row_dict)
+            if row_validator is not None:
+                row_dict = row_validator(row_dict)
             normalized_rows.append(row_dict)
         return normalized_rows
+
+    def legacy_backup_tool_action_rows(self, legacy_tables: Mapping[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        default_actions = {
+            action["name"]: action
+            for action in (*DEFAULT_TOOL_ACTIONS, *self._default_agent_provider_tool_actions())
+        }
+        action_names = set(default_actions)
+        for credential in legacy_tables["credentials"]:
+            action_names.update(self._json_action_names(str(credential.get("allowed_actions"))))
+            action_names.update(self._json_action_names(str(credential.get("approval_required_actions"))))
+        for table in ("tasks", "schedules"):
+            for row in legacy_tables[table]:
+                action = str(row.get("action") or "")
+                if not action.strip():
+                    continue
+                try:
+                    action_names.add(self.normalize_action_name(action))
+                except StoreError:
+                    continue
+
+        now = iso()
+        rows: list[dict[str, Any]] = []
+        for action_name in sorted(action_names):
+            action = default_actions.get(action_name)
+            if action is None:
+                action = {
+                    "name": action_name,
+                    "description": "Restored legacy action.",
+                    "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": True},
+                    "required_credential_action": action_name,
+                    "risk_level": "medium",
+                }
+            rows.append(
+                {
+                    "name": action["name"],
+                    "description": action["description"],
+                    "input_schema": dumps(action["input_schema"]),
+                    "required_credential_action": action["required_credential_action"],
+                    "risk_level": action["risk_level"],
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        return rows
+
+    def normalize_legacy_v1_backup_tables(
+        self,
+        tables: Mapping[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        missing_tables = [table for table in BACKUP_LEGACY_V1_TABLE_COLUMNS if table not in tables]
+        if missing_tables:
+            missing = ", ".join(missing_tables)
+            raise StoreValidationError(f"backup bundle is missing required tables: {missing}")
+
+        legacy_tables = {
+            table: self.validate_backup_rows(
+                table=table,
+                rows=tables[table],
+                columns=BACKUP_LEGACY_V1_TABLE_COLUMNS[table],
+            )
+            for table in BACKUP_LEGACY_V1_TABLE_COLUMNS
+        }
+        return {
+            "users": legacy_tables["users"],
+            "credentials": legacy_tables["credentials"],
+            "hives": [],
+            "agents": [
+                {
+                    **row,
+                    "hive_id": None,
+                    "can_spawn_subagents": 0,
+                    "max_subagents": 0,
+                    "issue_creation_enabled": 0,
+                    "issue_kind": "issue",
+                    "issue_rate_limit_per_hour": 0,
+                    "issue_labels": "[]",
+                }
+                for row in legacy_tables["agents"]
+            ],
+            "tasks": [
+                {
+                    **row,
+                    "hive_id": None,
+                }
+                for row in legacy_tables["tasks"]
+            ],
+            "tool_actions": self.legacy_backup_tool_action_rows(legacy_tables),
+            "schedules": [
+                {
+                    **row,
+                    "hive_id": None,
+                }
+                for row in legacy_tables["schedules"]
+            ],
+            "heartbeat_events": legacy_tables["heartbeat_events"],
+            "audit_events": legacy_tables["audit_events"],
+        }
 
     def validate_backup_bundle(
         self,
@@ -951,14 +1227,19 @@ class HivemindStore:
     ) -> dict[str, list[dict[str, Any]]]:
         if bundle.get("format") != BACKUP_FORMAT:
             raise StoreValidationError(f"unsupported backup format: {bundle.get('format')!r}")
-        if bundle.get("format_version") != BACKUP_FORMAT_VERSION:
+        format_version = bundle.get("format_version")
+        if format_version not in BACKUP_SUPPORTED_FORMAT_VERSIONS:
+            supported = ", ".join(str(version) for version in BACKUP_SUPPORTED_FORMAT_VERSIONS)
             raise StoreValidationError(
                 "unsupported backup format version: "
-                f"{bundle.get('format_version')!r}; expected {BACKUP_FORMAT_VERSION}"
+                f"{format_version!r}; supported versions: {supported}"
             )
         tables = bundle.get("tables")
         if not isinstance(tables, Mapping):
             raise StoreValidationError("backup bundle tables must be a JSON object")
+
+        if format_version == BACKUP_LEGACY_FORMAT_VERSION:
+            tables = self.normalize_legacy_v1_backup_tables(tables)
 
         missing_tables = [table for table in BACKUP_TABLE_QUERIES if table not in tables]
         if missing_tables:
@@ -1140,11 +1421,33 @@ class HivemindStore:
             if conn.execute("SELECT 1 FROM agents LIMIT 1").fetchone() is not None:
                 return
             now = iso()
+            hive_id = "hive_local_runtime"
             agent_id = f"agent_{secrets.token_urlsafe(8)}"
             conn.execute(
                 """
-                INSERT INTO agents (id, name, role, provider, model, status, system_prompt, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO hives
+                (id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, tracker_credential_id, guidance, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    hive_id,
+                    "local runtime",
+                    "local://hivemind",
+                    "github",
+                    "hivemind",
+                    "",
+                    None,
+                    "Keep reports brief, cite concrete repo evidence, and queue issue requests through the broker.",
+                    "active",
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO agents
+                (id, name, role, provider, model, status, system_prompt, hive_id, can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, issue_rate_limit_per_hour, issue_labels, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -1154,6 +1457,13 @@ class HivemindStore:
                     "deterministic-policy",
                     "idle",
                     "Communicate in short, actionable updates.",
+                    hive_id,
+                    1,
+                    3,
+                    1,
+                    "issue",
+                    4,
+                    dumps(["needs-triage"]),
                     now,
                     now,
                 ),
@@ -1191,6 +1501,200 @@ class HivemindStore:
                     now,
                 ),
             )
+            conn.execute(
+                "UPDATE hives SET tracker_credential_id = ?, updated_at = ? WHERE id = ?",
+                ("cred_demo_github", now, hive_id),
+            )
+
+    def normalize_hive_status(self, status: str | None) -> str:
+        normalized = str(status or "active").strip().lower()
+        if normalized not in HIVE_STATUSES:
+            raise StoreError(f"unsupported hive status: {normalized}")
+        return normalized
+
+    def normalize_tracker_provider(self, provider: str | None) -> str:
+        normalized = str(provider or "github").strip().lower()
+        if normalized not in HIVE_TRACKER_PROVIDERS:
+            raise StoreError(f"unsupported tracker provider: {normalized}")
+        return normalized
+
+    def normalize_tracker_base_url(self, value: str | None) -> str:
+        base_url = str(value or "").strip()
+        if not base_url:
+            return ""
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise StoreError("tracker_base_url must be an http(s) URL")
+        if parsed.username or parsed.password:
+            raise StoreError("tracker_base_url must not include credentials")
+        return base_url
+
+    def normalize_issue_kind(self, value: str | None) -> str:
+        kind = str(value or "issue").strip().lower()
+        if kind not in ISSUE_KINDS:
+            raise StoreError(f"unsupported issue kind: {kind}")
+        return kind
+
+    def normalize_labels(self, values: Any) -> list[str]:
+        if values is None:
+            return []
+        if isinstance(values, str):
+            values = [item.strip() for item in values.split(",")]
+        return sorted({str(value).strip() for value in values if str(value).strip()})
+
+    def list_hives(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                self.public_hive(row, conn)
+                for row in conn.execute("SELECT * FROM hives ORDER BY created_at DESC")
+            ]
+
+    def create_hive(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = iso()
+        row = {
+            "id": data.get("id") or f"hive_{secrets.token_urlsafe(8)}",
+            "name": str(data["name"]).strip(),
+            "project_ref": str(data["project_ref"]).strip(),
+            "tracker_provider": self.normalize_tracker_provider(data.get("tracker_provider")),
+            "tracker_project": str(data.get("tracker_project") or "").strip(),
+            "tracker_base_url": self.normalize_tracker_base_url(data.get("tracker_base_url")),
+            "tracker_credential_id": data.get("tracker_credential_id") or None,
+            "guidance": str(data.get("guidance") or "").strip(),
+            "status": self.normalize_hive_status(data.get("status")),
+            "created_at": now,
+            "updated_at": now,
+        }
+        if not row["name"]:
+            raise StoreError("hive name is required")
+        if not row["project_ref"]:
+            raise StoreError("hive project_ref is required")
+        with self.connect() as conn:
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="tracker_credential_id",
+                value=row["tracker_credential_id"],
+            )
+            conn.execute(
+                """
+                INSERT INTO hives
+                (id, name, project_ref, tracker_provider, tracker_project, tracker_base_url, tracker_credential_id, guidance, status, created_at, updated_at)
+                VALUES (:id, :name, :project_ref, :tracker_provider, :tracker_project, :tracker_base_url, :tracker_credential_id, :guidance, :status, :created_at, :updated_at)
+                """,
+                row,
+            )
+        self.audit(
+            "hive.created",
+            "operator",
+            row["id"],
+            "allowed",
+            "hive created",
+            {"tracker_provider": row["tracker_provider"], "tracker_project": row["tracker_project"]},
+        )
+        return self.get_hive(row["id"])
+
+    def update_hive(self, hive_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        allowed_fields = {
+            "name",
+            "project_ref",
+            "tracker_provider",
+            "tracker_project",
+            "tracker_base_url",
+            "tracker_credential_id",
+            "guidance",
+            "status",
+        }
+        updates: dict[str, Any] = {}
+        for field in allowed_fields:
+            if field in data:
+                updates[field] = data[field]
+        if not updates:
+            return self.get_hive(hive_id)
+        if "tracker_provider" in updates:
+            updates["tracker_provider"] = self.normalize_tracker_provider(updates["tracker_provider"])
+        if "tracker_base_url" in updates:
+            updates["tracker_base_url"] = self.normalize_tracker_base_url(updates["tracker_base_url"])
+        if "status" in updates:
+            updates["status"] = self.normalize_hive_status(updates["status"])
+        for text_field in ("name", "project_ref", "tracker_project", "guidance"):
+            if text_field in updates:
+                updates[text_field] = str(updates[text_field] or "").strip()
+        if "tracker_credential_id" in updates:
+            updates["tracker_credential_id"] = updates["tracker_credential_id"] or None
+        if updates.get("name") == "":
+            raise StoreError("hive name is required")
+        if updates.get("project_ref") == "":
+            raise StoreError("hive project_ref is required")
+        with self.connect() as conn:
+            current = dict(self.get_hive_row(conn, hive_id))
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="tracker_credential_id",
+                value=updates.get("tracker_credential_id"),
+            )
+            row = {**current, **updates, "updated_at": iso()}
+            conn.execute(
+                """
+                UPDATE hives
+                SET name = :name,
+                    project_ref = :project_ref,
+                    tracker_provider = :tracker_provider,
+                    tracker_project = :tracker_project,
+                    tracker_base_url = :tracker_base_url,
+                    tracker_credential_id = :tracker_credential_id,
+                    guidance = :guidance,
+                    status = :status,
+                    updated_at = :updated_at
+                WHERE id = :id
+                """,
+                row,
+            )
+        self.audit(
+            "hive.updated",
+            "operator",
+            hive_id,
+            "allowed",
+            "hive updated",
+            {"fields": sorted(field for field in updates if field != "updated_at")},
+        )
+        return self.get_hive(hive_id)
+
+    def get_hive(self, hive_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            return self.public_hive(self.get_hive_row(conn, hive_id), conn)
+
+    def get_hive_row(self, conn: sqlite3.Connection, hive_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM hives WHERE id = ?", (hive_id,)).fetchone()
+        if row is None:
+            raise StoreNotFoundError(f"unknown hive: {hive_id}")
+        return row
+
+    def public_hive(self, row: sqlite3.Row | dict[str, Any], conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+        item = dict(row)
+        if conn is not None:
+            item["agent_count"] = conn.execute("SELECT COUNT(*) FROM agents WHERE hive_id = ?", (item["id"],)).fetchone()[0]
+            item["issue_agent_count"] = conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE hive_id = ? AND issue_creation_enabled = 1",
+                (item["id"],),
+            ).fetchone()[0]
+            item["subagent_enabled_count"] = conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE hive_id = ? AND can_spawn_subagents = 1",
+                (item["id"],),
+            ).fetchone()[0]
+            item["open_task_count"] = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE hive_id = ? AND status IN ('queued', 'running', 'blocked')",
+                (item["id"],),
+            ).fetchone()[0]
+            item["schedule_count"] = conn.execute(
+                "SELECT COUNT(*) FROM schedules WHERE hive_id = ?",
+                (item["id"],),
+            ).fetchone()[0]
+        else:
+            item.setdefault("agent_count", 0)
+            item.setdefault("issue_agent_count", 0)
+            item.setdefault("subagent_enabled_count", 0)
+            item.setdefault("open_task_count", 0)
+            item.setdefault("schedule_count", 0)
+        return item
 
     def list_agents(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1200,6 +1704,18 @@ class HivemindStore:
     def create_agent(self, data: dict[str, Any], *, actor_id: str = "user") -> dict[str, Any]:
         now = iso()
         provider = normalize_agent_provider_id(data.get("provider") or "local")
+        max_subagents = int(data.get("max_subagents") or 0)
+        issue_rate_limit_per_hour = int(data.get("issue_rate_limit_per_hour") or 0)
+        issue_creation_enabled = bool(data.get("issue_creation_enabled", False))
+        if max_subagents < 0:
+            raise StoreError("max_subagents must be zero or greater")
+        if issue_rate_limit_per_hour < 0:
+            raise StoreError("issue_rate_limit_per_hour must be zero or greater")
+        if issue_creation_enabled and issue_rate_limit_per_hour < 1:
+            raise StoreError("issue creation agents require issue_rate_limit_per_hour >= 1")
+        hive_id = data.get("hive_id") or None
+        if issue_creation_enabled and hive_id is None:
+            raise StoreError("issue creation agents require hive_id")
         row = {
             "id": f"agent_{secrets.token_urlsafe(8)}",
             "name": data["name"],
@@ -1208,19 +1724,42 @@ class HivemindStore:
             "model": data.get("model") or self.config.agent_provider(provider).model,
             "status": "idle",
             "system_prompt": data.get("system_prompt") or "",
+            "hive_id": hive_id,
+            "can_spawn_subagents": 1 if data.get("can_spawn_subagents", False) else 0,
+            "max_subagents": max_subagents,
+            "issue_creation_enabled": 1 if issue_creation_enabled else 0,
+            "issue_kind": self.normalize_issue_kind(data.get("issue_kind")),
+            "issue_rate_limit_per_hour": issue_rate_limit_per_hour,
+            "issue_labels": dumps(self.normalize_labels(data.get("issue_labels"))),
             "created_at": now,
             "updated_at": now,
         }
         with self.connect() as conn:
+            self.validate_optional_hive_reference(conn, field_name="hive_id", value=row["hive_id"])
             conn.execute(
                 """
-                INSERT INTO agents (id, name, role, provider, model, status, system_prompt, created_at, updated_at)
-                VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :created_at, :updated_at)
+                INSERT INTO agents
+                (id, name, role, provider, model, status, system_prompt, hive_id, can_spawn_subagents, max_subagents, issue_creation_enabled, issue_kind, issue_rate_limit_per_hour, issue_labels, created_at, updated_at)
+                VALUES (:id, :name, :role, :provider, :model, :status, :system_prompt, :hive_id, :can_spawn_subagents, :max_subagents, :issue_creation_enabled, :issue_kind, :issue_rate_limit_per_hour, :issue_labels, :created_at, :updated_at)
                 """,
                 row,
             )
             public_row = self.public_agent(conn, row)
-        self.audit("agent.created", actor_id, row["id"], "allowed", "agent created", {"status": row["status"]})
+        self.audit(
+            "agent.created",
+            actor_id,
+            row["id"],
+            "allowed",
+            "agent created",
+            {
+                "status": row["status"],
+                "hive_id": row["hive_id"],
+                "can_spawn_subagents": bool(row["can_spawn_subagents"]),
+                "issue_creation_enabled": bool(row["issue_creation_enabled"]),
+                "issue_kind": row["issue_kind"],
+                "issue_rate_limit_per_hour": row["issue_rate_limit_per_hour"],
+            },
+        )
         return public_row
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
@@ -1339,6 +1878,11 @@ class HivemindStore:
     ) -> dict[str, Any]:
         agent = dict(row)
         agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
+        agent["can_spawn_subagents"] = bool(agent["can_spawn_subagents"])
+        agent["issue_creation_enabled"] = bool(agent["issue_creation_enabled"])
+        agent["max_subagents"] = int(agent["max_subagents"])
+        agent["issue_rate_limit_per_hour"] = int(agent["issue_rate_limit_per_hour"])
+        agent["issue_labels"] = loads(agent["issue_labels"], [])
         agent["assigned_task_count"] = len(assigned_tasks)
         agent["active_task_count"] = sum(1 for task in assigned_tasks if task["status"] not in FINAL_TASK_STATUSES)
         agent["assigned_schedule_count"] = len(assigned_schedules)
@@ -1385,7 +1929,7 @@ class HivemindStore:
             return [self.public_tool_action(row) for row in conn.execute("SELECT * FROM tool_actions ORDER BY name")]
 
     def get_tool_action(self, name: str) -> dict[str, Any]:
-        normalized_name = normalize_tool_action_name(str(name))
+        normalized_name = self.normalize_action_name(str(name))
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM tool_actions WHERE name = ?", (normalized_name,)).fetchone()
             if row is None:
@@ -2709,6 +3253,19 @@ class HivemindStore:
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown agent: {value}")
 
+    def validate_optional_hive_reference(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        field_name: str,
+        value: str | None,
+    ) -> None:
+        if value is None:
+            return
+        row = conn.execute("SELECT 1 FROM hives WHERE id = ?", (value,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"{field_name} references unknown hive: {value}")
+
     def validate_agent_scope(
         self,
         conn: sqlite3.Connection,
@@ -2731,6 +3288,25 @@ class HivemindStore:
         row = conn.execute("SELECT 1 FROM credentials WHERE id = ?", (value,)).fetchone()
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown credential: {value}")
+
+    def resolve_hive_id_for_assignment(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        requested_hive_id: str | None,
+        assigned_agent_id: str | None,
+    ) -> str | None:
+        hive_id = requested_hive_id or None
+        self.validate_optional_hive_reference(conn, field_name="hive_id", value=hive_id)
+        if assigned_agent_id is None:
+            return hive_id
+        agent = conn.execute("SELECT hive_id FROM agents WHERE id = ?", (assigned_agent_id,)).fetchone()
+        if agent is None:
+            raise StoreValidationError(f"assigned_agent_id references unknown agent: {assigned_agent_id}")
+        agent_hive_id = agent["hive_id"]
+        if hive_id and agent_hive_id and agent_hive_id != hive_id:
+            raise StoreValidationError("assigned agent belongs to a different hive")
+        return hive_id or agent_hive_id
 
     def validate_agent_credential_binding(
         self,
@@ -2759,7 +3335,7 @@ class HivemindStore:
     ) -> str:
         if not value or not str(value).strip():
             return ""
-        normalized = normalize_tool_action_name(str(value))
+        normalized = self.normalize_action_name(str(value))
         row = conn.execute("SELECT 1 FROM tool_actions WHERE name = ?", (normalized,)).fetchone()
         if row is None:
             raise StoreValidationError(f"{field_name} references unknown tool action: {normalized}")
@@ -2868,23 +3444,28 @@ class HivemindStore:
         )
         return normalized
 
-    def _insert_task(
+    def prepare_task_row(
         self,
         conn: sqlite3.Connection,
         data: dict[str, Any],
         *,
-        actor_id: str = "system",
         now: datetime | None = None,
     ) -> dict[str, Any]:
         task_time = now or utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
+        assigned_agent_id = data.get("assigned_agent_id") or None
         row = {
             "id": f"task_{secrets.token_urlsafe(10)}",
             "title": data["title"],
             "description": data.get("description") or "",
             "status": data.get("status") or "queued",
             "priority": data.get("priority") or "normal",
-            "assigned_agent_id": data.get("assigned_agent_id") or None,
+            "hive_id": self.resolve_hive_id_for_assignment(
+                conn,
+                requested_hive_id=data.get("hive_id") or None,
+                assigned_agent_id=assigned_agent_id,
+            ),
+            "assigned_agent_id": assigned_agent_id,
             "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
             "intent": data.get("intent") or "",
@@ -2896,11 +3477,6 @@ class HivemindStore:
         self.validate_task_status(str(row["status"]))
         self.validate_initial_task_status(str(row["status"]))
         self.validate_task_priority(str(row["priority"]))
-        self.validate_optional_agent_reference(
-            conn,
-            field_name="assigned_agent_id",
-            value=row["assigned_agent_id"],
-        )
         self.validate_optional_credential_reference(
             conn,
             field_name="credential_id",
@@ -2916,17 +3492,32 @@ class HivemindStore:
             field_name="action",
             value=row["action"],
         )
+        return row
+
+    def insert_task_row(self, conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         try:
             conn.execute(
                 """
                 INSERT INTO tasks
-                (id, title, description, status, priority, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
-                VALUES (:id, :title, :description, :status, :priority, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
+                (id, title, description, status, priority, hive_id, assigned_agent_id, credential_id, action, intent, heartbeat_seconds, next_heartbeat_at, created_at, updated_at)
+                VALUES (:id, :title, :description, :status, :priority, :hive_id, :assigned_agent_id, :credential_id, :action, :intent, :heartbeat_seconds, :next_heartbeat_at, :created_at, :updated_at)
                 """,
                 row,
             )
         except sqlite3.IntegrityError as exc:
-            raise StoreValidationError("task references an unknown agent or credential") from exc
+            raise StoreValidationError("task references an unknown hive, agent, or credential") from exc
+
+    def _insert_task(
+        self,
+        conn: sqlite3.Connection,
+        data: dict[str, Any],
+        *,
+        actor_id: str = "system",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        task_time = now or utcnow()
+        row = self.prepare_task_row(conn, data, now=task_time)
+        self.insert_task_row(conn, row)
         self._insert_audit(
             conn,
             "task.created",
@@ -2937,6 +3528,7 @@ class HivemindStore:
             {
                 "status": row["status"],
                 "priority": row["priority"],
+                "hive_id": row["hive_id"],
                 "assigned_agent_id": row["assigned_agent_id"],
                 "credential_id": row["credential_id"],
                 "action": row["action"],
@@ -2950,6 +3542,199 @@ class HivemindStore:
     def create_task(self, data: dict[str, Any], *, actor_id: str = "system") -> dict[str, Any]:
         with self.connect() as conn:
             return self._insert_task(conn, data, actor_id=actor_id)
+
+    def insert_issue_request_denial(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        agent_id: str,
+        hive_id: str,
+        reason: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        self._insert_audit(
+            conn,
+            ISSUE_REQUEST_DENIED_EVENT,
+            agent_id,
+            hive_id,
+            "denied",
+            reason,
+            metadata,
+        )
+        return reason
+
+    def get_issue_request_agent_row(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row:
+        row = conn.execute(AGENT_BY_ID_QUERY, (agent_id,)).fetchone()
+        if row is None:
+            raise StoreValidationError(f"agent_id references unknown agent: {agent_id}")
+        return row
+
+    def count_issue_requests_in_window(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        agent_id: str,
+        hive_id: str,
+        since: datetime,
+    ) -> int:
+        return conn.execute(
+            """
+            SELECT COUNT(*) FROM audit_events
+            WHERE type = 'issue.request.created'
+              AND actor_id = ?
+              AND target_id = ?
+              AND created_at >= ?
+            """,
+            (agent_id, hive_id, iso(since)),
+        ).fetchone()[0]
+
+    def issue_request_denial(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        hive: sqlite3.Row,
+        agent: sqlite3.Row,
+        requested_kind: str | None,
+        now: datetime,
+    ) -> tuple[str | None, dict[str, Any], str | None, int, int]:
+        if agent["hive_id"] != hive["id"]:
+            return "issue agent is not assigned to this hive", {"agent_hive_id": agent["hive_id"]}, None, 0, 0
+        if hive["status"] != "active":
+            return "hive is paused", {}, None, 0, 0
+        if not bool(agent["issue_creation_enabled"]):
+            return "agent issue creation is disabled", {}, None, 0, 0
+        issue_kind = self.normalize_issue_kind(requested_kind or agent["issue_kind"])
+        if issue_kind != agent["issue_kind"]:
+            reason = f"agent is configured for {agent['issue_kind']} requests"
+            return reason, {"requested_kind": issue_kind, "agent_kind": agent["issue_kind"]}, issue_kind, 0, 0
+        rate_limit = int(agent["issue_rate_limit_per_hour"])
+        if rate_limit < 1:
+            return "agent issue rate limit is not configured", {}, issue_kind, rate_limit, 0
+        used = self.count_issue_requests_in_window(
+            conn,
+            agent_id=agent["id"],
+            hive_id=hive["id"],
+            since=now - timedelta(hours=1),
+        )
+        if used >= rate_limit:
+            return "agent issue request rate limit exceeded", {"limit_per_hour": rate_limit, "used_last_hour": used}, issue_kind, rate_limit, used
+        return None, {}, issue_kind, rate_limit, used
+
+    def queue_issue_request_task(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        hive: sqlite3.Row,
+        agent: sqlite3.Row,
+        title: str,
+        description: str,
+        priority: str,
+        labels: list[str],
+        issue_kind: str,
+        rate_limit: int,
+        used: int,
+    ) -> dict[str, Any]:
+        merged_labels = sorted(set(loads(agent["issue_labels"], [])) | set(labels))
+        tracker_project = hive["tracker_project"] or hive["project_ref"]
+        label_intent = f" Requested labels JSON: {dumps(merged_labels)}."
+        task = self.prepare_task_row(
+            conn,
+            {
+                "title": title,
+                "description": description,
+                "priority": priority,
+                "hive_id": hive["id"],
+                "assigned_agent_id": agent["id"],
+                "credential_id": hive["tracker_credential_id"],
+                "action": ISSUE_ACTION_BY_KIND[issue_kind],
+                "intent": (
+                    f"Queue a {issue_kind} request for {hive['tracker_provider']} tracker "
+                    f"{tracker_project}. Follow hive guidance and use brokered credentials only."
+                    f"{label_intent}"
+                ),
+                "heartbeat_seconds": None,
+            },
+        )
+        self.insert_task_row(conn, task)
+        self._insert_audit(
+            conn,
+            "task.created",
+            agent["id"],
+            task["id"],
+            "allowed",
+            "task created",
+            {"status": task["status"], "hive_id": hive["id"], "source": "issue_request"},
+        )
+        self._insert_audit(
+            conn,
+            "issue.request.created",
+            agent["id"],
+            hive["id"],
+            "allowed",
+            "issue request queued",
+            {
+                "task_id": task["id"],
+                "kind": issue_kind,
+                "labels": merged_labels,
+                "tracker_provider": hive["tracker_provider"],
+                "tracker_project": tracker_project,
+                "limit_per_hour": rate_limit,
+                "remaining_this_hour": max(rate_limit - used - 1, 0),
+                "can_spawn_subagents": bool(agent["can_spawn_subagents"]),
+                "max_subagents": int(agent["max_subagents"]),
+            },
+        )
+        return task
+
+    def create_issue_request(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow()
+        hive_id = data["hive_id"]
+        agent_id = data["agent_id"]
+        title = str(data["title"]).strip()
+        description = str(data.get("description") or "").strip()
+        priority = str(data.get("priority") or "normal").strip() or "normal"
+        if not title:
+            raise StoreError("issue request title is required")
+        labels = self.normalize_labels(data.get("labels"))
+        task: dict[str, Any] | None = None
+        error_detail: str | None = None
+        with self._lock:
+            with self.connect() as conn:
+                hive = self.get_hive_row(conn, hive_id)
+                agent = self.get_issue_request_agent_row(conn, agent_id)
+                reason, metadata, issue_kind, rate_limit, used = self.issue_request_denial(
+                    conn,
+                    hive=hive,
+                    agent=agent,
+                    requested_kind=data.get("kind"),
+                    now=now,
+                )
+                if reason is not None:
+                    error_detail = self.insert_issue_request_denial(
+                        conn,
+                        agent_id=agent_id,
+                        hive_id=hive_id,
+                        reason=reason,
+                        metadata=metadata,
+                    )
+                elif issue_kind is not None:
+                    task = self.queue_issue_request_task(
+                        conn,
+                        hive=hive,
+                        agent=agent,
+                        title=title,
+                        description=description,
+                        priority=priority,
+                        labels=labels,
+                        issue_kind=issue_kind,
+                        rate_limit=rate_limit,
+                        used=used,
+                    )
+        if error_detail is not None:
+            raise StoreError(error_detail)
+        if task is None:
+            raise RuntimeError("issue request flow ended without a task or denial")
+        return task
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -3067,7 +3852,7 @@ class HivemindStore:
                 raise StoreValidationError("task must be assigned to an agent before execution")
             if task["status"] != "queued":
                 raise StoreError("only queued tasks can be executed")
-            agent = conn.execute("SELECT * FROM agents WHERE id = ?", (task["assigned_agent_id"],)).fetchone()
+            agent = conn.execute(AGENT_BY_ID_QUERY, (task["assigned_agent_id"],)).fetchone()
             if agent is None:
                 raise StoreValidationError(f"assigned_agent_id references unknown agent: {task['assigned_agent_id']}")
             agent = dict(agent)
@@ -3469,6 +4254,7 @@ class HivemindStore:
             "task_title": data["task_title"],
             "task_description": data.get("task_description") or "",
             "priority": data.get("priority") or "normal",
+            "hive_id": None,
             "assigned_agent_id": data.get("assigned_agent_id") or None,
             "credential_id": data.get("credential_id") or None,
             "action": data.get("action") or "",
@@ -3480,10 +4266,10 @@ class HivemindStore:
         }
         with self.connect() as conn:
             self.validate_task_priority(str(row["priority"]))
-            self.validate_optional_agent_reference(
+            row["hive_id"] = self.resolve_hive_id_for_assignment(
                 conn,
-                field_name="assigned_agent_id",
-                value=row["assigned_agent_id"],
+                requested_hive_id=data.get("hive_id") or None,
+                assigned_agent_id=row["assigned_agent_id"],
             )
             self.validate_optional_credential_reference(
                 conn,
@@ -3504,13 +4290,13 @@ class HivemindStore:
                 conn.execute(
                     """
                     INSERT INTO schedules
-                    (id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
-                    VALUES (:id, :name, :enabled, :interval_seconds, :catch_up_policy, :task_title, :task_description, :priority, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
+                    (id, name, enabled, interval_seconds, catch_up_policy, task_title, task_description, priority, hive_id, assigned_agent_id, credential_id, action, intent, next_run_at, last_run_at, created_at, updated_at)
+                    VALUES (:id, :name, :enabled, :interval_seconds, :catch_up_policy, :task_title, :task_description, :priority, :hive_id, :assigned_agent_id, :credential_id, :action, :intent, :next_run_at, :last_run_at, :created_at, :updated_at)
                     """,
                     row,
                 )
             except sqlite3.IntegrityError as exc:
-                raise StoreValidationError("schedule references an unknown agent or credential") from exc
+                raise StoreValidationError("schedule references an unknown hive, agent, or credential") from exc
         self.audit(
             "schedule.created",
             actor_id,
@@ -3521,6 +4307,7 @@ class HivemindStore:
                 "interval_seconds": interval,
                 "catch_up_policy": catch_up_policy,
                 "priority": row["priority"],
+                "hive_id": row["hive_id"],
                 "assigned_agent_id": row["assigned_agent_id"],
                 "credential_id": row["credential_id"],
                 "action": row["action"],
@@ -3593,6 +4380,7 @@ class HivemindStore:
                                 "title": row["task_title"],
                                 "description": row["task_description"],
                                 "priority": priority,
+                                "hive_id": row["hive_id"],
                                 "assigned_agent_id": row["assigned_agent_id"],
                                 "credential_id": row["credential_id"],
                                 "action": row["action"],
@@ -3622,6 +4410,7 @@ class HivemindStore:
                             "remaining_run_count": remaining_run_count,
                             "scheduled_for": [iso(scheduled_for) for scheduled_for in scheduled_runs],
                             "skipped_run_count": skipped_run_count,
+                            "hive_id": row["hive_id"],
                             "task_ids": task_ids,
                         },
                         now=now,

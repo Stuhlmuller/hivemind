@@ -429,6 +429,62 @@ def test_restore_rejects_incompatible_backup_version(tmp_path: Path) -> None:
     require_true(target.is_setup_complete() is False, "failed restores should not create a setup state")
 
 
+def test_restore_accepts_v1_backup_without_hive_fields(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    agent = source.list_agents()[0]
+    task = source.create_task(
+        {
+            "title": "Legacy restore task",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": None,
+        }
+    )
+    schedule = source.create_schedule(
+        {
+            "name": "Legacy restore schedule",
+            "interval_seconds": 3600,
+            "task_title": "Legacy scheduled task",
+            "assigned_agent_id": agent["id"],
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+    legacy_bundle = json.loads(json.dumps(source.export_backup_bundle()))
+    legacy_bundle["format_version"] = 1
+    legacy_bundle["tables"].pop("hives", None)
+    legacy_bundle["summary"].pop("hives", None)
+    for row in legacy_bundle["tables"]["agents"]:
+        row.pop("hive_id", None)
+        row.pop("can_spawn_subagents", None)
+        row.pop("max_subagents", None)
+        row.pop("issue_creation_enabled", None)
+        row.pop("issue_kind", None)
+        row.pop("issue_rate_limit_per_hour", None)
+        row.pop("issue_labels", None)
+    for row in legacy_bundle["tables"]["tasks"]:
+        row.pop("hive_id", None)
+    for row in legacy_bundle["tables"]["schedules"]:
+        row.pop("hive_id", None)
+
+    target_db = tmp_path / "target.db"
+    target = HivemindStore(target_db)
+    restore_summary = target.restore_backup_bundle(legacy_bundle)
+
+    require_equal(restore_summary["hives"], 0, "legacy backup restore should create no synthetic hives")
+    restored_agents = table_rows(target_db, "agents")
+    restored_tasks = table_rows(target_db, "tasks")
+    restored_schedules = table_rows(target_db, "schedules")
+    require_true(all(row["hive_id"] is None for row in restored_agents), "legacy agents should restore without hives")
+    require_true(
+        all(row["issue_creation_enabled"] == 0 for row in restored_agents),
+        "legacy agents should restore with issue creation disabled",
+    )
+    restored_task = next(row for row in restored_tasks if row["id"] == task["id"])
+    restored_schedule = next(row for row in restored_schedules if row["id"] == schedule["id"])
+    require_equal(restored_task["hive_id"], None, "legacy tasks should restore without hive assignment")
+    require_equal(restored_schedule["hive_id"], None, "legacy schedules should restore without hive assignment")
+
+
 def test_restore_applies_defaults_for_legacy_credential_rate_limit_columns(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
     source.setup_admin("admin", TEST_PASSWORD)
