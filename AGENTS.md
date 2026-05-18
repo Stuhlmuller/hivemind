@@ -33,6 +33,13 @@ Commit signing rule: every git commit for this repository must be signed.
 Unsigned commits are not acceptable because policy checks reject them. If
 signing fails, stop and fix signing before creating, amending, or pushing more
 commits.
+Test-driven development rule: prefer test-driven development for implementation
+work. Before writing or changing logic, first add or update the focused test
+that captures the expected behavior, regression, or security boundary. Then make
+the smallest implementation change needed to pass it, run the relevant tests,
+and confirm they are passing before handoff. If a test-first workflow is not
+practical for a docs-only, config-only, or emergency fix, state why and still run
+the nearest useful verification.
 
 Bootstrap rule: before starting repo work or spawning a repo agent, follow
 `.agents/PROMPT.md`. Keep `flake.nix` and `.agents/TOOLS.md` aligned with the
@@ -88,7 +95,9 @@ unless the user explicitly changes scope. Default toward backlog conservation:
 prefer refining, de-duplicating, or ranking existing issues when the backlog
 already has actionable work. File at most one new issue for a broad idea run
 unless the user explicitly asks for more, and file none when the candidate
-would be duplicate, speculative, or lower value than existing open work.
+would be duplicate, speculative, or lower value than existing open work. New or
+refined issues must carry an appropriate classification label such as
+`security`, `bug`, `enhancement`, or a more specific existing repository label.
 
 Git workflow rule: use the project-local `hivemind-git-commits` skill before
 staging, committing, or pushing Hivemind changes so branch scope, commit
@@ -117,6 +126,12 @@ canonical top-level agents (`reviewer`, `feature-requester`, `worker`,
 `scout`, and `beekeeper`) instead of numbered lane fleets, allow those
 top-level roles to fan out bounded subagents whenever useful, support an
 endless supervisor mode for laptop-open development, and reserve PR merging
-and cross-branch CI cleanup for the beekeeper loop. Legacy names such as
+and cross-branch CI cleanup for the beekeeper loop. Worker issue selection may
+use default label priority `security,bug,help wanted` or an operator-provided
+`HIVEMIND_WORKER_PRIORITY_LABELS`, but active branch, open PR, and lane
+ownership checks must stay ahead of label priority. Reviewer and beekeeper
+loops should prioritize oldest open PRs first; the beekeeper may close
+irrelevant or obsolete PRs completely only after confirming there is no active
+worker ownership and leaving an explicit reason. Legacy names such as
 `browser-user`, `developer`, `worker-a`, `worker-b`, and `pr-shepherd` should
 remain lightweight compatibility aliases instead of reintroducing lane logic.

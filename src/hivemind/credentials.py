@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from threading import RLock
 from typing import Any, cast
 
@@ -19,10 +20,35 @@ from hivemind.tool_registry import DEFAULT_TOOL_ACTIONS, normalize_tool_action_n
 LEASE_DENIED_EVENT = "credential.lease.denied"
 ACTION_DENIED_EVENT = "credential.action.denied"
 LEASE_EXPIRED_OR_REVOKED_REASON = "credential lease is expired or revoked"
+LEASE_ACTION_MISMATCH_REASON = "credential lease does not allow this action"
 
 
 class CredentialError(ValueError):
     pass
+
+
+SAFE_ACTION_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
+
+def audit_action_label(action: str) -> str:
+    normalized = action.strip().lower()
+    if normalized and len(normalized) <= 64 and SAFE_ACTION_NAME.fullmatch(normalized):
+        return normalized
+    return "<redacted>"
+
+
+def audit_action_metadata(
+    action: str,
+    *,
+    ttl_seconds: int | None = None,
+    payload_key_count: int | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"action": audit_action_label(action)}
+    if ttl_seconds is not None:
+        metadata["ttl_seconds"] = ttl_seconds
+    if payload_key_count is not None:
+        metadata["payload_key_count"] = payload_key_count
+    return metadata
 
 
 class CredentialVault:
@@ -99,29 +125,12 @@ class CredentialService:
         normalized_action = normalize_tool_action_name(action)
         if not normalized_action:
             raise CredentialError("tool action is required")
+        if len(normalized_action) > 64 or SAFE_ACTION_NAME.fullmatch(normalized_action) is None:
+            raise CredentialError("tool action name must use lowercase snake_case")
         try:
             return self._tool_actions[normalized_action]
         except KeyError as exc:
-            raise CredentialError(f"unknown tool action: {normalized_action}") from exc
-
-    def _record_action_denial(
-        self,
-        lease: CredentialLease,
-        *,
-        action: str,
-        reason: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        self._record_audit(
-            AuditEvent(
-                type=ACTION_DENIED_EVENT,
-                actor_id=lease.agent_id,
-                target_id=lease.credential_id,
-                decision="denied",
-                reason=reason,
-                metadata={"action": action, "lease_id": lease.id, **(metadata or {})},
-            )
-        )
+            raise CredentialError(f"unknown tool action: {audit_action_label(normalized_action)}") from exc
 
     def request_lease(
         self,
@@ -132,7 +141,21 @@ class CredentialService:
         intent: str,
         ttl_seconds: int | None = None,
     ) -> CredentialLease:
-        credential = self._vault.get(credential_id)
+        normalized_action = action.strip().lower()
+        try:
+            credential = self._vault.get(credential_id)
+        except CredentialError as exc:
+            self._record_audit(
+                AuditEvent(
+                    type=LEASE_DENIED_EVENT,
+                    actor_id=agent_id,
+                    target_id=credential_id,
+                    decision="denied",
+                    reason=str(exc),
+                    metadata=audit_action_metadata(normalized_action),
+                )
+            )
+            raise
         try:
             tool_action = self._tool_action_for_request(action)
         except CredentialError as exc:
@@ -143,7 +166,7 @@ class CredentialService:
                     target_id=credential_id,
                     decision="denied",
                     reason=str(exc),
-                    metadata={"action": normalize_tool_action_name(action)},
+                    metadata=audit_action_metadata(normalize_tool_action_name(action)),
                 )
             )
             raise
@@ -163,7 +186,10 @@ class CredentialService:
                     target_id=credential_id,
                     decision="denied",
                     reason=review.reason,
-                    metadata={"action": tool_action["name"], "credential_action": credential_action},
+                    metadata={
+                        **audit_action_metadata(tool_action["name"]),
+                        "credential_action": credential_action,
+                    },
                 )
             )
             raise CredentialError(review.reason)
@@ -200,9 +226,8 @@ class CredentialService:
                 decision="pending" if requires_approval else "allowed",
                 reason="action requires operator approval" if requires_approval else review.reason,
                 metadata={
-                    "action": lease.action,
+                    **audit_action_metadata(lease.action, ttl_seconds=ttl),
                     "credential_action": credential_action,
-                    "ttl_seconds": ttl,
                     "lease_id": lease.id,
                 },
             )
@@ -211,54 +236,78 @@ class CredentialService:
 
     def perform_action(self, *, lease_token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         normalized_action = normalize_tool_action_name(action)
+        payload_key_count = len(payload)
         try:
             lease = self._find_lease_by_token(lease_token)
-        except CredentialError:
+        except CredentialError as exc:
             self._record_audit(
                 AuditEvent(
                     type=ACTION_DENIED_EVENT,
                     actor_id="unknown",
-                    target_id="credential_lease",
+                    target_id="unknown",
                     decision="denied",
-                    reason="unknown credential lease token",
-                    metadata={"action": normalized_action},
+                    reason=str(exc),
+                    metadata=audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
                 )
             )
             raise
 
+        denial_reason: str | None = None
+        denial_lease = lease
+        consumed_lease: CredentialLease | None = None
         if lease.status == LeaseStatus.PENDING:
-            self._record_action_denial(lease, action=normalized_action, reason="credential lease is pending approval")
-            raise CredentialError("credential lease is pending approval")
-        if lease.status == LeaseStatus.DENIED:
-            self._record_action_denial(lease, action=normalized_action, reason="credential lease request was denied")
-            raise CredentialError("credential lease request was denied")
-        if not lease.is_active():
-            self._record_action_denial(lease, action=normalized_action, reason=LEASE_EXPIRED_OR_REVOKED_REASON)
-            raise CredentialError(LEASE_EXPIRED_OR_REVOKED_REASON)
-        if lease.action != normalized_action:
-            self._record_action_denial(lease, action=normalized_action, reason="credential lease does not allow this action")
-            raise CredentialError("credential lease does not allow this action")
+            denial_reason = "credential lease is pending approval"
+        elif lease.status == LeaseStatus.DENIED:
+            denial_reason = "credential lease request was denied"
+        elif not lease.is_active():
+            denial_reason = "credential lease is expired or revoked"
+        elif lease.action != normalized_action:
+            denial_reason = LEASE_ACTION_MISMATCH_REASON
 
+        if denial_reason is not None:
+            self._record_action_denied(
+                lease=denial_lease,
+                action=normalized_action,
+                reason=denial_reason,
+                payload_key_count=payload_key_count,
+            )
+            raise CredentialError(denial_reason)
         try:
             tool_action = self._tool_action_for_request(normalized_action)
         except CredentialError as exc:
-            self._record_action_denial(lease, action=normalized_action, reason=str(exc))
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason=str(exc),
+                payload_key_count=payload_key_count,
+            )
             raise
         payload_error = payload_schema_error(tool_action["input_schema"], payload)
         if payload_error is not None:
-            self._record_action_denial(
-                lease,
+            self._record_action_denied(
+                lease=lease,
                 action=normalized_action,
                 reason=payload_error,
-                metadata={"payload_keys": sorted(payload.keys())},
+                payload_key_count=payload_key_count,
             )
             raise CredentialError(payload_error)
-
         consumed_lease = self._consume_active_lease(lease=lease, action=normalized_action)
         if consumed_lease is None:
-            self._record_action_denial(lease, action=normalized_action, reason=LEASE_EXPIRED_OR_REVOKED_REASON)
+            self._record_action_denied(
+                lease=lease,
+                action=normalized_action,
+                reason=LEASE_EXPIRED_OR_REVOKED_REASON,
+                payload_key_count=payload_key_count,
+            )
             raise CredentialError(LEASE_EXPIRED_OR_REVOKED_REASON)
-
+        if consumed_lease.action != normalized_action:
+            self._record_action_denied(
+                lease=consumed_lease,
+                action=normalized_action,
+                reason=LEASE_ACTION_MISMATCH_REASON,
+                payload_key_count=payload_key_count,
+            )
+            raise CredentialError(LEASE_ACTION_MISMATCH_REASON)
         credential = self._vault.get(consumed_lease.credential_id)
         self._record_audit(
             AuditEvent(
@@ -267,11 +316,7 @@ class CredentialService:
                 target_id=credential.id,
                 decision="allowed",
                 reason="action matched active credential lease",
-                metadata={
-                    "action": normalized_action,
-                    "credential_action": tool_action["required_credential_action"],
-                    "payload_keys": sorted(payload.keys()),
-                },
+                metadata=audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
             )
         )
         return {
@@ -300,10 +345,9 @@ class CredentialService:
                 decision="allowed",
                 reason="operator approved lease request",
                 metadata={
-                    "action": approved.action,
+                    **audit_action_metadata(approved.action, ttl_seconds=approved.ttl_seconds),
                     "agent_id": approved.agent_id,
                     "lease_id": approved.id,
-                    "ttl_seconds": approved.ttl_seconds,
                 },
             )
         )
@@ -326,10 +370,9 @@ class CredentialService:
                 decision="denied",
                 reason="operator denied lease request",
                 metadata={
-                    "action": denied.action,
+                    **audit_action_metadata(denied.action, ttl_seconds=denied.ttl_seconds),
                     "agent_id": denied.agent_id,
                     "lease_id": denied.id,
-                    "ttl_seconds": denied.ttl_seconds,
                 },
             )
         )
@@ -366,11 +409,18 @@ class CredentialService:
                 return None
             if current.action != action:
                 return current
-            consumed = replace(current, status=LeaseStatus.REVOKED)
+            consumed = cast(CredentialLease, replace(current, status=LeaseStatus.REVOKED))
             self._leases[lease.id] = consumed
             return consumed
 
-    def _record_action_denied(self, *, lease: CredentialLease, action: str, reason: str) -> None:
+    def _record_action_denied(
+        self,
+        *,
+        lease: CredentialLease,
+        action: str,
+        reason: str,
+        payload_key_count: int,
+    ) -> None:
         self._record_audit(
             AuditEvent(
                 type=ACTION_DENIED_EVENT,
@@ -378,7 +428,7 @@ class CredentialService:
                 target_id=lease.credential_id,
                 decision="denied",
                 reason=reason,
-                metadata={"action": action},
+                metadata=audit_action_metadata(action, payload_key_count=payload_key_count),
             )
         )
 

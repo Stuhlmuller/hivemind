@@ -7,27 +7,33 @@ import logging
 import os
 from importlib.resources import files
 from threading import Event, Lock, Thread
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from hivemind.declarative import (
+    export_declarative_config,
+    import_declarative_config,
+    validate_declarative_config,
+)
 from hivemind.oauth import (
     OAuthConfigurationError,
     SecretBox,
     build_pkce_pair,
     load_oauth_providers_from_env,
 )
-from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError
+from hivemind.models import TaskPriority, TaskStatus
+from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError, iso
 
 
 SESSION_COOKIE = "hivemind_session"
 OAUTH_FAILED_EVENT = "credential.oauth.failed"
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("hivemind.runtime")
 SCHEDULER_INTERVAL_SECONDS = 5
 SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS = 5
 SCHEDULER_LOCK_WAIT_SECONDS = 0.1
@@ -39,7 +45,12 @@ class _SchedulerHandle:
     stop: Event
 
 
-def _scheduler_loop(db: HivemindStore, scheduler_stop: Event, scheduler_run_lock: Lock) -> None:
+def _scheduler_loop(
+    app: FastAPI,
+    db: HivemindStore,
+    scheduler_stop: Event,
+    scheduler_run_lock: Lock,
+) -> None:
     while not scheduler_stop.is_set():
         if not scheduler_run_lock.acquire(timeout=SCHEDULER_LOCK_WAIT_SECONDS):
             continue
@@ -48,7 +59,10 @@ def _scheduler_loop(db: HivemindStore, scheduler_stop: Event, scheduler_run_lock
                 return
             try:
                 db.run_due_schedules_once()
+                app.state.scheduler_last_run_at = iso()
+                app.state.scheduler_last_error = None
             except Exception as exc:
+                app.state.scheduler_last_error = "scheduled task run failed"
                 LOGGER.warning("background scheduler pass failed: %s", exc.__class__.__name__)
         finally:
             scheduler_run_lock.release()
@@ -62,11 +76,11 @@ def _should_start_background_scheduler(start_scheduler: bool | None) -> bool:
     return should_start
 
 
-def _start_background_scheduler(db: HivemindStore, scheduler_run_lock: Lock) -> _SchedulerHandle:
+def _start_background_scheduler(app: FastAPI, db: HivemindStore, scheduler_run_lock: Lock) -> _SchedulerHandle:
     scheduler_stop = Event()
     thread = Thread(
         target=_scheduler_loop,
-        args=(db, scheduler_stop, scheduler_run_lock),
+        args=(app, db, scheduler_stop, scheduler_run_lock),
         name="hivemind-scheduler",
         daemon=True,
     )
@@ -83,7 +97,7 @@ def _reuse_or_start_background_scheduler(app: FastAPI, db: HivemindStore, schedu
         if existing_handle.thread.is_alive():
             LOGGER.warning("background scheduler is still stopping; starting replacement scheduler thread")
 
-    handle = _start_background_scheduler(db, scheduler_run_lock)
+    handle = _start_background_scheduler(app, db, scheduler_run_lock)
     app.state.scheduler_handle = handle
     app.state.scheduler_thread = handle.thread
     return handle
@@ -111,7 +125,9 @@ def _scheduler_lifespan(db: HivemindStore, start_scheduler: bool | None, schedul
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         handle: _SchedulerHandle | None = None
-        if _should_start_background_scheduler(start_scheduler):
+        should_start = _should_start_background_scheduler(start_scheduler)
+        app.state.scheduler_enabled = should_start
+        if should_start:
             handle = _reuse_or_start_background_scheduler(app, db, scheduler_run_lock)
         try:
             yield
@@ -138,6 +154,10 @@ class SpawnAgentRequest(BaseModel):
     provider: str = Field(default="local", min_length=1)
     model: str | None = Field(default=None, min_length=1)
     system_prompt: str = ""
+
+
+class UpdateAgentStatusRequest(BaseModel):
+    status: str = Field(pattern="^(idle|queued|running|blocked|done|failed|working)$")
 
 
 class CreateCredentialRequest(BaseModel):
@@ -189,7 +209,8 @@ class CreateToolActionRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     title: str = Field(min_length=1)
     description: str = ""
-    priority: str = "normal"
+    status: TaskStatus = TaskStatus.QUEUED
+    priority: TaskPriority = TaskPriority.NORMAL
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
@@ -197,8 +218,21 @@ class CreateTaskRequest(BaseModel):
     heartbeat_seconds: int | None = Field(default=None, ge=30)
 
 
+class UpdateTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    priority: TaskPriority | None = None
+    assigned_agent_id: str | None = None
+    credential_id: str | None = None
+    action: str | None = None
+    intent: str | None = None
+    heartbeat_seconds: int | None = Field(default=None, ge=30)
+
+
 class UpdateTaskStatusRequest(BaseModel):
-    status: str = Field(pattern="^(queued|running|blocked|done|failed|cancelled)$")
+    status: TaskStatus
 
 
 class HeartbeatRequest(BaseModel):
@@ -217,7 +251,7 @@ class CreateScheduleRequest(BaseModel):
     catch_up_policy: Literal["skip_missed", "run_once", "backfill"] = "run_once"
     task_title: str = Field(min_length=1)
     task_description: str = ""
-    priority: str = "normal"
+    priority: TaskPriority = TaskPriority.NORMAL
     assigned_agent_id: str | None = None
     credential_id: str | None = None
     action: str = ""
@@ -227,6 +261,43 @@ class CreateScheduleRequest(BaseModel):
 
 class UpdateScheduleRequest(BaseModel):
     enabled: bool
+
+
+class DeclarativeConfigRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class ImportDeclarativeConfigRequest(DeclarativeConfigRequest):
+    dry_run: bool = True
+
+
+def _register_declarative_config_routes(
+    app: FastAPI,
+    db: HivemindStore,
+    require_user: Callable[..., SessionUser],
+) -> None:
+    @app.get("/declarative-config")
+    def export_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        return export_declarative_config(db)
+
+    @app.post("/declarative-config/validate")
+    def validate_config(request: DeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return validate_declarative_config(db, request.config)
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/declarative-config/import")
+    def import_config(request: ImportDeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return import_declarative_config(
+                db,
+                request.config,
+                actor_id=user.id,
+                dry_run=request.dry_run,
+            )
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
@@ -244,10 +315,39 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         lifespan=_scheduler_lifespan(db, start_scheduler, scheduler_run_lock),
     )
     app.state.store = db
+    app.state.scheduler_enabled = False
+    app.state.scheduler_last_error = None
+    app.state.scheduler_last_run_at = None
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     def serve_frontend() -> FileResponse:
         return FileResponse(static_dir.joinpath("index.html"))
+
+    def scheduler_status() -> dict[str, Any]:
+        enabled = getattr(app.state, "scheduler_enabled", False)
+        thread = getattr(app.state, "scheduler_thread", None)
+        last_run_at = getattr(app.state, "scheduler_last_run_at", None)
+        last_error = getattr(app.state, "scheduler_last_error", None)
+        if not enabled:
+            status = "disabled"
+            detail = "background scheduler disabled for this process"
+        elif last_error:
+            status = "error"
+            detail = "background scheduler loop failing"
+        elif thread is not None and thread.is_alive():
+            status = "running"
+            detail = "background scheduler loop active"
+        else:
+            status = "stopped"
+            detail = "background scheduler expected but thread is not running"
+        payload: dict[str, Any] = {
+            "status": status,
+            "detail": detail,
+            "last_run_at": last_run_at,
+        }
+        if last_error:
+            payload["last_error"] = last_error
+        return payload
 
     def require_user(session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None) -> SessionUser:
         user = db.get_session_user(session)
@@ -282,9 +382,26 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     def frontend_control(path: str = "") -> FileResponse:
         return serve_frontend()
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": "hivemind"}
+    @app.get("/health", response_model=None)
+    def health() -> dict[str, Any]:
+        scheduler = scheduler_status()
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "service": "hivemind",
+            "checked_at": iso(),
+            "db": {"status": "ok"},
+            "scheduler": scheduler,
+        }
+        try:
+            db.ping()
+        except Exception as exc:
+            LOGGER.warning("health database check failed: %s", type(exc).__name__)
+            payload["status"] = "error"
+            payload["db"] = {"status": "error", "detail": "database unavailable"}
+            return JSONResponse(status_code=503, content=payload)
+        if scheduler["status"] in {"error", "stopped"}:
+            payload["status"] = "degraded"
+        return payload
 
     @app.get("/setup-state")
     def setup_state() -> dict[str, bool]:
@@ -337,7 +454,20 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.post("/agents", status_code=201)
     def spawn_agent(request: SpawnAgentRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
-        return db.create_agent(request.model_dump())
+        return db.create_agent(request.model_dump(), actor_id=user.id)
+
+    @app.patch("/agents/{agent_id}/status")
+    def update_agent_status(
+        agent_id: str,
+        request: UpdateAgentStatusRequest,
+        user: SessionUser = Depends(require_user),
+    ) -> dict[str, Any]:
+        try:
+            return db.update_agent_status(agent_id, request.status, actor_id=user.id)
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/tool-actions")
     def list_tool_actions(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
@@ -384,14 +514,22 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
         available, reason = provider.availability(has_secret_store=True)
         if not available:
             raise HTTPException(status_code=400, detail=reason or f"oauth provider unavailable: {provider.id}")
-        if not any(action.strip() for action in request.allowed_actions):
-            raise HTTPException(status_code=400, detail="credential must allow at least one action")
+        credential_payload = request.model_dump(exclude={"provider"})
+        try:
+            allowed_actions, approval_required_actions = db.normalize_credential_action_policy(
+                request.allowed_actions,
+                request.approval_required_actions,
+            )
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        credential_payload["allowed_actions"] = allowed_actions
+        credential_payload["approval_required_actions"] = approval_required_actions
         verifier, challenge = build_pkce_pair()
         state = db.create_oauth_state(
             user_id=user.id,
             provider=provider.id,
             pkce_verifier=verifier,
-            credential_payload=request.model_dump(exclude={"provider"}),
+            credential_payload=credential_payload,
         )
         redirect_uri = str(http_request.url_for("oauth_callback", provider=provider.id))
         try:
@@ -580,15 +718,26 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/tasks", status_code=201)
     def create_task(request: CreateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.create_task(request.model_dump())
+            return db.create_task(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/tasks/{task_id}")
+    def update_task(task_id: str, request: UpdateTaskRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return db.update_task(task_id, request.model_dump(exclude_unset=True), actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/tasks/{task_id}/status")
     def update_task_status(task_id: str, request: UpdateTaskStatusRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.update_task_status(task_id, request.status)
-        except StoreError as exc:
+            return db.update_task_status(task_id, request.status, actor_id=user.id)
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/tasks/{task_id}/run", status_code=201)
@@ -605,7 +754,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/tasks/{task_id}/heartbeats", status_code=201)
     def record_heartbeat(task_id: str, request: HeartbeatRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.record_heartbeat(task_id, request.agent_id, request.note)
+            return db.record_heartbeat(task_id, request.agent_id, request.note, actor_id=user.id)
         except StoreValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except StoreNotFoundError as exc:
@@ -622,7 +771,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/schedules", status_code=201)
     def create_schedule(request: CreateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.create_schedule(request.model_dump())
+            return db.create_schedule(request.model_dump(), actor_id=user.id)
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -638,9 +787,33 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.post("/schedules/run-due")
     def run_due_schedules(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return {"created_tasks": db.run_due_schedules_once()}
+            return {"created_tasks": db.run_due_schedules_once(actor_id=user.id)}
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _register_declarative_config_routes(app, db, require_user)
+
+    @app.get("/runtime/overview")
+    def runtime_overview(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        scheduler = scheduler_status()
+        try:
+            overview = db.runtime_overview()
+        except Exception as exc:
+            LOGGER.warning("runtime overview unavailable: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="runtime overview unavailable") from exc
+        return {
+            "status": "degraded" if scheduler["status"] in {"error", "stopped"} else "ok",
+            "service": "hivemind",
+            "checked_at": overview["checked_at"],
+            "db": {"status": "ok"},
+            "scheduler": scheduler,
+            "counts": overview["counts"],
+            "due_schedule_ids": overview["due_schedule_ids"],
+            "stale_heartbeat_task_ids": overview["stale_heartbeat_task_ids"],
+            "due_schedules": overview["due_schedules"],
+            "stale_heartbeats": overview["stale_heartbeats"],
+            "failed_tasks": overview["failed_tasks"],
+        }
 
     @app.get("/audit-events")
     def list_audit_events(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:

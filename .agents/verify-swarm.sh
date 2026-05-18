@@ -319,7 +319,26 @@ write_stub_gh "$bin_root"
 write_stub_codex "$bin_root"
 repo_root="$(setup_case_repo "$case_root")"
 
-swarm_env bash "$repo_root/.agents/swarm.sh" start >/dev/null
+debug_status_output="$(
+  swarm_env HIVEMIND_SWARM_DEBUG=1 bash "$repo_root/.agents/swarm.sh" status worker 2>&1
+)"
+assert_text_includes "$debug_status_output" "[swarm] debug: command: status"
+assert_text_includes "$debug_status_output" "runtime root: $runtime_root"
+assert_text_includes "$debug_status_output" "worktree root: $worktree_root"
+
+stop_missing_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" stop worker 2>&1)"
+assert_text_includes "$stop_missing_output" "[swarm] warn: worker is not running"
+
+invalid_status_output=""
+if invalid_status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status --unknown-role 2>&1)"; then
+  echo "expected unknown option to fail" >&2
+  echo "$invalid_status_output" >&2
+  exit 1
+fi
+assert_text_includes "$invalid_status_output" "[swarm] error: unknown option: --unknown-role"
+
+start_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" start 2>&1)"
+assert_text_includes "$start_output" "[swarm] info: started reviewer (pid "
 
 for role in reviewer worker feature-requester scout beekeeper; do
   wait_for_file "$capture_root/$role.exec"
@@ -340,10 +359,17 @@ done
 
 assert_file_contains "$capture_root/scout.prompt" "This is the only loop allowed to use the Codex browser tool."
 assert_file_contains "$capture_root/reviewer.prompt" "Do not use the Codex browser tool in this loop."
+assert_file_contains "$capture_root/reviewer.prompt" "Audit the full open PR queue oldest-first by \`createdAt\`"
+assert_file_contains "$capture_root/reviewer.prompt" "Do not rely on a capped \`gh pr list\` result before enforcing oldest-first ordering."
+assert_file_contains "$capture_root/worker.prompt" "Configured priority labels: security, bug, help wanted."
 assert_file_contains "$capture_root/worker.prompt" "Leave merging to the beekeeper loop even if the checks are already green."
 assert_file_contains "$capture_root/worker.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
 assert_file_contains "$capture_root/feature-requester.prompt" "Do not use the Codex browser tool in this loop."
 assert_file_contains "$capture_root/beekeeper.prompt" "Do not use the Codex browser tool. Leave live browser validation to the main-branch scout agent."
+assert_file_contains "$capture_root/beekeeper.prompt" "Fetch the full open pull request queue with GitHub pagination before sorting."
+assert_file_contains "$capture_root/beekeeper.prompt" "Sort the full open PR queue oldest-first by"
+assert_file_contains "$capture_root/beekeeper.prompt" "Do not rely on a capped \`gh pr list\` result before enforcing oldest-first ordering."
+assert_file_contains "$capture_root/beekeeper.prompt" "Close irrelevant or obsolete PRs completely after confirming there is no active worker ownership."
 
 status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status)"
 for role in reviewer worker feature-requester scout beekeeper; do
@@ -368,7 +394,34 @@ follow_output="$(
 assert_text_includes "$follow_output" $'\033[36m[scout]\033[0m scout sample line'
 assert_text_includes "$follow_output" $'\033[32m[worker]\033[0m worker sample line'
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+swarm_env \
+  HIVEMIND_WORKER_PRIORITY_LABELS="bug,priority: high,help wanted" \
+  bash "$repo_root/.agents/worker-loop.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+priority_worker_pid="$!"
+
+wait_for_file "$capture_root/worker.prompt"
+wait_for_process_exit "$priority_worker_pid"
+assert_file_contains "$capture_root/worker.prompt" "Configured priority labels: bug, priority: high, help wanted."
+assert_file_contains "$capture_root/worker.prompt" "Filter eligibility first, including active branch, open PR, and worker-lane checks."
+assert_file_contains "$capture_root/worker.prompt" "Prefer eligible issues matching priority labels in the configured order before falling back to the smallest eligible open issue."
+
+rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
+
+emoji_priority_labels=$'\360\237\220\235 swarm,needs:review?,release@night'
+emoji_priority_display=$'\360\237\220\235 swarm, needs:review?, release@night.'
+
+swarm_env \
+  HIVEMIND_WORKER_PRIORITY_LABELS="$emoji_priority_labels" \
+  bash "$repo_root/.agents/worker-loop.sh" "$worktree_root/worker" >/dev/null 2>&1 &
+emoji_worker_pid="$!"
+
+wait_for_file "$capture_root/worker.prompt"
+wait_for_process_exit "$emoji_worker_pid"
+assert_file_contains "$capture_root/worker.prompt" "Configured priority labels: $emoji_priority_display"
 
 rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
 
@@ -388,7 +441,7 @@ for role in reviewer worker feature-requester scout beekeeper; do
   fi
 done
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
 
 rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
 
@@ -398,7 +451,7 @@ for role in reviewer worker feature-requester scout beekeeper; do
   wait_for_file "$capture_root/$role.exec"
 done
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
 
 rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 

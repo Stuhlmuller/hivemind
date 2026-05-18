@@ -1,6 +1,6 @@
 ---
 name: gh-address-comments
-description: Address actionable GitHub pull request review feedback. Use when the user wants to inspect unresolved review threads, requested changes, or inline review comments on a PR, then implement selected fixes. Use the GitHub app for PR metadata and flat comment reads, and use the bundled GraphQL script via `gh` whenever thread-level state, resolution status, or inline review context matters.
+description: Address actionable GitHub pull request review feedback. Use when the user wants to inspect unresolved review threads, requested changes, or inline review comments on a PR, then implement selected fixes and resolve addressed review threads after the fix is pushed. Use the GitHub app for PR metadata and flat comment reads, and use the bundled GraphQL scripts via `gh` whenever thread-level state, resolution status, or inline review context matters.
 ---
 
 # GitHub PR Comment Handler
@@ -28,12 +28,20 @@ Run all `gh` commands with elevated network access. If CLI auth is required, con
 5. Implement the selected fixes locally.
    - Keep each code change traceable back to the thread or feedback cluster it addresses.
    - If a comment calls for explanation rather than code, draft the response rather than forcing a code change.
-6. Summarize the result.
-   - List which threads were addressed, which were intentionally left open, and what tests or checks support the change.
+6. Resolve addressed review threads after pushed fixes.
+   - If the user only asked for local fixes, do not push or resolve threads.
+   - After a successful push containing the selected fixes, rerun `scripts/fetch_comments.py` to refresh thread state.
+   - Resolve only unresolved review threads that are fully addressed by the pushed commits and still map to the selected feedback. Use `python scripts/resolve_threads.py <thread-id>...` with IDs from `review_threads[].id`.
+   - Do not resolve ambiguous, partially addressed, outdated-but-unverified, informational, or top-level conversation comments. Top-level PR conversation comments do not have review-thread resolution state; draft a reply only when the user asks for one.
+   - If GitHub auth, permissions, or rate limits block resolution after the fix is pushed, say the fix was pushed but thread resolution is blocked and include the exact blocker.
+7. Summarize the result.
+   - List which threads were addressed and resolved, which were intentionally left open, and what tests or checks support the change.
 
 ## Write Safety
 
-- Do not reply on GitHub, resolve review threads, or submit a review unless the user explicitly asks for that write action.
+- Do not reply on GitHub, submit a review, push commits, or resolve unaddressed or ambiguous review threads unless the user explicitly asks for that write action.
+- When the user asks to push or publish PR comment fixes, or the active workflow already includes a push, resolving the corresponding addressed review threads after the fix is pushed is part of that requested write action.
+- Do not resolve review threads based only on unpushed local changes.
 - If review comments conflict with each other or would cause a behavioral regression, surface the tradeoff before making changes.
 - If a comment is ambiguous, ask for clarification or draft a proposed response instead of guessing.
 - Do not treat flat PR comments from a connector as a complete representation of review-thread state.
