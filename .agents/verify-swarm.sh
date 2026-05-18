@@ -319,7 +319,26 @@ write_stub_gh "$bin_root"
 write_stub_codex "$bin_root"
 repo_root="$(setup_case_repo "$case_root")"
 
-swarm_env bash "$repo_root/.agents/swarm.sh" start >/dev/null
+debug_status_output="$(
+  swarm_env HIVEMIND_SWARM_DEBUG=1 bash "$repo_root/.agents/swarm.sh" status worker 2>&1
+)"
+assert_text_includes "$debug_status_output" "[swarm] debug: command: status"
+assert_text_includes "$debug_status_output" "runtime root: $runtime_root"
+assert_text_includes "$debug_status_output" "worktree root: $worktree_root"
+
+stop_missing_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" stop worker 2>&1)"
+assert_text_includes "$stop_missing_output" "[swarm] warn: worker is not running"
+
+invalid_status_output=""
+if invalid_status_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" status --unknown-role 2>&1)"; then
+  echo "expected unknown option to fail" >&2
+  echo "$invalid_status_output" >&2
+  exit 1
+fi
+assert_text_includes "$invalid_status_output" "[swarm] error: unknown option: --unknown-role"
+
+start_output="$(swarm_env bash "$repo_root/.agents/swarm.sh" start 2>&1)"
+assert_text_includes "$start_output" "[swarm] info: started reviewer (pid "
 
 for role in reviewer worker feature-requester scout beekeeper; do
   wait_for_file "$capture_root/$role.exec"
@@ -375,7 +394,7 @@ follow_output="$(
 assert_text_includes "$follow_output" $'\033[36m[scout]\033[0m scout sample line'
 assert_text_includes "$follow_output" $'\033[32m[worker]\033[0m worker sample line'
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
 
 rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 
@@ -422,7 +441,7 @@ for role in reviewer worker feature-requester scout beekeeper; do
   fi
 done
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
 
 rm -f "$capture_root"/*.exec "$capture_root"/*.prompt "$capture_root"/*.review
 
@@ -432,7 +451,7 @@ for role in reviewer worker feature-requester scout beekeeper; do
   wait_for_file "$capture_root/$role.exec"
 done
 
-swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null
+swarm_env bash "$repo_root/.agents/swarm.sh" stop >/dev/null 2>&1
 
 rm -f "$capture_root/worker.exec" "$capture_root/worker.prompt" "$capture_root/worker.review" "$capture_root/worker.review_prompt"
 
