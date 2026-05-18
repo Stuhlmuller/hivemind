@@ -42,6 +42,9 @@ COMPACT_FORBIDDEN_METADATA_KEYS = {
     "".join(character for character in item if character.isalnum()) for item in FORBIDDEN_METADATA_KEYS
 }
 FORBIDDEN_METADATA_FRAGMENTS = ("secret", "password", "token")
+FORBIDDEN_METADATA_VALUE_MARKERS = ("authorization", "password", "secret", "token", "api_key", "api-key")
+SECRET_REF_VALUE_PREFIXES = ("env://", "file://", "oauth://", "secret://", "vault://")
+OMIT_METADATA_VALUE = object()
 EXISTING_ID_QUERIES = {
     "agents": "SELECT id FROM agents",
     "credentials": "SELECT id FROM credentials",
@@ -706,11 +709,17 @@ def _reject_secret_metadata_keys(value: Any, name: str) -> None:
             child_name = f"{name}.{key}"
             if _is_forbidden_metadata_key(key):
                 raise DeclarativeConfigError(f"{child_name} cannot contain secret material")
-            _reject_secret_metadata_keys(child, child_name)
+            _reject_secret_metadata(child, child_name)
         return
     if isinstance(value, list):
         for index, child in enumerate(value):
-            _reject_secret_metadata_keys(child, f"{name}[{index}]")
+            _reject_secret_metadata(child, f"{name}[{index}]")
+
+
+def _reject_secret_metadata(value: Any, name: str) -> None:
+    if isinstance(value, str) and _is_forbidden_metadata_value(value):
+        raise DeclarativeConfigError(f"{name} cannot contain secret material")
+    _reject_secret_metadata_keys(value, name)
 
 
 def _export_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -718,15 +727,23 @@ def _export_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     for key, value in metadata.items():
         if _is_forbidden_metadata_key(key):
             continue
-        safe[key] = _export_metadata_value(value)
+        exported = _export_metadata_value(value)
+        if exported is not OMIT_METADATA_VALUE:
+            safe[key] = exported
     return safe
 
 
 def _export_metadata_value(value: Any) -> Any:
+    if isinstance(value, str) and _is_forbidden_metadata_value(value):
+        return OMIT_METADATA_VALUE
     if isinstance(value, Mapping):
         return _export_metadata(value)
     if isinstance(value, list):
-        return [_export_metadata_value(item) for item in value]
+        return [
+            exported
+            for item in value
+            if (exported := _export_metadata_value(item)) is not OMIT_METADATA_VALUE
+        ]
     return value
 
 
@@ -736,6 +753,15 @@ def _is_forbidden_metadata_key(key: object) -> bool:
     if key_name in FORBIDDEN_METADATA_KEYS or compact_key in COMPACT_FORBIDDEN_METADATA_KEYS:
         return True
     return any(fragment in compact_key for fragment in FORBIDDEN_METADATA_FRAGMENTS)
+
+
+def _is_forbidden_metadata_value(value: str) -> bool:
+    normalized = value.lower()
+    return (
+        any(prefix in normalized for prefix in SECRET_REF_VALUE_PREFIXES)
+        or "bearer " in normalized
+        or any(f"{marker}=" in normalized or f"{marker}:" in normalized for marker in FORBIDDEN_METADATA_VALUE_MARKERS)
+    )
 
 
 def _existing_ids(conn: sqlite3.Connection, table: str) -> set[str]:
