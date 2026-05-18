@@ -113,8 +113,9 @@ to the Nix dev shell.
 
 There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
-The setup form starts blank and requires an operator-entered password. After
-setup completes, use the same username and password on the login screen.
+The setup form starts blank and requires an operator-entered password with at
+least 12 non-whitespace characters. After setup completes, use the same
+username and password on the login screen.
 
 To start over during local development, stop the dev server and point
 `HIVEMIND_DB_PATH` at a new file before restarting. The dev shell and the
