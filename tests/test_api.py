@@ -768,6 +768,26 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     require_equal(credential_events[1]["decision"], "allowed", "successful broker use audit should be marked allowed")
 
 
+def test_unknown_lease_agent_is_rejected(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": "agent_missing",
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+            "ttl_seconds": 30,
+        },
+    )
+
+    require_equal(response.status_code, 403, "unknown lease agent should be rejected")
+    require_equal(response.json()["detail"], "unknown agent: agent_missing", "lease rejection should explain the missing agent")
+
+
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
     store = HivemindStore(
@@ -1170,7 +1190,6 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
     setup(client)
-    allowed_agent = client.get("/agents").json()[0]
     denied_agent = client.post(
         "/agents",
         json={
@@ -1187,8 +1206,8 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
             "name": "Repo reader",
             "provider": "github",
             "secret_ref": "env://GITHUB_TOKEN",
-            "allowed_agents": [allowed_agent["id"]],
-            "allowed_actions": ["read_repo"],
+            "allowed_agents": [denied_agent["id"]],
+            "allowed_actions": ["write_repo"],
         },
     ).json()
     task = client.post(
@@ -1208,7 +1227,7 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
     audit_events = client.get("/audit-events").json()
 
     require_equal(response.status_code, 403, "credential policy denial should fail closed before provider execution")
-    require_equal(response.json()["detail"], "agent is not allowed to use this credential", "denial reason should match policy")
+    require_equal(response.json()["detail"], "action is outside this credential policy", "denial reason should match policy")
     require_equal(adapter.requests, [], "provider adapter should not receive policy-denied credential tool requests")
     require_equal(updated_task["status"], "failed", "policy-denied provider task should be marked failed")
     require_true(
@@ -1385,8 +1404,8 @@ def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Pat
             )
             require_equal(
                 setup_store.get_agent(agent["id"])["status"],
-                "working",
-                "agent should stay working while another assigned task is running",
+                "running",
+                "agent should stay running while another assigned task is running",
             )
         finally:
             adapter.release_slow.set()
@@ -1400,6 +1419,43 @@ def test_agent_stays_working_until_same_agent_running_tasks_finish(tmp_path: Pat
         setup_store.get_agent(agent["id"])["status"],
         "idle",
         "agent should become idle after all runs finish",
+    )
+
+
+def test_task_completion_preserves_manual_agent_status(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    db_path = tmp_path / "manual-agent-status.db"
+    setup_store = HivemindStore(db_path, config=HivemindConfig.from_env())
+    agent = setup_store.create_agent(
+        {
+            "name": "Provider runner",
+            "role": "run a task while an operator updates status",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+        }
+    )
+    create_provider_credential(setup_store, agent["id"])
+    task = setup_store.create_task(
+        {
+            "title": "Blocked provider execution",
+            "description": "This task pauses long enough for a manual lifecycle update.",
+            "assigned_agent_id": agent["id"],
+        }
+    )
+    adapter = BlockingAgentProviderAdapter(task["id"])
+    runner = HivemindStore(db_path, config=HivemindConfig.from_env(), agent_provider_adapters={"openrouter": adapter})
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(runner.run_task, task["id"])
+        adapter.started.wait(timeout=5)
+        setup_store.update_agent_status(agent["id"], "blocked", actor_id="operator")
+        adapter.release_slow.set()
+        require_equal(result.result(timeout=5)["task_id"], task["id"], "task should finish after manual status update")
+
+    require_equal(
+        setup_store.get_agent(agent["id"])["status"],
+        "blocked",
+        "task completion should not overwrite a manual non-running lifecycle state",
     )
 
 
@@ -1619,16 +1675,380 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
         },
     )
 
-    assert response.status_code == 201
+    require_equal(response.status_code, 201, "GitHub App credential creation should succeed")
     credential = response.json()
-    assert credential["provider"] == "github"
-    assert credential["metadata"]["credential_kind"] == "github_app"
-    assert credential["metadata"]["app_id"] == "123456"
-    assert credential["metadata"]["installation_id"] == "987654321"
-    assert credential["policy"]["allowed_agents"] == [agent["id"]]
-    assert credential["policy"]["approval_required_actions"] == []
-    assert credential["secret_ref_preview"].startswith("file://")
-    assert "github-app.pem" not in response.text
+    require_equal(credential["provider"], "github", "GitHub App credential should use the github provider")
+    require_equal(credential["metadata"]["credential_kind"], "github_app", "credential kind should identify GitHub App")
+    require_equal(credential["metadata"]["app_id"], "123456", "app id metadata should persist")
+    require_equal(credential["metadata"]["installation_id"], "987654321", "installation id metadata should persist")
+    require_equal(credential["policy"]["allowed_agents"], [agent["id"]], "GitHub App policy should preserve agent scope")
+    require_equal(credential["policy"]["approval_required_actions"], [], "GitHub App policy should default to no approvals")
+    require_true(credential["secret_ref_preview"].startswith("file://"), "public view should expose only the ref scheme")
+    require_true("github-app.pem" not in response.text, "public response should redact the private key path")
+
+
+def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    require_equal(create_response.status_code, 201, "agent creation should succeed")
+    agent = create_response.json()
+    require_equal(agent["status"], "idle", "new agents should start idle")
+    require_equal(agent["assigned_task_count"], 0, "new agents should have no assigned tasks")
+    require_equal(agent["assigned_schedule_count"], 0, "new agents should have no assigned schedules")
+    require_equal(agent["credential_policy_count"], 0, "new agents should have no credential policies")
+    require_equal(agent["assigned_tasks"], [], "new agents should have no task rollups")
+    require_equal(agent["assigned_schedules"], [], "new agents should have no schedule rollups")
+    require_equal(agent["credential_policies"], [], "new agents should have no credential policy rollups")
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(credential_response.status_code, 201, "credential creation should succeed before restart")
+    credential = credential_response.json()
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Inspect repo state",
+            "description": "Check the assigned issue branch and report the next action.",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(task_response.status_code, 201, "task creation should succeed before restart")
+    task = task_response.json()
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Hourly repo scan",
+            "interval_seconds": 60,
+            "task_title": "Scheduled repo scan",
+            "assigned_agent_id": agent["id"],
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed before restart")
+    schedule = schedule_response.json()
+
+    status_response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "running"},
+    )
+    require_equal(status_response.status_code, 200, "agent status update should succeed")
+    updated = status_response.json()
+    require_equal(updated["status"], "running", "status update should mark the agent running")
+    require_equal(updated["assigned_task_count"], 1, "agent should report one assigned task")
+    require_equal(updated["active_task_count"], 1, "running agent should report one active task")
+    require_equal(updated["assigned_schedule_count"], 1, "agent should report one assigned schedule")
+    require_equal(updated["credential_policy_count"], 1, "agent should report one credential policy")
+    require_equal(updated["assigned_tasks"], [
+        {
+            "id": task["id"],
+            "title": "Inspect repo state",
+            "status": "queued",
+            "priority": "normal",
+            "updated_at": task["updated_at"],
+        }
+    ], "agent task rollups should include assigned task details")
+    require_equal(updated["assigned_schedules"], [
+        {
+            "id": schedule["id"],
+            "name": "Hourly repo scan",
+            "enabled": True,
+            "interval_seconds": 60,
+            "next_run_at": schedule["next_run_at"],
+            "task_title": "Scheduled repo scan",
+        }
+    ], "agent schedule rollups should include assigned schedule details")
+    require_equal(updated["credential_policies"], [
+        {
+            "id": credential["id"],
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+        }
+    ], "agent credential rollups should include scoped credential policy details")
+
+    listed_agents = {item["id"]: item for item in client.get("/agents").json()}
+    require_equal(listed_agents[agent["id"]]["status"], "running", "agent list should preserve updated status")
+    require_equal(listed_agents[agent["id"]]["assigned_task_count"], 1, "agent list should include task rollup counts")
+
+
+def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.patch("/agents/agent_missing/status", json={"status": "blocked"})
+
+    require_equal(response.status_code, 404, "unknown agent status updates should return 404")
+    require_equal(response.json()["detail"], "unknown agent: agent_missing", "unknown agent response should name the missing id")
+
+
+def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    require_equal(create_response.status_code, 201, "agent creation should succeed before alias update")
+    agent = create_response.json()
+
+    response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "working"},
+    )
+
+    require_equal(response.status_code, 200, "legacy working status alias should be accepted")
+    require_equal(response.json()["status"], "running", "legacy working status should normalize to running")
+
+
+def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    create_response = client.post(
+        "/agents",
+        json={
+            "name": "Operator",
+            "role": "Own the next swarm task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    )
+    require_equal(create_response.status_code, 201, "agent creation should succeed before restart")
+    agent = create_response.json()
+
+    credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(credential_response.status_code, 201, "credential creation should succeed before restart")
+    credential = credential_response.json()
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Inspect repo state",
+            "description": "Check the assigned issue branch and report the next action.",
+            "assigned_agent_id": agent["id"],
+            "heartbeat_seconds": 60,
+        },
+    )
+    require_equal(task_response.status_code, 201, "task creation should succeed before restart")
+    task = task_response.json()
+
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Hourly repo scan",
+            "interval_seconds": 60,
+            "task_title": "Scheduled repo scan",
+            "assigned_agent_id": agent["id"],
+        },
+    )
+    require_equal(schedule_response.status_code, 201, "schedule creation should succeed before restart")
+    schedule = schedule_response.json()
+
+    update_response = client.patch(
+        f"/agents/{agent['id']}/status",
+        json={"status": "running"},
+    )
+    require_equal(update_response.status_code, 200, "agent status update should succeed before restart")
+
+    restarted_client = client_for(tmp_path)
+    login_response = restarted_client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    require_equal(login_response.status_code, 200, "login should succeed after restart")
+
+    agents = {item["id"]: item for item in restarted_client.get("/agents").json()}
+    require_equal(agents[agent["id"]]["name"], "Operator", "agent name should persist across restart")
+    require_equal(agents[agent["id"]]["status"], "running", "agent status should persist across restart")
+    require_equal(agents[agent["id"]]["assigned_task_count"], 1, "assigned task count should persist across restart")
+    require_equal(agents[agent["id"]]["active_task_count"], 1, "active task count should persist across restart")
+    require_equal(agents[agent["id"]]["assigned_schedule_count"], 1, "assigned schedule count should persist across restart")
+    require_equal(agents[agent["id"]]["credential_policy_count"], 1, "credential policy count should persist across restart")
+    require_equal(
+        agents[agent["id"]]["assigned_tasks"],
+        [
+        {
+            "id": task["id"],
+            "title": "Inspect repo state",
+            "status": "queued",
+            "priority": "normal",
+            "updated_at": task["updated_at"],
+        }
+        ],
+        "assigned task rollups should persist across restart",
+    )
+    require_equal(
+        agents[agent["id"]]["assigned_schedules"],
+        [
+        {
+            "id": schedule["id"],
+            "name": "Hourly repo scan",
+            "enabled": True,
+            "interval_seconds": 60,
+            "next_run_at": schedule["next_run_at"],
+            "task_title": "Scheduled repo scan",
+        }
+        ],
+        "assigned schedule rollups should persist across restart",
+    )
+    require_equal(
+        agents[agent["id"]]["credential_policies"],
+        [
+        {
+            "id": credential["id"],
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+        }
+        ],
+        "credential policy rollups should persist across restart",
+    )
+
+
+def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": ["agent_missing"],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+
+    require_equal(response.status_code, 400, "unknown credential agent should be rejected")
+    require_equal(
+        response.json()["detail"],
+        "allowed_agents references unknown agent: agent_missing",
+        "credential agent validation should name the missing id",
+    )
+
+
+def test_oauth_credential_rejects_unknown_allowed_agent_on_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_AUTHORIZE_URL", "https://auth.example.test/oauth/authorize")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_TOKEN_URL", "https://auth.example.test/oauth/token")
+    monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
+
+    class FakeTokenResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_token": "access-secret-token",
+                "refresh_token": "refresh-secret-token",
+                "scope": "openid offline_access",
+                "expires_in": 1800,
+                "token_type": "Bearer",
+            }
+
+    def fake_post(url: str, *, data: dict[str, str], headers: dict[str, str], timeout: float) -> FakeTokenResponse:
+        return FakeTokenResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    client = client_for(tmp_path)
+    setup(client)
+
+    start_response = client.post(
+        "/oauth/credentials/start",
+        json={
+            "provider": "codex",
+            "name": "codex subscription",
+            "allowed_agents": ["agent_missing"],
+            "allowed_actions": ["delegate_code"],
+            "max_ttl_seconds": 900,
+            "require_intent": True,
+        },
+    )
+    require_equal(start_response.status_code, 201, "oauth credential start should succeed before callback validation")
+    authorize_url = start_response.json()["authorize_url"]
+    query = parse_qs(urlparse(authorize_url).query)
+
+    callback_response = client.get(
+        f"/oauth/callback/codex?state={query['state'][0]}&code=broker-code",
+        follow_redirects=False,
+    )
+
+    require_equal(callback_response.status_code, 303, "oauth callback should redirect after rejecting an unknown allowed agent")
+    redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
+    require_equal(redirect_params["oauth"], ["error"], "oauth callback should report an error status")
+    require_equal(
+        redirect_params["detail"],
+        ["allowed_agents references unknown agent: agent_missing"],
+        "oauth callback should explain the unknown allowed agent",
+    )
+    audit_events = client.get("/audit-events").json()
+    require_equal(audit_events[0]["type"], "credential.oauth.failed", "oauth failure should be audited")
+    require_equal(
+        audit_events[0]["reason"],
+        "allowed_agents references unknown agent: agent_missing",
+        "oauth audit reason should explain the unknown allowed agent",
+    )
+    credentials = client.get("/credentials").json()
+    require_true(
+        all(item["provider"] != "codex" for item in credentials),
+        "oauth callback should not create a codex credential for an unknown allowed agent",
+    )
 
 
 def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -> None:
@@ -1876,6 +2296,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
                 "system_prompt": "Respond briefly.",
             },
         ),
+        ("PATCH", "/agents/agent_demo/status", {"status": "running"}),
         ("GET", "/credentials", None),
         (
             "POST",
@@ -3498,6 +3919,18 @@ def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
+    agents = client.get("/agents").json()
+    primary_agent = agents[0]
+    secondary_agent = client.post(
+        "/agents",
+        json={
+            "name": "Mismatched heartbeat worker",
+            "role": "Try to post a heartbeat onto the wrong task.",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": "Report only the next concrete action.",
+        },
+    ).json()
     credential = client.get("/credentials").json()[0]
 
     bad_task_agent = client.post(
@@ -3507,8 +3940,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "assigned_agent_id": "agent_missing",
         },
     )
-    assert bad_task_agent.status_code == 400
-    assert bad_task_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+    require_equal(bad_task_agent.status_code, 400, "unknown task agent should be rejected")
+    require_equal(
+        bad_task_agent.json()["detail"],
+        "assigned_agent_id references unknown agent: agent_missing",
+        "task agent rejection should explain the missing reference",
+    )
 
     bad_task_credential = client.post(
         "/tasks",
@@ -3517,8 +3954,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "credential_id": "cred_missing",
         },
     )
-    assert bad_task_credential.status_code == 400
-    assert bad_task_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+    require_equal(bad_task_credential.status_code, 400, "unknown task credential should be rejected")
+    require_equal(
+        bad_task_credential.json()["detail"],
+        "credential_id references unknown credential: cred_missing",
+        "task credential rejection should explain the missing reference",
+    )
 
     bad_schedule_agent = client.post(
         "/schedules",
@@ -3529,8 +3970,12 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "assigned_agent_id": "agent_missing",
         },
     )
-    assert bad_schedule_agent.status_code == 400
-    assert bad_schedule_agent.json()["detail"] == "assigned_agent_id references unknown agent: agent_missing"
+    require_equal(bad_schedule_agent.status_code, 400, "unknown schedule agent should be rejected")
+    require_equal(
+        bad_schedule_agent.json()["detail"],
+        "assigned_agent_id references unknown agent: agent_missing",
+        "schedule agent rejection should explain the missing reference",
+    )
 
     bad_schedule_credential = client.post(
         "/schedules",
@@ -3541,13 +3986,85 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
             "credential_id": "cred_missing",
         },
     )
-    assert bad_schedule_credential.status_code == 400
-    assert bad_schedule_credential.json()["detail"] == "credential_id references unknown credential: cred_missing"
+    require_equal(bad_schedule_credential.status_code, 400, "unknown schedule credential should be rejected")
+    require_equal(
+        bad_schedule_credential.json()["detail"],
+        "credential_id references unknown credential: cred_missing",
+        "schedule credential rejection should explain the missing reference",
+    )
+
+    scoped_credential_response = client.post(
+        "/credentials",
+        json={
+            "name": "Scoped Repo Reader",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_DEMO_GITHUB_TOKEN",
+            "allowed_agents": [primary_agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {"credential_kind": "generic_reference"},
+        },
+    )
+    require_equal(scoped_credential_response.status_code, 201, "scoped credential should be created for the allowed primary agent")
+    scoped_credential = scoped_credential_response.json()
+
+    bad_task_binding = client.post(
+        "/tasks",
+        json={
+            "title": "Forbidden credential binding",
+            "assigned_agent_id": secondary_agent["id"],
+            "credential_id": scoped_credential["id"],
+        },
+    )
+    require_equal(bad_task_binding.status_code, 400, "task agent/credential policy mismatch should be rejected")
+    require_equal(
+        bad_task_binding.json()["detail"],
+        f"assigned_agent_id is not allowed to use credential {scoped_credential['id']}: {secondary_agent['id']}",
+        "task agent/credential rejection should explain the disallowed binding",
+    )
+
+    allowed_task = client.post(
+        "/tasks",
+        json={
+            "title": "Allowed credential binding",
+            "assigned_agent_id": primary_agent["id"],
+            "credential_id": scoped_credential["id"],
+        },
+    ).json()
+    bad_task_update_binding = client.patch(
+        f"/tasks/{allowed_task['id']}",
+        json={"assigned_agent_id": secondary_agent["id"]},
+    )
+    require_equal(bad_task_update_binding.status_code, 400, "task updates should preserve credential agent scope")
+    require_equal(
+        bad_task_update_binding.json()["detail"],
+        f"assigned_agent_id is not allowed to use credential {scoped_credential['id']}: {secondary_agent['id']}",
+        "task update binding rejection should explain the disallowed agent",
+    )
+
+    bad_schedule_binding = client.post(
+        "/schedules",
+        json={
+            "name": "Forbidden schedule credential binding",
+            "interval_seconds": 60,
+            "task_title": "Scheduled forbidden binding",
+            "assigned_agent_id": secondary_agent["id"],
+            "credential_id": scoped_credential["id"],
+        },
+    )
+    require_equal(bad_schedule_binding.status_code, 400, "schedule agent/credential policy mismatch should be rejected")
+    require_equal(
+        bad_schedule_binding.json()["detail"],
+        f"assigned_agent_id is not allowed to use credential {scoped_credential['id']}: {secondary_agent['id']}",
+        "schedule agent/credential rejection should explain the disallowed binding",
+    )
 
     task = client.post(
         "/tasks",
         json={
             "title": "Heartbeat target",
+            "assigned_agent_id": primary_agent["id"],
             "credential_id": credential["id"],
         },
     ).json()
@@ -3555,8 +4072,23 @@ def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -
         f"/tasks/{task['id']}/heartbeats",
         json={"agent_id": "agent_missing", "note": "still working"},
     )
-    assert bad_heartbeat_agent.status_code == 400
-    assert bad_heartbeat_agent.json()["detail"] == "agent_id references unknown agent: agent_missing"
+    require_equal(bad_heartbeat_agent.status_code, 400, "unknown heartbeat agent should be rejected")
+    require_equal(
+        bad_heartbeat_agent.json()["detail"],
+        "agent_id references unknown agent: agent_missing",
+        "heartbeat rejection should explain the missing agent reference",
+    )
+
+    mismatched_heartbeat_agent = client.post(
+        f"/tasks/{task['id']}/heartbeats",
+        json={"agent_id": secondary_agent["id"], "note": "still working"},
+    )
+    require_equal(mismatched_heartbeat_agent.status_code, 400, "mismatched heartbeat agent should be rejected")
+    require_equal(
+        mismatched_heartbeat_agent.json()["detail"],
+        f"agent_id does not match assigned agent for task {task['id']}: {secondary_agent['id']}",
+        "heartbeat rejection should explain the assigned-agent mismatch",
+    )
 
 
 def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None:

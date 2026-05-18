@@ -184,6 +184,8 @@ const PAGE_META = {
   credentials: "credential broker / policies, leases, audit",
 };
 
+const agentStatuses = ["idle", "queued", "running", "blocked", "done", "failed"];
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -435,16 +437,17 @@ function item(title, meta, pills = [], actions = "") {
   return `<article class="item"><strong>${escapeHtml(title)}</strong><div class="meta">${meta}</div>${pillMarkup}${actions}</article>`;
 }
 
-function optionList(items, labelKey = "name", includeEmpty = false) {
-  return optionListWithSelected(items, null, labelKey, includeEmpty);
+function optionList(items, labelKey = "name", includeEmpty = false, includeId = false) {
+  return optionListWithSelected(items, null, labelKey, includeEmpty, includeId);
 }
 
-function optionListWithSelected(items, selectedValue, labelKey = "name", includeEmpty = false) {
+function optionListWithSelected(items, selectedValue, labelKey = "name", includeEmpty = false, includeId = false) {
   const emptySelected = selectedValue === null || selectedValue === undefined || selectedValue === "";
   const empty = includeEmpty ? `<option value=""${emptySelected ? " selected" : ""}>None</option>` : "";
   return empty + items.map((item) => {
     const selected = selectedValue === item.id ? " selected" : "";
-    return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(item[labelKey])}</option>`;
+    const label = includeId ? `${item[labelKey]} (${item.id})` : item[labelKey];
+    return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(label)}</option>`;
   }).join("");
 }
 
@@ -475,6 +478,30 @@ function credentialName(credentialId) {
 function agentName(agentId) {
   const agent = state.agents.find((item) => item.id === agentId);
   return agent ? agent.name : agentId;
+}
+
+function agentTaskSummary(agent) {
+  const assignedTasks = agent.assigned_tasks || [];
+  if (!assignedTasks.length) return "none";
+  return assignedTasks
+    .map((task) => `${escapeHtml(task.title)} [${escapeHtml(task.status)}]`)
+    .join("<br>");
+}
+
+function agentScheduleSummary(agent) {
+  const assignedSchedules = agent.assigned_schedules || [];
+  if (!assignedSchedules.length) return "none";
+  return assignedSchedules
+    .map((schedule) => `${escapeHtml(schedule.name)} -> ${escapeHtml(schedule.task_title)}`)
+    .join("<br>");
+}
+
+function agentPolicySummary(agent) {
+  const credentialPolicies = agent.credential_policies || [];
+  if (!credentialPolicies.length) return "none";
+  return credentialPolicies
+    .map((policy) => `${escapeHtml(policy.name)} [${escapeHtml(policy.allowed_actions.join(", "))}]`)
+    .join("<br>");
 }
 
 function taskAssignmentLabel(task) {
@@ -682,10 +709,14 @@ function renderSelectors() {
     '#lease-form select[name="agent_id"]',
     '#credential-form select[name="allowed_agents"]',
     '#oauth-credential-form select[name="allowed_agents"]',
+  ]) {
+    $(selector).innerHTML = optionList(state.agents, "name", false, true);
+  }
+  for (const selector of [
     '#task-form select[name="assigned_agent_id"]',
     '#schedule-form select[name="assigned_agent_id"]',
   ]) {
-    $(selector).innerHTML = optionList(state.agents);
+    $(selector).innerHTML = optionList(state.agents, "name", true, true);
   }
   for (const selector of [
     '#lease-form select[name="credential_id"]',
@@ -704,13 +735,29 @@ function renderAgents() {
   setText("#agents-blocked-count", statusCount(state.agents, "blocked"));
   setText("#nav-agents-count", state.agents.length);
   $("#agents-list").innerHTML = state.agents
-    .map((agent) =>
-      item(
+    .map((agent) => {
+      const actions = `
+        <div class="button-row">
+          ${agentStatuses
+            .map(
+              (status) =>
+                `<button data-agent-status="${escapeHtml(agent.id)}" data-status="${escapeHtml(status)}" type="button"${agent.status === status ? " disabled" : ""}>${escapeHtml(status)}</button>`,
+            )
+            .join("")}
+        </div>`;
+      return item(
         agent.name,
-        `${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Prompt: ${escapeHtml(agent.system_prompt || "none")}`,
-        [agent.status, agent.provider, agent.model],
-      ),
-    )
+        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Prompt: ${escapeHtml(agent.system_prompt || "none")}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
+        [
+          agent.status,
+          agent.provider,
+          agent.model,
+          `${agent.assigned_task_count} tasks`,
+          `${agent.credential_policy_count} policies`,
+        ],
+        actions,
+      );
+    })
     .join("") || '<p class="meta">No agents yet.</p>';
 }
 
@@ -1115,6 +1162,23 @@ $("#spawn-form").addEventListener("submit", async (event) => {
   await api("/agents", { method: "POST", body: JSON.stringify(readForm(event.currentTarget)) });
   await refresh();
   toast("Agent registered.");
+});
+
+$("#agents-list").addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest("[data-agent-status]");
+  if (!(button instanceof HTMLButtonElement)) return;
+  try {
+    await api(`/agents/${button.dataset.agentStatus}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: button.dataset.status }),
+    });
+    await refresh();
+    toast(`Agent marked ${button.dataset.status}.`);
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 $("#credential-form").addEventListener("submit", async (event) => {
