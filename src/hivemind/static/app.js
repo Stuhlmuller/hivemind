@@ -1010,17 +1010,24 @@ async function refresh() {
     render();
     return;
   }
-  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = await Promise.all([
-    api("/config"),
-    api("/agents"),
-    api("/credentials"),
-    api("/oauth/providers"),
-    api("/credential-leases"),
-    api("/tasks"),
-    api("/schedules"),
-    api("/heartbeats"),
-    api("/audit-events"),
-  ]);
+  let runtimePayload;
+  try {
+    runtimePayload = await Promise.all([
+      api("/config"),
+      api("/agents"),
+      api("/credentials"),
+      api("/oauth/providers"),
+      api("/credential-leases"),
+      api("/tasks"),
+      api("/schedules"),
+      api("/heartbeats"),
+      api("/audit-events"),
+    ]);
+  } catch (error) {
+    render();
+    throw error;
+  }
+  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = runtimePayload;
   Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents });
   render();
   consumeOAuthStatus();

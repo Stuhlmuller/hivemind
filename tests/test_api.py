@@ -385,6 +385,18 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "state.setupKnown = false;" not in response.text,
         "frontend should not collapse loaded sessions into boot mode after transient setup-state failures",
     )
+    require_true(
+        "let runtimePayload;" in response.text,
+        "frontend should stage runtime API results before replacing loaded state",
+    )
+    require_true(
+        "runtimePayload = await Promise.all" in response.text,
+        "frontend should treat runtime API loading as a recoverable batch",
+    )
+    require_true(
+        "const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents] = runtimePayload" in response.text,
+        "frontend should render a recoverable shell if runtime data loading fails",
+    )
     require_true("function validateAuthPayload" in response.text, "frontend should validate auth form state")
     require_true("admin password must include at least 12 non-whitespace characters" in response.text, "frontend should reject blank setup passwords")
     require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")
