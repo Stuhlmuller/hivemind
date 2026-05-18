@@ -6,6 +6,8 @@ from enum import StrEnum
 from secrets import token_urlsafe
 from typing import Any
 
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
+
 
 class LeaseStatus(StrEnum):
     PENDING = "pending"
@@ -85,6 +87,12 @@ class CredentialPolicy:
     approval_required_actions: frozenset[str] = field(default_factory=frozenset)
     max_ttl_seconds: int = 300
     require_intent: bool = True
+    agent_lease_limit: int | None = None
+    credential_lease_limit: int | None = None
+    credential_action_limit: int | None = None
+    rate_limit_window_seconds: int = DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+    provider_token_budget: int | None = None
+    provider_cost_budget_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,12 @@ class CredentialRecord:
                 "approval_required_actions": sorted(self.policy.approval_required_actions),
                 "max_ttl_seconds": self.policy.max_ttl_seconds,
                 "require_intent": self.policy.require_intent,
+                "agent_lease_limit": self.policy.agent_lease_limit,
+                "credential_lease_limit": self.policy.credential_lease_limit,
+                "credential_action_limit": self.policy.credential_action_limit,
+                "rate_limit_window_seconds": self.policy.rate_limit_window_seconds,
+                "provider_token_budget": self.policy.provider_token_budget,
+                "provider_cost_budget_cents": self.policy.provider_cost_budget_cents,
             },
             "metadata": self.metadata,
         }

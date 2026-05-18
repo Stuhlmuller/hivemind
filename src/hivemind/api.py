@@ -170,6 +170,12 @@ class CreateCredentialRequest(BaseModel):
     approval_required_actions: list[str] = Field(default_factory=list)
     max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     require_intent: bool = True
+    agent_lease_limit: int | None = Field(default=None, ge=1)
+    credential_lease_limit: int | None = Field(default=None, ge=1)
+    credential_action_limit: int | None = Field(default=None, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=86_400)
+    provider_token_budget: int | None = Field(default=None, ge=1)
+    provider_cost_budget_cents: int | None = Field(default=None, ge=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -181,6 +187,12 @@ class StartOAuthCredentialRequest(BaseModel):
     approval_required_actions: list[str] = Field(default_factory=list)
     max_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     require_intent: bool = True
+    agent_lease_limit: int | None = Field(default=None, ge=1)
+    credential_lease_limit: int | None = Field(default=None, ge=1)
+    credential_action_limit: int | None = Field(default=None, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=86_400)
+    provider_token_budget: int | None = Field(default=None, ge=1)
+    provider_cost_budget_cents: int | None = Field(default=None, ge=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

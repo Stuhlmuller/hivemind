@@ -463,14 +463,16 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
 
     response = client.get("/control/credentials")
 
-    assert response.status_code == 200  # nosec B101
-    assert 'data-page-link="credentials"' in response.text  # nosec B101
-    assert "credential broker" in response.text  # nosec B101
-    assert 'id="credential-template-picker"' in response.text  # nosec B101
-    assert 'id="credential-template-fields"' in response.text  # nosec B101
-    assert 'id="tool-actions-list"' in response.text  # nosec B101
-    assert 'name="approval_required_actions"' in response.text  # nosec B101
-    assert 'id="pending-approvals-list"' in response.text  # nosec B101
+    require_equal(response.status_code, 200, "credentials route should be served")
+    require_true('data-page-link="credentials"' in response.text, "credentials nav link should be present")
+    require_true("credential broker" in response.text, "credential page heading should be present")
+    require_true('id="credential-template-picker"' in response.text, "credential template picker should be present")
+    require_true('id="credential-template-fields"' in response.text, "credential template fields should be present")
+    require_true('id="tool-actions-list"' in response.text, "tool action list should be present")
+    require_true('name="approval_required_actions"' in response.text, "approval policy field should be present")
+    require_true('name="agent_lease_limit"' in response.text, "agent lease limit field should be present")
+    require_true('name="credential_action_limit"' in response.text, "action limit field should be present")
+    require_true('id="pending-approvals-list"' in response.text, "pending approvals list should be present")
 
 
 def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
@@ -1337,6 +1339,283 @@ def test_tasks_and_schedules_reject_unregistered_tool_actions(tmp_path: Path) ->
     require_equal(schedule_response.json()["detail"], "action references unknown tool action: delete_repo", "schedule denial should name the unknown action")
 
 
+def test_credential_policy_rate_limits_are_exposed_and_enforced_for_agent_requests(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+
+    response = client.post(
+        "/credentials",
+        json={
+            "name": "Rate Limited GitHub",
+            "provider": "github",
+            "secret_ref": "env://RATE_LIMITED_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "agent_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+            "provider_token_budget": 2000,
+            "provider_cost_budget_cents": 75,
+        },
+    )
+    require_equal(response.status_code, 201, "rate-limited credential should be created")
+    credential = response.json()
+    require_equal(credential["policy"]["agent_lease_limit"], 1, "agent lease limit should be exposed")
+    require_equal(credential["policy"]["rate_limit_window_seconds"], 300, "rate window should be exposed")
+    require_equal(credential["policy"]["provider_token_budget"], 2000, "token budget placeholder should be exposed")
+    require_equal(credential["policy"]["provider_cost_budget_cents"], 75, "cost budget placeholder should be exposed")
+    require_true("RATE_LIMITED_GITHUB_TOKEN" not in response.text, "credential response must redact secret refs")
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for follow-up triage.",
+        },
+    )
+
+    require_equal(first.status_code, 201, "first lease should be issued")
+    require_equal(second.status_code, 403, "agent lease rate limit should deny repeated requests")
+    require_equal(second.json()["detail"], "agent lease request rate limit exceeded", "denial reason should name the limit")
+
+    latest_audit = client.get("/audit-events").json()[0]
+    require_equal(latest_audit["type"], "credential.lease.denied", "rate-limit denial should be audited")
+    require_equal(latest_audit["metadata"]["rate_limit"], "agent_lease_limit", "audit should name the policy field")
+    require_true("RATE_LIMITED_GITHUB_TOKEN" not in str(latest_audit), "rate-limit audit must not expose secret refs")
+
+
+def test_credential_lease_limit_applies_across_agents(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    first_agent = client.get("/agents").json()[0]
+    second_agent = client.post(
+        "/agents",
+        json={"name": "Builder", "role": "request a separate lease", "provider": "local"},
+    ).json()
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Credential Lease Limited",
+            "provider": "github",
+            "secret_ref": "env://CREDENTIAL_LEASE_LIMIT_TOKEN",
+            "allowed_agents": [first_agent["id"], second_agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "credential_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": first_agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": second_agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for separate agent triage.",
+        },
+    )
+
+    require_equal(first.status_code, 201, "first credential lease should be issued")
+    require_equal(second.status_code, 403, "credential lease rate limit should apply across agents")
+    require_equal(second.json()["detail"], "credential lease request rate limit exceeded", "denial should name credential limit")
+
+
+def test_credential_lease_rate_limit_runs_before_provider_intent_review(tmp_path: Path) -> None:
+    reviewer = RecordingProviderReviewer()
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": reviewer},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Reviewed Limited Credential",
+            "provider": "github",
+            "secret_ref": "env://PROVIDER_REVIEW_LIMIT_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "agent_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe provider-backed triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for repeated provider-backed triage.",
+        },
+    )
+
+    require_equal(first.status_code, 201, "first lease should pass provider-backed review")
+    require_equal(second.status_code, 403, "second lease should be denied by rate limit")
+    require_equal(len(reviewer.requests), 1, "rate-limited requests should not spend provider review calls")
+    require_equal(second.json()["detail"], "agent lease request rate limit exceeded", "denial should name agent limit")
+
+
+def test_credential_lease_rate_limit_counts_provider_review_denials(tmp_path: Path) -> None:
+    reviewer = RecordingProviderReviewer(allowed=False, reason="provider reviewer denied the request")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig(
+            intent_reviewer=IntentReviewerConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4",
+                credential_ref="env://OPENROUTER_API_KEY",
+            )
+        ),
+        provider_reviewers={"openrouter": reviewer},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Provider Denied Limited Credential",
+            "provider": "github",
+            "secret_ref": "env://PROVIDER_DENIED_LIMIT_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "agent_lease_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+
+    first = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for provider-backed triage.",
+        },
+    )
+    second = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for repeated provider-backed triage.",
+        },
+    )
+
+    require_equal(first.status_code, 403, "first lease should be denied by provider review")
+    require_equal(
+        first.json()["detail"],
+        "openrouter intent reviewer denied the request",
+        "first denial should expose the provider decision reason",
+    )
+    require_equal(second.status_code, 403, "second lease should be denied by rate limit")
+    require_equal(
+        second.json()["detail"],
+        "agent lease request rate limit exceeded",
+        "second denial should avoid another provider review",
+    )
+    require_equal(len(reviewer.requests), 1, "provider-reviewed denials should count toward request limits")
+    latest_audit = client.get("/audit-events").json()[0]
+    require_equal(latest_audit["metadata"]["rate_limit"], "agent_lease_limit", "audit should name agent limit")
+    require_true("PROVIDER_DENIED_LIMIT_TOKEN" not in str(latest_audit), "audit must not expose secret refs")
+
+
+def test_credential_action_limit_denies_before_consuming_second_lease(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.post(
+        "/credentials",
+        json={
+            "name": "Action Limited GitHub",
+            "provider": "github",
+            "secret_ref": "env://ACTION_LIMITED_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "credential_action_limit": 1,
+            "rate_limit_window_seconds": 300,
+        },
+    ).json()
+    first_lease = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for safe task triage.",
+        },
+    ).json()
+    second_lease = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "read_repo",
+            "intent": "Read repository metadata for follow-up triage.",
+        },
+    ).json()
+
+    first_action = client.post(
+        "/credential-actions",
+        json={"lease_token": first_lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+    second_action = client.post(
+        "/credential-actions",
+        json={"lease_token": second_lease["lease_token"], "action": "read_repo", "payload": {"repo": "hivemind"}},
+    )
+
+    require_equal(first_action.status_code, 200, "first credential action should be allowed")
+    require_equal(second_action.status_code, 403, "credential action limit should deny the second action")
+    require_equal(second_action.json()["detail"], "credential action rate limit exceeded", "denial should name action limit")
+    listed_second = next(item for item in client.get("/credential-leases").json() if item["id"] == second_lease["id"])
+    require_equal(listed_second["status"], "active", "rate-limit-denied action should not consume the lease")
+
+    latest_audit = client.get("/audit-events").json()[0]
+    require_equal(latest_audit["type"], "credential.action.denied", "action rate-limit denial should be audited")
+    require_equal(latest_audit["metadata"]["rate_limit"], "credential_action_limit", "audit should name action limit")
+    require_true("ACTION_LIMITED_GITHUB_TOKEN" not in str(latest_audit), "action limit audit must not expose secret refs")
+
+
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
     reviewer = RecordingProviderReviewer(reason="openrouter reviewer approved request")
     store = HivemindStore(
@@ -1496,14 +1775,7 @@ def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None
         raise AssertionError("active lease request should issue a token")
 
     start = Barrier(3)
-    consume = Barrier(2)
-
-    class RacingStore(HivemindStore):
-        def _consume_credential_action(self, conn, lease, normalized_action, payload):
-            consume.wait(timeout=5)
-            return super()._consume_credential_action(conn, lease, normalized_action, payload)
-
-    stores = [RacingStore(db_path), RacingStore(db_path)]
+    stores = [HivemindStore(db_path), HivemindStore(db_path)]
 
     def perform(store: HivemindStore) -> tuple[str, object]:
         start.wait(timeout=5)
