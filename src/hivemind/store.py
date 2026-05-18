@@ -29,6 +29,7 @@ from hivemind.models import (
 )
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
+from hivemind.prompt_safety import SECRET_REF_TEXT_PATTERN, redact_prompt_like_text, validate_prompt_like_text
 from hivemind.providers import (
     AgentProviderAdapter,
     AgentProviderError,
@@ -483,7 +484,6 @@ SENSITIVE_PROVIDER_RESULT_KEYS = frozenset(
     }
 )
 PUBLIC_METADATA_NON_SECRET_KEYS = frozenset({"oauthtokenexpiresat"})
-SECRET_REF_TEXT_PATTERN = re.compile(r"\b(?:env|file|vault|oauth|secret)://[^\s\"'<>),\]}]+")
 
 
 def provider_redaction_values(credential_ref: str | None) -> tuple[str, ...]:
@@ -1001,6 +1001,7 @@ class HivemindStore:
                 table: [dict(row) for row in conn.execute(query)]
                 for table, query in BACKUP_TABLE_QUERIES.items()
             }
+        tables["agents"] = [self._redact_agent_prompt(row) for row in tables.get("agents", [])]
         tables = self.clear_unrestorable_credential_refs(tables)
         return {
             "format": BACKUP_FORMAT,
@@ -1059,6 +1060,13 @@ class HivemindStore:
             raise StoreValidationError(str(exc)) from exc
         return row
 
+    def validate_backup_agent_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            row["system_prompt"] = validate_prompt_like_text(str(row.get("system_prompt") or ""))
+        except ValueError as exc:
+            raise StoreValidationError(str(exc)) from exc
+        return row
+
     def validate_backup_schedule_row(self, row: dict[str, Any]) -> dict[str, Any]:
         try:
             row["next_run_at"] = iso(require_aware_utc(row["next_run_at"], field_name="next_run_at"))
@@ -1099,6 +1107,7 @@ class HivemindStore:
             raise StoreValidationError(f"backup table {table} must be a JSON array")
         allowed_columns = set(columns)
         row_validator = {
+            "agents": self.validate_backup_agent_row,
             "credentials": self.validate_backup_credential_row,
             "tool_actions": self.validate_backup_tool_action_row,
             "schedules": self.validate_backup_schedule_row,
@@ -1707,6 +1716,10 @@ class HivemindStore:
         max_subagents = int(data.get("max_subagents") or 0)
         issue_rate_limit_per_hour = int(data.get("issue_rate_limit_per_hour") or 0)
         issue_creation_enabled = bool(data.get("issue_creation_enabled", False))
+        try:
+            system_prompt = validate_prompt_like_text(data.get("system_prompt") or "")
+        except ValueError as exc:
+            raise StoreValidationError(str(exc)) from exc
         if max_subagents < 0:
             raise StoreError("max_subagents must be zero or greater")
         if issue_rate_limit_per_hour < 0:
@@ -1723,7 +1736,7 @@ class HivemindStore:
             "provider": provider,
             "model": data.get("model") or self.config.agent_provider(provider).model,
             "status": "idle",
-            "system_prompt": data.get("system_prompt") or "",
+            "system_prompt": system_prompt,
             "hive_id": hive_id,
             "can_spawn_subagents": 1 if data.get("can_spawn_subagents", False) else 0,
             "max_subagents": max_subagents,
@@ -1876,7 +1889,7 @@ class HivemindStore:
         assigned_schedules: list[dict[str, Any]],
         credential_policies: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        agent = dict(row)
+        agent = self._redact_agent_prompt(row)
         agent["status"] = AGENT_STATUS_ALIASES.get(str(agent["status"]).strip().lower(), agent["status"])
         agent["can_spawn_subagents"] = bool(agent["can_spawn_subagents"])
         agent["issue_creation_enabled"] = bool(agent["issue_creation_enabled"])
@@ -1890,6 +1903,11 @@ class HivemindStore:
         agent["assigned_tasks"] = assigned_tasks
         agent["assigned_schedules"] = assigned_schedules
         agent["credential_policies"] = credential_policies
+        return agent
+
+    def _redact_agent_prompt(self, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+        agent = dict(row)
+        agent["system_prompt"] = redact_prompt_like_text(agent.get("system_prompt"))
         return agent
 
     def _prepare_tool_action_row(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -3928,7 +3946,7 @@ class HivemindStore:
             provider=provider_id,
             model=model,
             prompt=prompt,
-            system_prompt=agent["system_prompt"],
+            system_prompt=redact_prompt_like_text(agent["system_prompt"]),
             messages=(ProviderMessage(role="user", content=prompt),),
             tool_requests=tuple(tool_requests),
             credential_id=provider_config.credential_id,

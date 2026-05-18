@@ -803,6 +803,102 @@ def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: 
     require_equal(response.json()["model"], "anthropic/claude-sonnet-4", "remote agents should use provider config model by default")
 
 
+def test_spawn_agent_rejects_secret_like_system_prompt(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    private_key_prompt = "-----BEGIN " + "PRIVATE KEY-----\nabc123\n-----END " + "PRIVATE KEY-----"
+
+    prompts = (
+        "Use env://OPENROUTER_API_KEY when calling the provider.",
+        "password = hunter2",
+        "Authorization: Bearer raw-provider-token-value",
+        private_key_prompt,
+        "sk-proj-raw-provider-token-value",
+    )
+    for index, system_prompt in enumerate(prompts):
+        response = client.post(
+            "/agents",
+            json={
+                "name": f"unsafe prompt {index}",
+                "role": "try to persist secret-like prompt material",
+                "provider": "local",
+                "model": "deterministic-policy",
+                "system_prompt": system_prompt,
+            },
+        )
+
+        require_equal(response.status_code, 400, "agent prompt creation should reject secret-like material")
+        require_true(
+            "system_prompt contains secret-like material" in response.json()["detail"],
+            "rejection should identify the unsafe prompt field",
+        )
+        require_true("OPENROUTER_API_KEY" not in response.text, "rejection should not echo credential ref targets")
+        require_true("hunter2" not in response.text, "rejection should not echo password-like values")
+        require_true("raw-provider-token" not in response.text, "rejection should not echo token-like values")
+
+
+def test_store_create_agent_rejects_secret_like_system_prompt(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+    store.setup_admin("admin", TEST_PASSWORD)
+
+    try:
+        store.create_agent(
+            {
+                "name": "Unsafe local agent",
+                "role": "try to persist raw credential material",
+                "provider": "local",
+                "model": "deterministic-policy",
+                "system_prompt": "apiKey = raw-provider-token-value",
+            }
+        )
+    except StoreError as exc:
+        require_true("system_prompt contains secret-like material" in str(exc), "store should reject unsafe prompts")
+        require_true("raw-provider-token" not in str(exc), "store error should not echo token-like values")
+    else:
+        raise AssertionError("store accepted secret-like agent prompt")
+
+
+def test_spawn_agent_allows_safe_capability_guidance_prompt(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    system_prompt = "Use brokered capabilities when a task needs credentials. Keep updates concise."
+
+    response = client.post(
+        "/agents",
+        json={
+            "name": "safe prompt",
+            "role": "request credential capabilities through policy",
+            "provider": "local",
+            "model": "deterministic-policy",
+            "system_prompt": system_prompt,
+        },
+    )
+    agents = client.get("/agents").json()
+
+    require_equal(response.status_code, 201, "safe prompt content should still be accepted")
+    require_equal(response.json()["system_prompt"], system_prompt, "safe prompt should remain visible on create")
+    require_equal(agents[0]["system_prompt"], system_prompt, "safe prompt should remain visible on list")
+
+
+def test_agents_public_responses_redact_legacy_secret_like_system_prompt(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "hivemind.db")
+    store.setup_admin("admin", TEST_PASSWORD)
+    agent = store.list_agents()[0]
+    unsafe_prompt = "Use env://OPENROUTER_API_KEY with password = hunter2."
+    with store.connect() as conn:
+        conn.execute("UPDATE agents SET system_prompt = ? WHERE id = ?", (unsafe_prompt, agent["id"]))
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    login = client.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
+
+    response = client.get("/agents")
+
+    require_equal(login.status_code, 200, "operator login should succeed")
+    require_equal(response.status_code, 200, "agents list should be returned")
+    require_equal(response.json()[0]["system_prompt"], "[redacted]", "unsafe legacy prompts should be redacted")
+    require_true("OPENROUTER_API_KEY" not in response.text, "agents response should not expose credential ref targets")
+    require_true("hunter2" not in response.text, "agents response should not expose password-like values")
+
+
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
     setup(client)
@@ -1976,6 +2072,50 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
     )
     require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
+
+
+def test_task_execution_redacts_legacy_secret_like_agent_prompts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+    monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
+    adapter = RecordingAgentProviderAdapter("openrouter")
+    store = HivemindStore(
+        tmp_path / "hivemind.db",
+        config=HivemindConfig.from_env(),
+        agent_provider_adapters={"openrouter": adapter},
+    )
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": "Legacy prompt runner",
+            "role": "run a bounded provider-backed task",
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4",
+            "system_prompt": "Keep output short.",
+        },
+    ).json()
+    unsafe_prompt = "Use file:///var/lib/hivemind/provider-token with api_key = leaked."
+    with store.connect() as conn:
+        conn.execute("UPDATE agents SET system_prompt = ? WHERE id = ?", (unsafe_prompt, agent["id"]))
+    create_provider_credential(store, agent["id"])
+    task = client.post(
+        "/tasks",
+        json={
+            "title": "Run with legacy prompt",
+            "description": "Use the provider adapter boundary.",
+            "assigned_agent_id": agent["id"],
+        },
+    ).json()
+
+    response = client.post(f"/tasks/{task['id']}/run", json={})
+
+    require_equal(response.status_code, 201, "registered provider adapter should execute the task")
+    require_true(bool(adapter.requests), "registered adapter should receive a provider run request")
+    provider_request = adapter.requests[0]
+    require_equal(provider_request.system_prompt, "[redacted]", "adapter request should redact unsafe legacy prompts")
+    require_true("provider-token" not in str(provider_request), "adapter request should not include secret refs")
+    require_true("api_key = leaked" not in str(provider_request), "adapter request should not include secret assignments")
 
 
 def test_agent_provider_credential_accepts_legacy_action_prefix(tmp_path: Path, monkeypatch) -> None:
@@ -4179,6 +4319,54 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
         audit_events[0]["metadata"]["credentials"],
         len(exported["credentials"]),
         "import audit should count credentials without naming secrets",
+    )
+
+
+def test_declarative_config_redacts_and_rejects_secret_like_agent_prompts(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    unsafe_prompt = "Use file:///var/lib/hivemind/provider-token with api_key = leaked."
+
+    store = HivemindStore(tmp_path / "hivemind.db")
+    with store.connect() as conn:
+        conn.execute("UPDATE agents SET system_prompt = ? WHERE id = ?", (unsafe_prompt, agent["id"]))
+
+    export_response = client.get("/declarative-config")
+    require_equal(export_response.status_code, 200, "declarative export should succeed")
+    exported_agent = next(item for item in export_response.json()["agents"] if item["id"] == agent["id"])
+    require_equal(exported_agent["system_prompt"], "[redacted]", "declarative export should redact unsafe prompts")
+    require_true("provider-token" not in export_response.text, "declarative export should not leak secret refs")
+    require_true("api_key = leaked" not in export_response.text, "declarative export should not leak assignments")
+
+    unsafe_config = {
+        "version": 1,
+        "agents": [
+            {
+                "id": "agent_unsafe_import",
+                "name": "Unsafe import",
+                "role": "Try to import prompt secrets.",
+                "provider": "local",
+                "model": "deterministic-policy",
+                "system_prompt": unsafe_prompt,
+            }
+        ],
+        "credentials": [],
+        "schedules": [],
+    }
+    import_response = client.post(
+        "/declarative-config/import",
+        json={"dry_run": False, "config": unsafe_config},
+    )
+    require_equal(import_response.status_code, 400, "declarative import should reject unsafe prompts")
+    require_true(
+        "agents[0].system_prompt contains secret-like material" in import_response.json()["detail"],
+        "declarative import error should identify the unsafe prompt field",
+    )
+    require_true("provider-token" not in import_response.text, "declarative import error should not echo secret refs")
+    require_true(
+        all(item["id"] != "agent_unsafe_import" for item in client.get("/agents").json()),
+        "failed declarative import should not create unsafe agents",
     )
 
 
