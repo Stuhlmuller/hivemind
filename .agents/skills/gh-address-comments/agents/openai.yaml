@@ -1,4 +1,4 @@
 interface:
   display_name: "Review Follow-up"
-  short_description: "Address actionable PR feedback"
-  default_prompt: "Review unresolved pull request feedback, implement the selected fixes, and summarize what changed."
+  short_description: "Address and resolve PR feedback"
+  default_prompt: "Use $gh-address-comments to review unresolved PR feedback, implement selected fixes, push when requested, resolve addressed review threads after the fix is pushed, and summarize the result."
