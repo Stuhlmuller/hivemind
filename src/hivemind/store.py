@@ -1833,7 +1833,7 @@ class HivemindStore:
             return [self.public_tool_action(row) for row in conn.execute("SELECT * FROM tool_actions ORDER BY name")]
 
     def get_tool_action(self, name: str) -> dict[str, Any]:
-        normalized_name = normalize_tool_action_name(str(name))
+        normalized_name = self.normalize_action_name(str(name))
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM tool_actions WHERE name = ?", (normalized_name,)).fetchone()
             if row is None:
