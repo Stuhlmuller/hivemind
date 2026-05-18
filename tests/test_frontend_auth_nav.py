@@ -23,3 +23,11 @@ def test_workspace_nav_is_hidden_until_session_is_loaded(tmp_path: Path) -> None
         '<nav id="workspace-nav" class="page-nav" aria-label="Workspace" hidden>' in response.text,
         "frontend should hide workspace navigation until the operator is signed in",
     )
+    require_true(
+        '<button id="refresh-button" type="button" hidden>sync</button>' in response.text,
+        "frontend should hide refresh until the operator is signed in",
+    )
+    require_true(
+        '<button id="logout-button" type="button" hidden>logout</button>' in response.text,
+        "frontend should hide logout until the operator is signed in",
+    )

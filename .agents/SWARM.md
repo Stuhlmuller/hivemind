@@ -65,6 +65,7 @@ For "open laptop and let it keep going" development on macOS:
 
 - `HIVEMIND_SWARM_WORKTREE_ROOT`: override the base directory for loop worktrees.
 - `HIVEMIND_SWARM_RUNTIME_ROOT`: override where logs and pid files are stored.
+- `HIVEMIND_SWARM_DEBUG`: set to `1`, `true`, `yes`, or `on` to print debug-level launcher logs.
 - `HIVEMIND_WORKER_PRIORITY_LABELS`: comma-separated label names that worker loops prefer before the default smallest-eligible-issue fallback. Defaults to `security,bug,help wanted`; set it to an empty string to disable label priority. Workers still skip issues with active branches, open PRs, or out-of-lane ownership before applying label priority.
 - `HIVEMIND_SWARM_SUPERVISOR_SLEEP_SECONDS`
 - `HIVEMIND_REVIEWER_SLEEP_SECONDS`

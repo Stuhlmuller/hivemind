@@ -9,12 +9,6 @@ from typing import Any
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
-class AgentStatus(StrEnum):
-    IDLE = "idle"
-    WORKING = "working"
-    BLOCKED = "blocked"
-
-
 class LeaseStatus(StrEnum):
     PENDING = "pending"
     ACTIVE = "active"
@@ -84,16 +78,6 @@ TASK_STATUS_TRANSITIONS = {
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
 }
-
-
-@dataclass(frozen=True)
-class Agent:
-    id: str
-    name: str
-    role: str
-    provider: str
-    model: str
-    status: AgentStatus = AgentStatus.IDLE
 
 
 @dataclass(frozen=True)
