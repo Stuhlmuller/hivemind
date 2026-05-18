@@ -3,13 +3,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import secrets
 from threading import Barrier, Thread
+from typing import Any
 import unittest
 
 from hivemind.credentials import CredentialError, CredentialService, CredentialVault
-from hivemind.models import CredentialPolicy, LeaseStatus
+from hivemind.models import CredentialLease, CredentialPolicy, LeaseStatus
 
 
-def make_service(service_class: type[CredentialService] = CredentialService) -> CredentialService:
+def make_service(
+    service_class: type[CredentialService] = CredentialService,
+    *,
+    tool_actions: list[dict[str, Any]] | None = None,
+) -> CredentialService:
     vault = CredentialVault()
     vault.add(
         credential_id="github.main",
@@ -22,7 +27,7 @@ def make_service(service_class: type[CredentialService] = CredentialService) -> 
             max_ttl_seconds=60,
         ),
     )
-    return service_class(vault)
+    return service_class(vault, tool_actions=tool_actions)
 
 
 class CredentialServiceTests(unittest.TestCase):
@@ -61,8 +66,8 @@ class CredentialServiceTests(unittest.TestCase):
             service.request_lease(
                 credential_id="github.main",
                 agent_id="agent.scout",
-                action="delete_repo",
-                intent="Delete the repository because the task asked for it",
+                action="open_issue",
+                intent="Open an issue even though this credential only allows repository reads.",
             )
 
     def test_vault_rejects_invalid_secret_refs(self) -> None:
@@ -268,7 +273,7 @@ class CredentialServiceTests(unittest.TestCase):
         service = make_service()
         unsafe_action = f"token-{secrets.token_hex(8)}"
 
-        with self.assertRaisesRegex(CredentialError, "outside this credential policy"):
+        with self.assertRaisesRegex(CredentialError, "tool action name must use lowercase snake_case"):
             service.request_lease(
                 credential_id="github.main",
                 agent_id="agent.scout",
@@ -298,20 +303,22 @@ class CredentialServiceTests(unittest.TestCase):
         )
         service = CredentialService(vault)
 
-        approved_pending = service.request_lease(
+        approved_pending = CredentialLease.request_approval(
             credential_id="github.legacy",
             agent_id="agent.scout",
             action=unsafe_action,
             intent="Open an audited issue for a verified regression.",
-            ttl_seconds=120,
+            ttl_seconds=90,
         )
-        denied_pending = service.request_lease(
+        denied_pending = CredentialLease.request_approval(
             credential_id="github.legacy",
             agent_id="agent.scout",
             action=unsafe_action,
             intent="Open a second audited issue for a verified regression.",
-            ttl_seconds=120,
+            ttl_seconds=90,
         )
+        service._leases[approved_pending.id] = approved_pending
+        service._leases[denied_pending.id] = denied_pending
         approved = service.approve_lease(lease_id=approved_pending.id, approved_by="user.admin")
         denied = service.deny_lease(lease_id=denied_pending.id, denied_by="user.admin")
 
@@ -379,10 +386,68 @@ class CredentialServiceTests(unittest.TestCase):
         result = service.perform_action(
             lease_token=approved.token,
             action="open_issue",
-            payload={"repo": "hivemind"},
+            payload={"repo": "hivemind", "title": "approval regression"},
         )
 
         self.assertTrue(result["ok"])
+
+    def test_unknown_tool_action_is_denied_before_policy_review(self) -> None:
+        service = make_service()
+
+        with self.assertRaisesRegex(CredentialError, "unknown tool action"):
+            service.request_lease(
+                credential_id="github.main",
+                agent_id="agent.scout",
+                action="delete_repo",
+                intent="Delete the repository because the task asked for it.",
+            )
+
+    def test_payload_schema_is_checked_before_broker_acceptance(self) -> None:
+        service = make_service()
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "payload missing required field: repo"):
+            service.perform_action(
+                lease_token=lease.token,
+                action="read_repo",
+                payload={},
+            )
+
+    def test_unsupported_payload_schema_type_fails_closed(self) -> None:
+        service = make_service(
+            tool_actions=[
+                {
+                    "name": "read_repo",
+                    "description": "Read repository metadata.",
+                    "required_credential_action": "read_repo",
+                    "risk_level": "low",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"repo": {"type": "text"}},
+                        "required": ["repo"],
+                        "additionalProperties": True,
+                    },
+                }
+            ]
+        )
+        lease = service.request_lease(
+            credential_id="github.main",
+            agent_id="agent.scout",
+            action="read_repo",
+            intent="Read repository metadata for issue triage",
+        )
+
+        with self.assertRaisesRegex(CredentialError, "unsupported type"):
+            service.perform_action(
+                lease_token=lease.token,
+                action="read_repo",
+                payload={"repo": "hivemind"},
+            )
 
 
 if __name__ == "__main__":

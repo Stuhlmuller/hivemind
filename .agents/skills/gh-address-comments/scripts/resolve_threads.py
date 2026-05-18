@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import subprocess  # nosec B404 - this helper invokes the local gh CLI with fixed argv.
 import sys
 from typing import Any
 
@@ -31,7 +31,7 @@ mutation($threadId: ID!) {
 
 
 def _run(cmd: list[str], stdin: str | None = None) -> str:
-    process = subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+    process = subprocess.run(cmd, input=stdin, capture_output=True, text=True)  # nosec B603
     if process.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{process.stderr}")
     return process.stdout

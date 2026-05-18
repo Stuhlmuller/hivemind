@@ -6,6 +6,7 @@ const state = {
   me: null,
   config: null,
   agents: [],
+  toolActions: [],
   credentials: [],
   oauthProviders: [],
   leases: [],
@@ -812,6 +813,9 @@ function renderSelectors() {
   ]) {
     $(selector).innerHTML = optionList(state.credentials, "name", selector !== '#lease-form select[name="credential_id"]');
   }
+  $("#tool-action-options").innerHTML = state.toolActions
+    .map((action) => `<option value="${escapeHtml(action.name)}">${escapeHtml(action.required_credential_action)}</option>`)
+    .join("");
 }
 
 function renderAgents() {
@@ -871,6 +875,24 @@ function renderCredentials() {
     })
     .join("") || '<p class="meta">No credentials yet.</p>';
   setText("#credential-page-count", state.credentials.length);
+}
+
+function schemaSummary(schema) {
+  const required = Array.isArray(schema?.required) && schema.required.length ? schema.required.join(", ") : "none";
+  const extra = schema?.additionalProperties === false ? "closed" : "open";
+  return `Required payload: ${escapeHtml(required)}<br>Schema: ${escapeHtml(extra)}`;
+}
+
+function renderToolActions() {
+  $("#tool-actions-list").innerHTML = state.toolActions
+    .map((action) =>
+      item(
+        action.name,
+        `${escapeHtml(action.description || "no description")}<br>Required credential action: ${escapeHtml(action.required_credential_action)}<br>${schemaSummary(action.input_schema)}`,
+        [action.risk_level],
+      ),
+    )
+    .join("") || '<p class="meta">No registered tool actions.</p>';
 }
 
 function renderOAuthProviders() {
@@ -1164,6 +1186,7 @@ function render() {
   renderOAuthProviders();
   renderAgents();
   renderCredentials();
+  renderToolActions();
   renderLeases();
   renderPendingApprovals();
   renderTasks();
@@ -1215,6 +1238,7 @@ async function refresh() {
     runtimePayload = await Promise.all([
       api("/config"),
       api("/agents"),
+      api("/tool-actions"),
       api("/credentials"),
       api("/oauth/providers"),
       api("/credential-leases"),
@@ -1228,8 +1252,8 @@ async function refresh() {
     render();
     throw error;
   }
-  const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
-  Object.assign(state, { config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
+  const [config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
+  Object.assign(state, { config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
   render();
   consumeOAuthStatus();
 }

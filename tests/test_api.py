@@ -31,7 +31,7 @@ from hivemind.store import (
     hash_password,
 )
 
-TEST_PASSWORD = "operator-not-secret"
+TEST_PASSWORD = "operator-not-secret"  # nosec B105
 PROVIDER_CREDENTIAL_ID = "cred_provider_openrouter"
 
 
@@ -148,7 +148,7 @@ def setup(client: TestClient) -> None:
         "/auth/setup",
         json={"username": "admin", "password": TEST_PASSWORD},
     )
-    assert response.status_code == 201
+    assert response.status_code == 201  # nosec B101
 
 
 def test_create_app_uses_lifespan_without_on_event_deprecation(tmp_path: Path) -> None:
@@ -350,8 +350,8 @@ def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> No
         start.wait()
         results = [future.result() for future in futures]
 
-    assert sum(1 for status, _ in results if status == "ok") == 1
-    assert [detail for status, detail in results if status == "error"] == ["setup is already complete"]
+    assert sum(1 for status, _ in results if status == "ok") == 1  # nosec B101
+    assert [detail for status, detail in results if status == "error"] == ["setup is already complete"]  # nosec B101
 
     conn = sqlite3.connect(db_path)
     try:
@@ -360,8 +360,8 @@ def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> No
     finally:
         conn.close()
 
-    assert admin_count == 1
-    assert len(usernames) == 1
+    assert admin_count == 1  # nosec B101
+    assert len(usernames) == 1  # nosec B101
 
 
 def test_frontend_is_served(tmp_path: Path) -> None:
@@ -369,9 +369,9 @@ def test_frontend_is_served(tmp_path: Path) -> None:
 
     response = client.get("/")
 
-    assert response.status_code == 200
-    assert "Hivemind" in response.text
-    assert "/static/app.js" in response.text
+    assert response.status_code == 200  # nosec B101
+    assert "Hivemind" in response.text  # nosec B101
+    assert "/static/app.js" in response.text  # nosec B101
     for required in [
         'id="boot-view"',
         '<section id="auth-view" class="auth-shell" hidden>',
@@ -449,7 +449,7 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "frontend should treat runtime API loading as a recoverable batch",
     )
     require_true(
-        "const [config, agents, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
+        "const [config, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
         "frontend should render a recoverable shell if runtime data loading fails",
     )
     require_true("loadRuntimeOverview()" in response.text, "frontend should fetch runtime overview without breaking core loading")
@@ -463,13 +463,14 @@ def test_credentials_frontend_route_is_served(tmp_path: Path) -> None:
 
     response = client.get("/control/credentials")
 
-    assert response.status_code == 200
-    assert 'data-page-link="credentials"' in response.text
-    assert "credential broker" in response.text
-    assert 'id="credential-template-picker"' in response.text
-    assert 'id="credential-template-fields"' in response.text
-    assert 'name="approval_required_actions"' in response.text
-    assert 'id="pending-approvals-list"' in response.text
+    assert response.status_code == 200  # nosec B101
+    assert 'data-page-link="credentials"' in response.text  # nosec B101
+    assert "credential broker" in response.text  # nosec B101
+    assert 'id="credential-template-picker"' in response.text  # nosec B101
+    assert 'id="credential-template-fields"' in response.text  # nosec B101
+    assert 'id="tool-actions-list"' in response.text  # nosec B101
+    assert 'name="approval_required_actions"' in response.text  # nosec B101
+    assert 'id="pending-approvals-list"' in response.text  # nosec B101
 
 
 def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
@@ -477,7 +478,7 @@ def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
 
     response = client.get("/")
 
-    assert response.status_code == 200
+    assert response.status_code == 200  # nosec B101
     for required in [
         'id="running-task-count"',
         'id="blocked-task-count"',
@@ -486,7 +487,7 @@ def test_frontend_renders_task_operator_controls(tmp_path: Path) -> None:
         'id="task-health"',
         'name="status"',
     ]:
-        assert required in response.text
+        assert required in response.text  # nosec B101
 
 
 def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path) -> None:
@@ -620,14 +621,14 @@ def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:
         json={"username": "admin", "password": TEST_PASSWORD},
     )
 
-    assert setup_response.status_code == 201
-    assert logout_response.status_code == 200
-    assert login_response.status_code == 200
+    assert setup_response.status_code == 201  # nosec B101
+    assert logout_response.status_code == 200  # nosec B101
+    assert login_response.status_code == 200  # nosec B101
     for response in (setup_response, login_response, logout_response):
         set_cookie = response.headers["set-cookie"]
-        assert "HttpOnly" in set_cookie
-        assert "SameSite=lax" in set_cookie
-        assert "Secure" in set_cookie
+        assert "HttpOnly" in set_cookie  # nosec B101
+        assert "SameSite=lax" in set_cookie  # nosec B101
+        assert "Secure" in set_cookie  # nosec B101
 
 
 def test_auth_session_cookies_allow_http_in_explicit_development_mode(
@@ -648,15 +649,15 @@ def test_auth_session_cookies_allow_http_in_explicit_development_mode(
         json={"username": "admin", "password": TEST_PASSWORD},
     )
 
-    assert setup_response.status_code == 201
-    assert me_response.status_code == 200
-    assert logout_response.status_code == 200
-    assert login_response.status_code == 200
+    assert setup_response.status_code == 201  # nosec B101
+    assert me_response.status_code == 200  # nosec B101
+    assert logout_response.status_code == 200  # nosec B101
+    assert login_response.status_code == 200  # nosec B101
     for response in (setup_response, login_response, logout_response):
         set_cookie = response.headers["set-cookie"]
-        assert "HttpOnly" in set_cookie
-        assert "SameSite=lax" in set_cookie
-        assert "Secure" not in set_cookie
+        assert "HttpOnly" in set_cookie  # nosec B101
+        assert "SameSite=lax" in set_cookie  # nosec B101
+        assert "Secure" not in set_cookie  # nosec B101
 
 
 def test_persisted_sessions_store_only_token_hashes(tmp_path: Path) -> None:
@@ -683,18 +684,18 @@ def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(t
     monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://HIVEMIND_DEMO_GITHUB_TOKEN")
     client = client_for(tmp_path)
 
-    assert client.get("/config").status_code == 401
+    assert client.get("/config").status_code == 401  # nosec B101
     setup(client)
     response = client.get("/config")
     reviewer = response.json()["intent_reviewer"]
     credential = client.get("/credentials").json()[0]
 
-    assert response.status_code == 200
-    assert reviewer["provider"] == "local"
-    assert reviewer["credential_ref_preview"] == "env://HIV..."
-    assert reviewer["credential_ref_preview"] == credential["secret_ref_preview"]
-    assert "credential_ref" not in reviewer
-    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text
+    assert response.status_code == 200  # nosec B101
+    assert reviewer["provider"] == "local"  # nosec B101
+    assert reviewer["credential_ref_preview"] == "env://HIV..."  # nosec B101
+    assert reviewer["credential_ref_preview"] == credential["secret_ref_preview"]  # nosec B101
+    assert "credential_ref" not in reviewer  # nosec B101
+    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in response.text  # nosec B101
 
 
 def test_config_exposes_redacted_provider_backed_reviewer_settings(tmp_path: Path, monkeypatch) -> None:
@@ -781,7 +782,7 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     payload_key = f"token-{secrets.token_hex(8)}"
     payload_secret = f"demo-{secrets.token_hex(8)}"
 
-    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]
+    assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]  # nosec B101
     lease_response = client.post(
         "/credential-leases",
         json={
@@ -792,9 +793,9 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
             "ttl_seconds": 30,
         },
     )
-    assert lease_response.status_code == 201
+    assert lease_response.status_code == 201  # nosec B101
     lease = lease_response.json()
-    assert lease["lease_token"].startswith("hvl_")
+    assert lease["lease_token"].startswith("hvl_")  # nosec B101
 
     action_response = client.post(
         "/credential-actions",
@@ -804,8 +805,8 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
             "payload": {"repo": "hivemind", payload_key: payload_secret},
         },
     )
-    assert action_response.status_code == 200
-    assert action_response.json()["ok"] is True
+    assert action_response.status_code == 200  # nosec B101
+    assert action_response.json()["ok"] is True  # nosec B101
     audit_events = client.get("/audit-events").json()
     performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
     require_equal(performed_event["actor_id"], agent["id"], "performed audit event should identify the agent")
@@ -861,9 +862,13 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
     require_equal(denied_event["actor_id"], agent["id"], "denied action audit event should identify the agent")
     require_equal(denied_event["target_id"], credential["id"], "denied action audit event should identify the credential")
     require_equal(
-        denied_event["metadata"],
-        {"action": "delete_repo", "payload_key_count": 2},
-        "denied action audit metadata should include action and payload key count only",
+        {
+            "action": denied_event["metadata"]["action"],
+            "lease_id": denied_event["metadata"]["lease_id"],
+            "payload_key_count": denied_event["metadata"]["payload_key_count"],
+        },
+        {"action": "delete_repo", "lease_id": lease["id"], "payload_key_count": 2},
+        "denied action audit metadata should include action, lease id, and payload key count only",
     )
     require_true(payload_key not in str(audit_events), "audit events should not expose denied payload keys")
     require_true(payload_secret not in str(audit_events), "audit events should not expose denied payload values")
@@ -953,8 +958,8 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
     require_equal(response.status_code, 403, "unsafe action should be denied")
     require_equal(
         response.json()["detail"],
-        "action is outside this credential policy",
-        "unsafe action denial should use the policy denial reason",
+        "unknown tool action: <redacted>",
+        "unsafe unknown action denial should redact the action identifier",
     )
 
     audit_events = client.get("/audit-events").json()
@@ -962,7 +967,7 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
         event
         for event in audit_events
         if event["type"] == "credential.lease.denied"
-        and event["reason"] == "action is outside this credential policy"
+        and event["reason"] == "unknown tool action: <redacted>"
     )
     require_equal(
         denied_event["metadata"],
@@ -990,6 +995,346 @@ def test_unknown_lease_agent_is_rejected(tmp_path: Path) -> None:
 
     require_equal(response.status_code, 403, "unknown lease agent should be rejected")
     require_equal(response.json()["detail"], "unknown agent: agent_missing", "lease rejection should explain the missing agent")
+
+
+def test_tool_action_registry_lists_builtins_and_persists_custom_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "tool-actions.db"
+    store = HivemindStore(db_path)
+    client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
+    setup(client)
+
+    builtins = client.get("/tool-actions")
+    create_response = client.post(
+        "/tool-actions",
+        json={
+            "name": "repo_status",
+            "description": "Read repository status.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    restarted = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
+    restarted_login = restarted.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
+    persisted = restarted.get("/tool-actions")
+
+    require_equal(builtins.status_code, 200, "tool action registry should be readable after setup")
+    require_true(any(action["name"] == "read_repo" for action in builtins.json()), "registry should seed read_repo")
+    require_equal(create_response.status_code, 201, "custom tool action should be persisted")
+    require_equal(create_response.json()["name"], "repo_status", "custom action name should normalize")
+    require_equal(restarted_login.status_code, 200, "restarted client should authenticate")
+    require_true(any(action["name"] == "repo_status" for action in persisted.json()), "custom tool action should survive store restart")
+
+
+def test_tool_action_registry_rejects_inconsistent_input_schemas(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    missing_required = client.post(
+        "/tool-actions",
+        json={
+            "name": "broken_required",
+            "description": "Invalid schema.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    unsupported_type = client.post(
+        "/tool-actions",
+        json={
+            "name": "broken_type",
+            "description": "Invalid property type.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "text"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    actions = {action["name"] for action in client.get("/tool-actions").json()}
+
+    require_equal(missing_required.status_code, 400, "tool actions should reject required fields missing from properties")
+    require_equal(
+        missing_required.json()["detail"],
+        "tool action input_schema required field is not declared in properties: repo",
+        "missing required field error should name the invalid field",
+    )
+    require_equal(unsupported_type.status_code, 400, "tool actions should reject unsupported schema property types")
+    require_equal(
+        unsupported_type.json()["detail"],
+        "tool action input_schema property type is unsupported: repo",
+        "unsupported schema type error should name the invalid property",
+    )
+    require_true("broken_required" not in actions, "invalid required schema should not be persisted")
+    require_true("broken_type" not in actions, "invalid type schema should not be persisted")
+
+
+def test_tool_action_registry_migrates_existing_credential_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-tool-actions.db"
+    store = HivemindStore(db_path)
+    agent = store.create_agent({"name": "Legacy Worker", "role": "Carry forward existing local scopes."})
+    credential = store.create_credential(
+        {
+            "name": "Legacy GitHub Capability",
+            "provider": "github",
+            "secret_ref": "env://LEGACY_GITHUB_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["archive_repo"],
+            "approval_required_actions": ["archive_repo"],
+            "max_ttl_seconds": 60,
+            "require_intent": True,
+            "metadata": {},
+        }
+    )
+    restarted = HivemindStore(db_path)
+    actions = restarted.list_tool_actions()
+    token, lease = restarted.request_lease(
+        credential["id"],
+        agent["id"],
+        "archive_repo",
+        "Archive a repository after explicit operator approval.",
+        30,
+    )
+
+    migrated = next(action for action in actions if action["name"] == "archive_repo")
+    require_equal(migrated["required_credential_action"], "archive_repo", "legacy action should map to its existing credential scope")
+    require_equal(migrated["risk_level"], "medium", "legacy migrated action should use a conservative risk level")
+    require_equal(token, None, "approval-required migrated action should not return a token before approval")
+    require_equal(lease["action"], "archive_repo", "migrated action should be usable for lease requests")
+
+
+def test_tool_action_registry_skips_unsafe_legacy_actions(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsafe-legacy-tool-actions.db"
+    store = HivemindStore(db_path)
+    agent = store.create_agent({"name": "Legacy Worker", "role": "Carry forward safe local scopes."})
+    now = datetime.now(timezone.utc).isoformat()
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO credentials (
+                id, name, provider, secret_ref, allowed_agents, allowed_actions,
+                approval_required_actions, max_ttl_seconds, require_intent, metadata,
+                created_at, updated_at
+            )
+            VALUES (
+                :id, :name, :provider, :secret_ref, :allowed_agents, :allowed_actions,
+                :approval_required_actions, :max_ttl_seconds, :require_intent, :metadata,
+                :created_at, :updated_at
+            )
+            """,
+            {
+                "id": "cred_unsafe_legacy",
+                "name": "Unsafe Legacy Capability",
+                "provider": "github",
+                "secret_ref": "env://LEGACY_GITHUB_TOKEN",
+                "allowed_agents": json.dumps([agent["id"]]),
+                "allowed_actions": json.dumps(["archive_repo", "token-unsafe"]),
+                "approval_required_actions": json.dumps(["token-unsafe"]),
+                "max_ttl_seconds": 60,
+                "require_intent": 1,
+                "metadata": json.dumps({}),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+
+    restarted = HivemindStore(db_path)
+    action_names = {action["name"] for action in restarted.list_tool_actions()}
+
+    require_true("archive_repo" in action_names, "safe legacy action should migrate into the tool registry")
+    require_true("token-unsafe" not in action_names, "unsafe legacy action should not broaden the tool registry")
+
+
+def test_unknown_tool_action_is_denied_before_lease_issuance(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository even though no registered tool action allows it.",
+            "ttl_seconds": 30,
+        },
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(response.status_code, 403, "unknown tool actions should fail closed")
+    require_equal(response.json()["detail"], "unknown tool action: delete_repo", "denial should identify the unknown action")
+    require_true(
+        any(
+            event["type"] == "credential.lease.denied"
+            and event["reason"] == "unknown tool action: delete_repo"
+            and event["metadata"]["action"] == "delete_repo"
+            for event in audit_events
+        ),
+        "unknown tool action should be audited as a denied lease request",
+    )
+
+
+def test_tool_action_maps_to_required_credential_action_and_validates_payload(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    tool_response = client.post(
+        "/tool-actions",
+        json={
+            "name": "repo_status",
+            "description": "Read repository status through the read_repo scope.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "repo_status",
+            "intent": "Read repository status for implementation triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    invalid_action = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_status", "payload": {}},
+    )
+    audit_after_invalid = client.get("/audit-events").json()
+    valid_action = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_status", "payload": {"repo": "hivemind"}},
+    )
+
+    require_equal(tool_response.status_code, 201, "custom mapped tool action should be created")
+    require_equal(lease_response.status_code, 201, "tool action should issue through the required credential action")
+    require_equal(lease_response.json()["action"], "repo_status", "lease should bind to the exact tool action")
+    require_equal(invalid_action.status_code, 403, "invalid payload should fail before broker acceptance")
+    require_equal(invalid_action.json()["detail"], "payload missing required field: repo", "missing required field should be reported")
+    require_true(
+        not any(event["type"] == "credential.action.performed" and event["metadata"]["action"] == "repo_status" for event in audit_after_invalid),
+        "invalid payload should not write a success audit event",
+    )
+    require_equal(valid_action.status_code, 200, "valid payload should be accepted")
+    require_equal(valid_action.json()["credential_action"], "read_repo", "result should expose the required credential action")
+
+
+def test_lease_for_one_tool_action_cannot_execute_another_with_same_credential_scope(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    for action_name in ("repo_status", "repo_summary"):
+        response = client.post(
+            "/tool-actions",
+            json={
+                "name": action_name,
+                "description": f"Read {action_name}.",
+                "required_credential_action": "read_repo",
+                "risk_level": "low",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"repo": {"type": "string"}},
+                    "required": ["repo"],
+                    "additionalProperties": True,
+                },
+            },
+        )
+        require_equal(response.status_code, 201, f"{action_name} should be registered")
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "repo_status",
+            "intent": "Read repository status for implementation triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    action_response = client.post(
+        "/credential-actions",
+        json={"lease_token": lease_response.json()["lease_token"], "action": "repo_summary", "payload": {"repo": "hivemind"}},
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(lease_response.status_code, 201, "lease should issue for the first tool action")
+    require_equal(action_response.status_code, 403, "lease should not authorize another tool action")
+    require_equal(action_response.json()["detail"], "credential lease does not allow this action", "lease should stay tool-action scoped")
+    require_true(
+        any(
+            event["type"] == "credential.action.denied"
+            and event["reason"] == "credential lease does not allow this action"
+            and event["metadata"]["lease_id"] == lease_response.json()["id"]
+            for event in audit_events
+        ),
+        "action mismatch should be audited as a denied brokered action",
+    )
+
+
+def test_tasks_and_schedules_reject_unregistered_tool_actions(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+
+    task_response = client.post(
+        "/tasks",
+        json={
+            "title": "Unsafe task",
+            "description": "Try an action outside the registry.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository without a registered action.",
+            "heartbeat_seconds": None,
+        },
+    )
+    schedule_response = client.post(
+        "/schedules",
+        json={
+            "name": "Unsafe schedule",
+            "enabled": True,
+            "interval_seconds": 60,
+            "task_title": "Unsafe scheduled task",
+            "task_description": "Try an action outside the registry.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": "delete_repo",
+            "intent": "Delete a repository without a registered action.",
+            "next_run_at": None,
+        },
+    )
+
+    require_equal(task_response.status_code, 400, "tasks should reject unknown registered actions")
+    require_equal(task_response.json()["detail"], "action references unknown tool action: delete_repo", "task denial should name the unknown action")
+    require_equal(schedule_response.status_code, 400, "schedules should reject unknown registered actions")
+    require_equal(schedule_response.json()["detail"], "action references unknown tool action: delete_repo", "schedule denial should name the unknown action")
 
 
 def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_path: Path) -> None:
@@ -2404,9 +2749,9 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         },
     )
 
-    assert credential_response.status_code == 201
+    assert credential_response.status_code == 201  # nosec B101
     credential = credential_response.json()
-    assert credential["policy"]["approval_required_actions"] == ["open_issue"]
+    assert credential["policy"]["approval_required_actions"] == ["open_issue"]  # nosec B101
 
     pending_response = client.post(
         "/credential-leases",
@@ -2419,22 +2764,22 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         },
     )
 
-    assert pending_response.status_code == 201
+    assert pending_response.status_code == 201  # nosec B101
     pending_lease = pending_response.json()
-    assert pending_lease["status"] == "pending"
-    assert pending_lease["token_preview"] == "not issued"
-    assert pending_lease["ttl_seconds"] == 180
-    assert "lease_token" not in pending_lease
+    assert pending_lease["status"] == "pending"  # nosec B101
+    assert pending_lease["token_preview"] == "not issued"  # nosec B101
+    assert pending_lease["ttl_seconds"] == 180  # nosec B101
+    assert "lease_token" not in pending_lease  # nosec B101
 
     listed_pending = client.get("/credential-leases").json()
-    assert any(item["id"] == pending_lease["id"] and item["status"] == "pending" for item in listed_pending)
+    assert any(item["id"] == pending_lease["id"] and item["status"] == "pending" for item in listed_pending)  # nosec B101
 
     approve_response = client.post(f"/credential-leases/{pending_lease['id']}/approve")
-    assert approve_response.status_code == 200
+    assert approve_response.status_code == 200  # nosec B101
     approved_lease = approve_response.json()
-    assert approved_lease["status"] == "active"
-    assert approved_lease["ttl_seconds"] == 180
-    assert approved_lease["lease_token"].startswith("hvl_")
+    assert approved_lease["status"] == "active"  # nosec B101
+    assert approved_lease["ttl_seconds"] == 180  # nosec B101
+    assert approved_lease["lease_token"].startswith("hvl_")  # nosec B101
 
     action_response = client.post(
         "/credential-actions",
@@ -2444,8 +2789,8 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
             "payload": {"repo": "hivemind", "title": "credential approval regression"},
         },
     )
-    assert action_response.status_code == 200
-    assert action_response.json()["ok"] is True
+    assert action_response.status_code == 200  # nosec B101
+    assert action_response.json()["ok"] is True  # nosec B101
 
     denied_pending = client.post(
         "/credential-leases",
@@ -2458,26 +2803,26 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
         },
     ).json()
     deny_response = client.post(f"/credential-leases/{denied_pending['id']}/deny")
-    assert deny_response.status_code == 200
+    assert deny_response.status_code == 200  # nosec B101
     denied_lease = deny_response.json()
-    assert denied_lease["status"] == "denied"
-    assert denied_lease["token_preview"] == "not issued"
-    assert "lease_token" not in denied_lease
+    assert denied_lease["status"] == "denied"  # nosec B101
+    assert denied_lease["token_preview"] == "not issued"  # nosec B101
+    assert "lease_token" not in denied_lease  # nosec B101
 
     audit_events = client.get("/audit-events").json()
-    assert any(
+    assert any(  # nosec B101
         event["type"] == "credential.lease.pending"
         and event["metadata"]["lease_id"] == pending_lease["id"]
         and event["decision"] == "pending"
         for event in audit_events
     )
-    assert any(
+    assert any(  # nosec B101
         event["type"] == "credential.lease.approved"
         and event["metadata"]["lease_id"] == pending_lease["id"]
         and event["decision"] == "allowed"
         for event in audit_events
     )
-    assert any(
+    assert any(  # nosec B101
         event["type"] == "credential.lease.denied"
         and event["metadata"]["lease_id"] == denied_pending["id"]
         and event["reason"] == "operator denied lease request"
@@ -2698,6 +3043,18 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
             },
         ),
         ("PATCH", "/agents/agent_demo/status", {"status": "running"}),
+        ("GET", "/tool-actions", None),
+        (
+            "POST",
+            "/tool-actions",
+            {
+                "name": "repo_metadata",
+                "description": "Read repository metadata.",
+                "input_schema": {"type": "object"},
+                "required_credential_action": "read_repo",
+                "risk_level": "low",
+            },
+        ),
         ("GET", "/credentials", None),
         (
             "POST",
@@ -2930,9 +3287,9 @@ def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Set HIVEMIND_SECRETS_KEY to enable broker-side local secret storage."
-    assert "sk-test-local-secret" not in response.text
+    assert response.status_code == 400  # nosec B101
+    assert response.json()["detail"] == "Set HIVEMIND_SECRETS_KEY to enable broker-side local secret storage."  # nosec B101
+    assert "sk-test-local-secret" not in response.text  # nosec B101
 
 
 def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
@@ -2959,23 +3316,23 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
         },
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 201  # nosec B101
     credential = response.json()
-    assert credential["provider"] == "openrouter"
-    assert credential["metadata"]["credential_kind"] == "managed_secret"
+    assert credential["provider"] == "openrouter"  # nosec B101
+    assert credential["metadata"]["credential_kind"] == "managed_secret"  # nosec B101
     require_equal(credential["metadata"]["note"], "operator supplied", "managed secrets should preserve non-kind metadata")
-    assert credential["secret_ref_preview"].startswith("secret://")
-    assert "secret_value" not in credential
-    assert managed_value not in response.text
+    assert credential["secret_ref_preview"].startswith("secret://")  # nosec B101
+    assert "secret_value" not in credential  # nosec B101
+    assert managed_value not in response.text  # nosec B101
 
     list_response = client.get("/credentials")
-    assert list_response.status_code == 200
-    assert managed_value not in list_response.text
+    assert list_response.status_code == 200  # nosec B101
+    assert managed_value not in list_response.text  # nosec B101
 
     store = client.app.state.store
     secret_box = SecretBox.from_env()
-    assert secret_box is not None
-    assert store.resolve_broker_secret(credential["id"], secret_box) == managed_value
+    assert secret_box is not None  # nosec B101
+    assert store.resolve_broker_secret(credential["id"], secret_box) == managed_value  # nosec B101
 
     conn = sqlite3.connect(tmp_path / "hivemind.db")
     try:
@@ -2990,10 +3347,10 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
     finally:
         conn.close()
 
-    assert row is not None
-    assert row[0] == f"secret://{credential['id']}"
-    assert secret_row is not None
-    assert "BEGIN TEST SECRET" not in secret_row[0]
+    assert row is not None  # nosec B101
+    assert row[0] == f"secret://{credential['id']}"  # nosec B101
+    assert secret_row is not None  # nosec B101
+    assert "BEGIN TEST SECRET" not in secret_row[0]  # nosec B101
 
 
 def test_declarative_config_export_excludes_broker_managed_secret_refs(
@@ -3990,8 +4347,8 @@ def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
             "metadata": {"credential_kind": "github_oauth_app"},
         },
     )
-    assert oauth_response.status_code == 400
-    assert oauth_response.json()["detail"] == "github_oauth_app metadata requires client_id"
+    assert oauth_response.status_code == 400  # nosec B101
+    assert oauth_response.json()["detail"] == "github_oauth_app metadata requires client_id"  # nosec B101
 
     app_response = client.post(
         "/credentials",
@@ -4003,8 +4360,8 @@ def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
             "metadata": {"credential_kind": "github_app", "installation_id": "987654321"},
         },
     )
-    assert app_response.status_code == 400
-    assert app_response.json()["detail"] == "github_app metadata requires app_id"
+    assert app_response.status_code == 400  # nosec B101
+    assert app_response.json()["detail"] == "github_app metadata requires app_id"  # nosec B101
 
 
 def test_oauth_provider_status_reports_missing_broker_secret_store(tmp_path: Path) -> None:
@@ -4013,11 +4370,11 @@ def test_oauth_provider_status_reports_missing_broker_secret_store(tmp_path: Pat
 
     response = client.get("/oauth/providers")
 
-    assert response.status_code == 200
+    assert response.status_code == 200  # nosec B101
     provider = response.json()[0]
-    assert provider["id"] == "codex"
-    assert provider["available"] is False
-    assert "HIVEMIND_SECRETS_KEY" in provider["reason"]
+    assert provider["id"] == "codex"  # nosec B101
+    assert provider["available"] is False  # nosec B101
+    assert "HIVEMIND_SECRETS_KEY" in provider["reason"]  # nosec B101
 
 
 def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
@@ -4069,49 +4426,49 @@ def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
         },
     )
 
-    assert start_response.status_code == 201
+    assert start_response.status_code == 201  # nosec B101
     authorize_url = start_response.json()["authorize_url"]
     parsed = urlparse(authorize_url)
     query = parse_qs(parsed.query)
-    assert parsed.scheme == "https"
-    assert parsed.netloc == "auth.example.test"
-    assert query["client_id"] == ["codex-client"]
-    assert query["scope"] == ["openid profile email offline_access"]
-    assert "state" in query
-    assert "code_challenge" in query
+    assert parsed.scheme == "https"  # nosec B101
+    assert parsed.netloc == "auth.example.test"  # nosec B101
+    assert query["client_id"] == ["codex-client"]  # nosec B101
+    assert query["scope"] == ["openid profile email offline_access"]  # nosec B101
+    assert "state" in query  # nosec B101
+    assert "code_challenge" in query  # nosec B101
 
     callback_response = client.get(
         f"/oauth/callback/codex?state={query['state'][0]}&code=broker-code",
         follow_redirects=False,
     )
 
-    assert callback_response.status_code == 303
-    assert callback_response.headers["location"].startswith("/?oauth=connected")
+    assert callback_response.status_code == 303  # nosec B101
+    assert callback_response.headers["location"].startswith("/?oauth=connected")  # nosec B101
 
     credentials = client.get("/credentials").json()
     codex_credential = next(item for item in credentials if item["provider"] == "codex")
-    assert codex_credential["name"] == "codex subscription"
-    assert codex_credential["secret_ref_preview"] == "oauth://cod..."
-    assert codex_credential["metadata"]["auth_type"] == "oauth"
-    assert codex_credential["metadata"]["oauth_refreshable"] is True
-    assert "access-secret-token" not in start_response.text
-    assert "access-secret-token" not in callback_response.text
-    assert "refresh-secret-token" not in callback_response.text
+    assert codex_credential["name"] == "codex subscription"  # nosec B101
+    assert codex_credential["secret_ref_preview"] == "oauth://cod..."  # nosec B101
+    assert codex_credential["metadata"]["auth_type"] == "oauth"  # nosec B101
+    assert codex_credential["metadata"]["oauth_refreshable"] is True  # nosec B101
+    assert "access-secret-token" not in start_response.text  # nosec B101
+    assert "access-secret-token" not in callback_response.text  # nosec B101
+    assert "refresh-secret-token" not in callback_response.text  # nosec B101
 
     audit_events = client.get("/audit-events").json()
-    assert audit_events[0]["type"] == "credential.oauth.connected"
+    assert audit_events[0]["type"] == "credential.oauth.connected"  # nosec B101
 
     conn = sqlite3.connect(tmp_path / "hivemind.db")
     token_row = conn.execute("SELECT token_ciphertext FROM oauth_connections").fetchone()
     conn.close()
-    assert token_row is not None
-    assert "access-secret-token" not in token_row[0]
-    assert "refresh-secret-token" not in token_row[0]
-    assert captured["url"] == "https://auth.example.test/oauth/token"
-    assert captured["data"]["code"] == "broker-code"
-    assert captured["data"]["client_id"] == "codex-client"
-    assert captured["data"]["grant_type"] == "authorization_code"
-    assert "code_verifier" in captured["data"]
+    assert token_row is not None  # nosec B101
+    assert "access-secret-token" not in token_row[0]  # nosec B101
+    assert "refresh-secret-token" not in token_row[0]  # nosec B101
+    assert captured["url"] == "https://auth.example.test/oauth/token"  # nosec B101
+    assert captured["data"]["code"] == "broker-code"  # nosec B101
+    assert captured["data"]["client_id"] == "codex-client"  # nosec B101
+    assert captured["data"]["grant_type"] == "authorization_code"  # nosec B101
+    assert "code_verifier" in captured["data"]  # nosec B101
 
 
 def test_codex_oauth_start_rejects_invalid_actions_before_redirect(tmp_path: Path, monkeypatch) -> None:
@@ -4184,7 +4541,7 @@ def test_codex_oauth_flow_rejects_non_object_token_response(
             "require_intent": True,
         },
     )
-    assert start_response.status_code == 201
+    assert start_response.status_code == 201  # nosec B101
     authorize_url = start_response.json()["authorize_url"]
     query = parse_qs(urlparse(authorize_url).query)
 
@@ -4193,15 +4550,15 @@ def test_codex_oauth_flow_rejects_non_object_token_response(
         follow_redirects=False,
     )
 
-    assert callback_response.status_code == 303
+    assert callback_response.status_code == 303  # nosec B101
     redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
-    assert redirect_params["oauth"] == ["error"]
-    assert redirect_params["detail"] == ["oauth token response must be a JSON object"]
+    assert redirect_params["oauth"] == ["error"]  # nosec B101
+    assert redirect_params["detail"] == ["oauth token response must be a JSON object"]  # nosec B101
     audit_events = client.get("/audit-events").json()
-    assert audit_events[0]["type"] == "credential.oauth.failed"
-    assert audit_events[0]["reason"] == "oauth token response must be a JSON object"
+    assert audit_events[0]["type"] == "credential.oauth.failed"  # nosec B101
+    assert audit_events[0]["reason"] == "oauth token response must be a JSON object"  # nosec B101
     credentials = client.get("/credentials").json()
-    assert all(item["provider"] != "codex" for item in credentials)
+    assert all(item["provider"] != "codex" for item in credentials)  # nosec B101
 
 
 def test_codex_oauth_flow_audits_unknown_state_callback(
@@ -4221,14 +4578,14 @@ def test_codex_oauth_flow_audits_unknown_state_callback(
         follow_redirects=False,
     )
 
-    assert callback_response.status_code == 303
+    assert callback_response.status_code == 303  # nosec B101
     redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
-    assert redirect_params["oauth"] == ["error"]
-    assert redirect_params["detail"] == ["unknown oauth state"]
+    assert redirect_params["oauth"] == ["error"]  # nosec B101
+    assert redirect_params["detail"] == ["unknown oauth state"]  # nosec B101
     audit_events = client.get("/audit-events").json()
-    assert audit_events[0]["type"] == "credential.oauth.failed"
-    assert audit_events[0]["reason"] == "unknown oauth state"
-    assert audit_events[0]["target_id"] == "codex"
+    assert audit_events[0]["type"] == "credential.oauth.failed"  # nosec B101
+    assert audit_events[0]["reason"] == "unknown oauth state"  # nosec B101
+    assert audit_events[0]["target_id"] == "codex"  # nosec B101
 
 
 def test_codex_oauth_flow_audits_missing_code_callback(
@@ -4255,7 +4612,7 @@ def test_codex_oauth_flow_audits_missing_code_callback(
             "require_intent": True,
         },
     )
-    assert start_response.status_code == 201
+    assert start_response.status_code == 201  # nosec B101
     authorize_url = start_response.json()["authorize_url"]
     query = parse_qs(urlparse(authorize_url).query)
 
@@ -4264,16 +4621,16 @@ def test_codex_oauth_flow_audits_missing_code_callback(
         follow_redirects=False,
     )
 
-    assert callback_response.status_code == 303
+    assert callback_response.status_code == 303  # nosec B101
     redirect_params = parse_qs(urlparse(callback_response.headers["location"]).query)
-    assert redirect_params["oauth"] == ["error"]
-    assert redirect_params["detail"] == ["Missing OAuth authorization code."]
+    assert redirect_params["oauth"] == ["error"]  # nosec B101
+    assert redirect_params["detail"] == ["Missing OAuth authorization code."]  # nosec B101
     audit_events = client.get("/audit-events").json()
-    assert audit_events[0]["type"] == "credential.oauth.failed"
-    assert audit_events[0]["reason"] == "Missing OAuth authorization code."
-    assert audit_events[0]["target_id"] == "codex"
+    assert audit_events[0]["type"] == "credential.oauth.failed"  # nosec B101
+    assert audit_events[0]["reason"] == "Missing OAuth authorization code."  # nosec B101
+    assert audit_events[0]["target_id"] == "codex"  # nosec B101
     credentials = client.get("/credentials").json()
-    assert all(item["provider"] != "codex" for item in credentials)
+    assert all(item["provider"] != "codex" for item in credentials)  # nosec B101
 
 
 def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) -> None:
@@ -4298,28 +4655,28 @@ def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) 
             "heartbeat_seconds": 60,
         },
     )
-    assert task_response.status_code == 201
+    assert task_response.status_code == 201  # nosec B101
     task = task_response.json()
-    assert task["status"] == "queued"
-    assert task["priority"] == "urgent"
-    assert task["credential_id"] == credential["id"]
-    assert task["heartbeat_state"] == "healthy"
-    assert task["last_heartbeat_at"] is None
-    assert task["heartbeat_overdue_seconds"] is None
+    assert task["status"] == "queued"  # nosec B101
+    assert task["priority"] == "urgent"  # nosec B101
+    assert task["credential_id"] == credential["id"]  # nosec B101
+    assert task["heartbeat_state"] == "healthy"  # nosec B101
+    assert task["last_heartbeat_at"] is None  # nosec B101
+    assert task["heartbeat_overdue_seconds"] is None  # nosec B101
 
     task_list = client.get("/tasks")
-    assert task_list.status_code == 200
-    assert task_list.json()[0]["id"] == task["id"]
+    assert task_list.status_code == 200  # nosec B101
+    assert task_list.json()[0]["id"] == task["id"]  # nosec B101
 
     task_status = client.patch(f"/tasks/{task['id']}/status", json={"status": "blocked"})
-    assert task_status.status_code == 200
-    assert task_status.json()["status"] == "blocked"
+    assert task_status.status_code == 200  # nosec B101
+    assert task_status.json()["status"] == "blocked"  # nosec B101
 
     status_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
     require_equal(status_response.status_code, 200, "task status update should succeed")
 
     heartbeat = client.post(f"/tasks/{task['id']}/heartbeats", json={"note": heartbeat_note})
-    assert heartbeat.status_code == 201
+    assert heartbeat.status_code == 201  # nosec B101
     heartbeats = client.get("/heartbeats").json()
     require_equal(heartbeats[0]["task_id"], task["id"], "heartbeat should be tied to the task")
     require_equal(heartbeats[0]["note"], heartbeat_note, "heartbeat history should retain the task-local note")
@@ -5142,75 +5499,75 @@ def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_pat
         },
     )
 
-    assert create_response.status_code == 201
+    assert create_response.status_code == 201  # nosec B101
     created_task = create_response.json()
-    assert created_task["title"] == "Review audit visibility"
-    assert created_task["description"] == "Verify task transitions remain visible in the operator API."
-    assert created_task["status"] == "queued"
-    assert created_task["priority"] == "urgent"
-    assert created_task["assigned_agent_id"] == agent["id"]
-    assert created_task["credential_id"] == credential["id"]
-    assert created_task["action"] == "read_repo"
-    assert created_task["intent"] == "Inspect the task-management API acceptance surface."
-    assert created_task["heartbeat_seconds"] == 90
-    assert created_task["next_heartbeat_at"] is not None
-    assert created_task["created_at"] == created_task["updated_at"]
+    assert created_task["title"] == "Review audit visibility"  # nosec B101
+    assert created_task["description"] == "Verify task transitions remain visible in the operator API."  # nosec B101
+    assert created_task["status"] == "queued"  # nosec B101
+    assert created_task["priority"] == "urgent"  # nosec B101
+    assert created_task["assigned_agent_id"] == agent["id"]  # nosec B101
+    assert created_task["credential_id"] == credential["id"]  # nosec B101
+    assert created_task["action"] == "read_repo"  # nosec B101
+    assert created_task["intent"] == "Inspect the task-management API acceptance surface."  # nosec B101
+    assert created_task["heartbeat_seconds"] == 90  # nosec B101
+    assert created_task["next_heartbeat_at"] is not None  # nosec B101
+    assert created_task["created_at"] == created_task["updated_at"]  # nosec B101
 
     list_response = client.get("/tasks")
-    assert list_response.status_code == 200
-    assert list_response.json() == [created_task]
+    assert list_response.status_code == 200  # nosec B101
+    assert list_response.json() == [created_task]  # nosec B101
 
     status_response = client.patch(f"/tasks/{created_task['id']}/status", json={"status": "running"})
-    assert status_response.status_code == 200
+    assert status_response.status_code == 200  # nosec B101
     updated_task = status_response.json()
-    assert updated_task["id"] == created_task["id"]
-    assert updated_task["status"] == "running"
-    assert updated_task["updated_at"] != created_task["updated_at"]
-    assert updated_task["created_at"] == created_task["created_at"]
+    assert updated_task["id"] == created_task["id"]  # nosec B101
+    assert updated_task["status"] == "running"  # nosec B101
+    assert updated_task["updated_at"] != created_task["updated_at"]  # nosec B101
+    assert updated_task["created_at"] == created_task["created_at"]  # nosec B101
 
     listed_after_update = client.get("/tasks")
-    assert listed_after_update.status_code == 200
-    assert listed_after_update.json() == [updated_task]
+    assert listed_after_update.status_code == 200  # nosec B101
+    assert listed_after_update.json() == [updated_task]  # nosec B101
 
     heartbeat_response = client.post(
         f"/tasks/{created_task['id']}/heartbeats",
         json={"note": "operator verified the task is active"},
     )
-    assert heartbeat_response.status_code == 201
+    assert heartbeat_response.status_code == 201  # nosec B101
     heartbeat = heartbeat_response.json()
-    assert heartbeat["task_id"] == created_task["id"]
-    assert heartbeat["agent_id"] == agent["id"]
-    assert heartbeat["note"] == "operator verified the task is active"
+    assert heartbeat["task_id"] == created_task["id"]  # nosec B101
+    assert heartbeat["agent_id"] == agent["id"]  # nosec B101
+    assert heartbeat["note"] == "operator verified the task is active"  # nosec B101
 
     heartbeats_response = client.get(f"/heartbeats?task_id={created_task['id']}")
-    assert heartbeats_response.status_code == 200
-    assert heartbeats_response.json() == [heartbeat]
+    assert heartbeats_response.status_code == 200  # nosec B101
+    assert heartbeats_response.json() == [heartbeat]  # nosec B101
 
     audit_response = client.get("/audit-events")
-    assert audit_response.status_code == 200
+    assert audit_response.status_code == 200  # nosec B101
     audit_events = audit_response.json()
     task_audit_events = [event for event in audit_events if event["target_id"] == created_task["id"]]
 
-    assert [event["type"] for event in task_audit_events] == [
+    assert [event["type"] for event in task_audit_events] == [  # nosec B101
         "task.heartbeat",
         "task.status.updated",
         "task.created",
     ]
-    assert task_audit_events[0]["actor_id"] == me["id"]
-    assert task_audit_events[0]["decision"] == "allowed"
-    assert task_audit_events[0]["reason"] == "heartbeat recorded"
-    assert task_audit_events[0]["metadata"] == {
+    assert task_audit_events[0]["actor_id"] == me["id"]  # nosec B101
+    assert task_audit_events[0]["decision"] == "allowed"  # nosec B101
+    assert task_audit_events[0]["reason"] == "heartbeat recorded"  # nosec B101
+    assert task_audit_events[0]["metadata"] == {  # nosec B101
         "note_present": True,
         "note_length": len("operator verified the task is active"),
     }
-    assert task_audit_events[1]["actor_id"] == me["id"]
-    assert task_audit_events[1]["decision"] == "allowed"
-    assert task_audit_events[1]["reason"] == "task marked running"
-    assert task_audit_events[1]["metadata"] == {"from_status": "queued", "to_status": "running"}
-    assert task_audit_events[2]["actor_id"] == me["id"]
-    assert task_audit_events[2]["decision"] == "allowed"
-    assert task_audit_events[2]["reason"] == "task created"
-    assert task_audit_events[2]["metadata"] == {
+    assert task_audit_events[1]["actor_id"] == me["id"]  # nosec B101
+    assert task_audit_events[1]["decision"] == "allowed"  # nosec B101
+    assert task_audit_events[1]["reason"] == "task marked running"  # nosec B101
+    assert task_audit_events[1]["metadata"] == {"from_status": "queued", "to_status": "running"}  # nosec B101
+    assert task_audit_events[2]["actor_id"] == me["id"]  # nosec B101
+    assert task_audit_events[2]["decision"] == "allowed"  # nosec B101
+    assert task_audit_events[2]["reason"] == "task created"  # nosec B101
+    assert task_audit_events[2]["metadata"] == {  # nosec B101
         "status": "queued",
         "priority": "urgent",
         "assigned_agent_id": agent["id"],
@@ -5255,25 +5612,25 @@ def test_task_management_allows_non_status_updates_via_task_api(tmp_path: Path) 
         },
     )
 
-    assert update_response.status_code == 200
+    assert update_response.status_code == 200  # nosec B101
     updated_task = update_response.json()
-    assert updated_task["id"] == created_task["id"]
-    assert updated_task["title"] == "Updated task"
-    assert updated_task["description"] == "Updated description"
-    assert updated_task["status"] == "queued"
-    assert updated_task["priority"] == "high"
-    assert updated_task["assigned_agent_id"] is None
-    assert updated_task["credential_id"] is None
-    assert updated_task["action"] == "review_code"
-    assert updated_task["intent"] == "Verify the task update contract."
-    assert updated_task["heartbeat_seconds"] == 120
-    assert updated_task["next_heartbeat_at"] is not None
-    assert updated_task["created_at"] == created_task["created_at"]
-    assert updated_task["updated_at"] != created_task["updated_at"]
+    assert updated_task["id"] == created_task["id"]  # nosec B101
+    assert updated_task["title"] == "Updated task"  # nosec B101
+    assert updated_task["description"] == "Updated description"  # nosec B101
+    assert updated_task["status"] == "queued"  # nosec B101
+    assert updated_task["priority"] == "high"  # nosec B101
+    assert updated_task["assigned_agent_id"] is None  # nosec B101
+    assert updated_task["credential_id"] is None  # nosec B101
+    assert updated_task["action"] == "review_code"  # nosec B101
+    assert updated_task["intent"] == "Verify the task update contract."  # nosec B101
+    assert updated_task["heartbeat_seconds"] == 120  # nosec B101
+    assert updated_task["next_heartbeat_at"] is not None  # nosec B101
+    assert updated_task["created_at"] == created_task["created_at"]  # nosec B101
+    assert updated_task["updated_at"] != created_task["updated_at"]  # nosec B101
 
     listed_tasks = client.get("/tasks")
-    assert listed_tasks.status_code == 200
-    assert listed_tasks.json() == [updated_task]
+    assert listed_tasks.status_code == 200  # nosec B101
+    assert listed_tasks.json() == [updated_task]  # nosec B101
 
 
 def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path: Path) -> None:
@@ -5295,8 +5652,8 @@ def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path
         f"/tasks/{created_task['id']}",
         json={"title": None},
     )
-    assert null_title_response.status_code == 400
-    assert null_title_response.json()["detail"] == "title must not be null"
+    assert null_title_response.status_code == 400  # nosec B101
+    assert null_title_response.json()["detail"] == "title must not be null"  # nosec B101
 
     cleared_response = client.patch(
         f"/tasks/{created_task['id']}",
@@ -5307,13 +5664,13 @@ def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path
             "heartbeat_seconds": None,
         },
     )
-    assert cleared_response.status_code == 200
+    assert cleared_response.status_code == 200  # nosec B101
     cleared_task = cleared_response.json()
-    assert cleared_task["description"] == ""
-    assert cleared_task["action"] == ""
-    assert cleared_task["intent"] == ""
-    assert cleared_task["heartbeat_seconds"] is None
-    assert cleared_task["next_heartbeat_at"] is None
+    assert cleared_task["description"] == ""  # nosec B101
+    assert cleared_task["action"] == ""  # nosec B101
+    assert cleared_task["intent"] == ""  # nosec B101
+    assert cleared_task["heartbeat_seconds"] is None  # nosec B101
+    assert cleared_task["next_heartbeat_at"] is None  # nosec B101
 
 
 def test_task_update_rejects_payloads_without_editable_fields(tmp_path: Path) -> None:
@@ -5373,17 +5730,17 @@ def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> No
             "heartbeat_seconds": 60,
         },
     )
-    assert create_response.status_code == 201
+    assert create_response.status_code == 201  # nosec B101
     created_task = create_response.json()
 
     status_response = first_client.patch(f"/tasks/{created_task['id']}/status", json={"status": "blocked"})
-    assert status_response.status_code == 200
+    assert status_response.status_code == 200  # nosec B101
 
     heartbeat_response = first_client.post(
         f"/tasks/{created_task['id']}/heartbeats",
         json={"note": "restart-safe heartbeat"},
     )
-    assert heartbeat_response.status_code == 201
+    assert heartbeat_response.status_code == 201  # nosec B101
     recorded_heartbeat = heartbeat_response.json()
     first_client.close()
 
@@ -5392,43 +5749,43 @@ def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> No
         "/auth/login",
         json={"username": "admin", "password": TEST_PASSWORD},
     )
-    assert login_response.status_code == 200
+    assert login_response.status_code == 200  # nosec B101
 
     tasks_response = second_client.get("/tasks")
-    assert tasks_response.status_code == 200
+    assert tasks_response.status_code == 200  # nosec B101
     persisted_task = tasks_response.json()[0]
-    assert persisted_task["id"] == created_task["id"]
-    assert persisted_task["title"] == "Persist queued task"
-    assert persisted_task["status"] == "blocked"
-    assert persisted_task["assigned_agent_id"] == agent["id"]
-    assert persisted_task["credential_id"] == credential["id"]
-    assert persisted_task["action"] == "read_repo"
-    assert persisted_task["intent"] == "Carry the task contract through a restart."
-    assert persisted_task["heartbeat_seconds"] == 60
-    assert persisted_task["next_heartbeat_at"] is not None
+    assert persisted_task["id"] == created_task["id"]  # nosec B101
+    assert persisted_task["title"] == "Persist queued task"  # nosec B101
+    assert persisted_task["status"] == "blocked"  # nosec B101
+    assert persisted_task["assigned_agent_id"] == agent["id"]  # nosec B101
+    assert persisted_task["credential_id"] == credential["id"]  # nosec B101
+    assert persisted_task["action"] == "read_repo"  # nosec B101
+    assert persisted_task["intent"] == "Carry the task contract through a restart."  # nosec B101
+    assert persisted_task["heartbeat_seconds"] == 60  # nosec B101
+    assert persisted_task["next_heartbeat_at"] is not None  # nosec B101
 
     heartbeats_response = second_client.get(f"/heartbeats?task_id={created_task['id']}")
-    assert heartbeats_response.status_code == 200
-    assert heartbeats_response.json() == [recorded_heartbeat]
+    assert heartbeats_response.status_code == 200  # nosec B101
+    assert heartbeats_response.json() == [recorded_heartbeat]  # nosec B101
 
     audit_response = second_client.get("/audit-events")
-    assert audit_response.status_code == 200
+    assert audit_response.status_code == 200  # nosec B101
     persisted_task_events = [event for event in audit_response.json() if event["target_id"] == created_task["id"]]
-    assert [event["type"] for event in persisted_task_events] == [
+    assert [event["type"] for event in persisted_task_events] == [  # nosec B101
         "task.heartbeat",
         "task.status.updated",
         "task.created",
     ]
-    assert persisted_task_events[0]["actor_id"] == first_user["id"]
-    assert persisted_task_events[0]["metadata"] == {
+    assert persisted_task_events[0]["actor_id"] == first_user["id"]  # nosec B101
+    assert persisted_task_events[0]["metadata"] == {  # nosec B101
         "note_present": True,
         "note_length": len("restart-safe heartbeat"),
     }
-    assert persisted_task_events[1]["actor_id"] == first_user["id"]
-    assert persisted_task_events[1]["reason"] == "task marked blocked"
-    assert persisted_task_events[1]["metadata"] == {"from_status": "queued", "to_status": "blocked"}
-    assert persisted_task_events[2]["actor_id"] == first_user["id"]
-    assert persisted_task_events[2]["metadata"] == {
+    assert persisted_task_events[1]["actor_id"] == first_user["id"]  # nosec B101
+    assert persisted_task_events[1]["reason"] == "task marked blocked"  # nosec B101
+    assert persisted_task_events[1]["metadata"] == {"from_status": "queued", "to_status": "blocked"}  # nosec B101
+    assert persisted_task_events[2]["actor_id"] == first_user["id"]  # nosec B101
+    assert persisted_task_events[2]["metadata"] == {  # nosec B101
         "status": "queued",
         "priority": "normal",
         "assigned_agent_id": agent["id"],
@@ -5452,8 +5809,8 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
             "status": "done",
         },
     )
-    assert invalid_create.status_code == 400
-    assert invalid_create.json()["detail"] == "new tasks must start in one of: blocked, queued, running"
+    assert invalid_create.status_code == 400  # nosec B101
+    assert invalid_create.json()["detail"] == "new tasks must start in one of: blocked, queued, running"  # nosec B101
 
     task = client.post(
         "/tasks",
@@ -5465,20 +5822,20 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
     ).json()
 
     done_response = client.patch(f"/tasks/{task['id']}/status", json={"status": "done"})
-    assert done_response.status_code == 200
-    assert done_response.json()["status"] == "done"
-    assert done_response.json()["next_heartbeat_at"] is None
+    assert done_response.status_code == 200  # nosec B101
+    assert done_response.json()["status"] == "done"  # nosec B101
+    assert done_response.json()["next_heartbeat_at"] is None  # nosec B101
 
     invalid_transition = client.patch(f"/tasks/{task['id']}/status", json={"status": "running"})
-    assert invalid_transition.status_code == 400
-    assert invalid_transition.json()["detail"] == "cannot transition task from done to running"
+    assert invalid_transition.status_code == 400  # nosec B101
+    assert invalid_transition.json()["detail"] == "cannot transition task from done to running"  # nosec B101
 
     terminal_heartbeat = client.post(
         f"/tasks/{task['id']}/heartbeats",
         json={"note": "should be rejected"},
     )
-    assert terminal_heartbeat.status_code == 400
-    assert terminal_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: done"
+    assert terminal_heartbeat.status_code == 400  # nosec B101
+    assert terminal_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: done"  # nosec B101
 
     blocked_task = client.post(
         "/tasks",
@@ -5489,11 +5846,11 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
         },
     ).json()
     blocked_to_queued = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "queued"})
-    assert blocked_to_queued.status_code == 200
-    assert blocked_to_queued.json()["status"] == "queued"
+    assert blocked_to_queued.status_code == 200  # nosec B101
+    assert blocked_to_queued.json()["status"] == "queued"  # nosec B101
     queued_to_running = client.patch(f"/tasks/{blocked_task['id']}/status", json={"status": "running"})
-    assert queued_to_running.status_code == 200
-    assert queued_to_running.json()["status"] == "running"
+    assert queued_to_running.status_code == 200  # nosec B101
+    assert queued_to_running.json()["status"] == "running"  # nosec B101
 
     failed_task = client.post(
         "/tasks",
@@ -5504,15 +5861,15 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
         },
     ).json()
     failed_response = client.patch(f"/tasks/{failed_task['id']}/status", json={"status": "failed"})
-    assert failed_response.status_code == 200
-    assert failed_response.json()["status"] == "failed"
-    assert failed_response.json()["next_heartbeat_at"] is None
+    assert failed_response.status_code == 200  # nosec B101
+    assert failed_response.json()["status"] == "failed"  # nosec B101
+    assert failed_response.json()["next_heartbeat_at"] is None  # nosec B101
     failed_heartbeat = client.post(
         f"/tasks/{failed_task['id']}/heartbeats",
         json={"note": "should be rejected"},
     )
-    assert failed_heartbeat.status_code == 400
-    assert failed_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: failed"
+    assert failed_heartbeat.status_code == 400  # nosec B101
+    assert failed_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: failed"  # nosec B101
 
     cancelled_task = client.post(
         "/tasks",
@@ -5523,25 +5880,25 @@ def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: 
         },
     ).json()
     running_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "running"})
-    assert running_response.status_code == 200
+    assert running_response.status_code == 200  # nosec B101
     cancelled_response = client.patch(f"/tasks/{cancelled_task['id']}/status", json={"status": "cancelled"})
-    assert cancelled_response.status_code == 200
-    assert cancelled_response.json()["status"] == "cancelled"
-    assert cancelled_response.json()["next_heartbeat_at"] is None
+    assert cancelled_response.status_code == 200  # nosec B101
+    assert cancelled_response.json()["status"] == "cancelled"  # nosec B101
+    assert cancelled_response.json()["next_heartbeat_at"] is None  # nosec B101
     cancelled_heartbeat = client.post(
         f"/tasks/{cancelled_task['id']}/heartbeats",
         json={"note": "should be rejected"},
     )
-    assert cancelled_heartbeat.status_code == 400
-    assert cancelled_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: cancelled"
+    assert cancelled_heartbeat.status_code == 400  # nosec B101
+    assert cancelled_heartbeat.json()["detail"] == "cannot record heartbeat for task in terminal status: cancelled"  # nosec B101
 
     edited_done_task = client.patch(
         f"/tasks/{task['id']}",
         json={"heartbeat_seconds": 120},
     )
-    assert edited_done_task.status_code == 200
-    assert edited_done_task.json()["heartbeat_seconds"] == 120
-    assert edited_done_task.json()["next_heartbeat_at"] is None
+    assert edited_done_task.status_code == 200  # nosec B101
+    assert edited_done_task.json()["heartbeat_seconds"] == 120  # nosec B101
+    assert edited_done_task.json()["next_heartbeat_at"] is None  # nosec B101
 
 
 def test_terminal_task_heartbeat_deadlines_are_cleared_during_migration(tmp_path: Path) -> None:
@@ -5573,11 +5930,11 @@ def test_terminal_task_heartbeat_deadlines_are_cleared_during_migration(tmp_path
             for row in conn.execute("SELECT id, next_heartbeat_at, updated_at FROM tasks")
         }
 
-    assert migrated_rows["task_done"]["next_heartbeat_at"] is None
-    assert migrated_rows["task_failed"]["next_heartbeat_at"] is None
-    assert migrated_rows["task_cancelled"]["next_heartbeat_at"] is None
-    assert migrated_rows["task_queued"]["next_heartbeat_at"] == stale_at
-    assert {row["updated_at"] for row in migrated_rows.values()} == {created_at}
+    assert migrated_rows["task_done"]["next_heartbeat_at"] is None  # nosec B101
+    assert migrated_rows["task_failed"]["next_heartbeat_at"] is None  # nosec B101
+    assert migrated_rows["task_cancelled"]["next_heartbeat_at"] is None  # nosec B101
+    assert migrated_rows["task_queued"]["next_heartbeat_at"] == stale_at  # nosec B101
+    assert {row["updated_at"] for row in migrated_rows.values()} == {created_at}  # nosec B101
 
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
@@ -5593,9 +5950,9 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
             "heartbeat_seconds": None,
         },
     )
-    assert task_response.status_code == 201
-    assert task_response.json()["assigned_agent_id"] is None
-    assert task_response.json()["credential_id"] is None
+    assert task_response.status_code == 201  # nosec B101
+    assert task_response.json()["assigned_agent_id"] is None  # nosec B101
+    assert task_response.json()["credential_id"] is None  # nosec B101
 
     schedule_response = client.post(
         "/schedules",
@@ -5607,9 +5964,9 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
             "credential_id": "",
         },
     )
-    assert schedule_response.status_code == 201
-    assert schedule_response.json()["assigned_agent_id"] is None
-    assert schedule_response.json()["credential_id"] is None
+    assert schedule_response.status_code == 201  # nosec B101
+    assert schedule_response.json()["assigned_agent_id"] is None  # nosec B101
+    assert schedule_response.json()["credential_id"] is None  # nosec B101
     require_equal(schedule_response.json()["catch_up_policy"], "run_once", "schedules should default to run_once")
 
 
@@ -5708,25 +6065,25 @@ def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_pa
 
     run_response = client.post("/schedules/run-due")
 
-    assert run_response.status_code == 200
+    assert run_response.status_code == 200  # nosec B101
     created_tasks = {task["title"]: task for task in run_response.json()["created_tasks"]}
-    assert set(created_tasks) == {"Legacy review task", "Healthy review task"}
-    assert created_tasks["Legacy review task"]["priority"] == "normal"
-    assert created_tasks["Healthy review task"]["priority"] == "low"
+    assert set(created_tasks) == {"Legacy review task", "Healthy review task"}  # nosec B101
+    assert created_tasks["Legacy review task"]["priority"] == "normal"  # nosec B101
+    assert created_tasks["Healthy review task"]["priority"] == "low"  # nosec B101
 
     schedules = {schedule["id"]: schedule for schedule in client.get("/schedules").json()}
-    assert schedules[legacy_schedule["id"]]["priority"] == "normal"
-    assert schedules[healthy_schedule["id"]]["priority"] == "low"
+    assert schedules[legacy_schedule["id"]]["priority"] == "normal"  # nosec B101
+    assert schedules[healthy_schedule["id"]]["priority"] == "low"  # nosec B101
 
     normalized_event = next(
         event
         for event in client.get("/audit-events").json()
         if event["type"] == "schedule.priority.normalized" and event["target_id"] == legacy_schedule["id"]
     )
-    assert normalized_event["actor_id"] == me["id"]
-    assert normalized_event["decision"] == "allowed"
-    assert normalized_event["reason"] == "legacy schedule priority normalized"
-    assert normalized_event["metadata"] == {
+    assert normalized_event["actor_id"] == me["id"]  # nosec B101
+    assert normalized_event["decision"] == "allowed"  # nosec B101
+    assert normalized_event["reason"] == "legacy schedule priority normalized"  # nosec B101
+    assert normalized_event["metadata"] == {  # nosec B101
         "from_priority": "legacy-urgent",
         "to_priority": "normal",
     }
@@ -5979,8 +6336,8 @@ def test_existing_email_user_schema_migrates_to_username(tmp_path: Path) -> None
     client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
     response = client.post("/auth/login", json={"username": "admin", "password": TEST_PASSWORD})
 
-    assert response.status_code == 200
-    assert response.json()["user"]["username"] == "admin"
+    assert response.status_code == 200  # nosec B101
+    assert response.json()["user"]["username"] == "admin"  # nosec B101
 
 
 def test_existing_plaintext_sessions_migrate_to_token_hashes(tmp_path: Path) -> None:
