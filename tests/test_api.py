@@ -328,7 +328,16 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Hivemind" in response.text
     assert "/static/app.js" in response.text
-    for required in ['name="username"', 'name="password"', 'name="password_confirm"', 'autocomplete="new-password"']:
+    for required in [
+        'id="boot-view"',
+        '<section id="auth-view" class="auth-shell" hidden>',
+        'id="auth-error" class="field-error" role="alert" hidden',
+        'name="username"',
+        'name="password"',
+        'name="password_confirm"',
+        'autocomplete="new-password"',
+        'minlength="12"',
+    ]:
         if required not in response.text:
             raise AssertionError(f"missing expected auth form markup: {required}")
     username_input_start = response.text.index('name="username"')
@@ -345,6 +354,10 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         "Create the first local operator account" in response.text,
         "frontend should describe first-run local account setup",
     )
+    require_true(
+        "Admin passwords need at least 12 non-whitespace characters" in response.text,
+        "frontend should prompt for a non-blank admin password",
+    )
 
 
 def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
@@ -359,6 +372,9 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "new Error(formatApiError(body, response.status))" in response.text,
         "API helper should use formatted error messages",
     )
+    require_true("setupKnown: false" in response.text, "frontend should start without assuming setup is incomplete")
+    require_true("function validateAuthPayload" in response.text, "frontend should validate auth form state")
+    require_true("admin password must include at least 12 non-whitespace characters" in response.text, "frontend should reject blank setup passwords")
     require_true("new Error(body.detail" not in response.text, "API helper should not stringify structured errors")
 
 
@@ -461,6 +477,28 @@ def test_setup_rejects_mismatched_password_confirmation(tmp_path: Path) -> None:
     require_equal(setup_state.json(), {"setup_complete": False}, "mismatch should not complete setup")
     require_equal(setup_response.status_code, 201, "matching confirmation should create the admin")
     require_equal(setup_response.json()["user"]["role"], "admin", "first user should be admin")
+
+
+def test_setup_rejects_whitespace_only_admin_password(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    blank_password_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": " " * 12,
+            "password_confirm": " " * 12,
+        },
+    )
+    setup_state = client.get("/setup-state")
+
+    require_equal(blank_password_response.status_code, 400, "setup should reject blank admin passwords")
+    require_equal(
+        blank_password_response.json(),
+        {"detail": "admin password must include at least 12 non-whitespace characters"},
+        "setup should explain the password rule",
+    )
+    require_equal(setup_state.json(), {"setup_complete": False}, "blank password should not complete setup")
 
 
 def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:

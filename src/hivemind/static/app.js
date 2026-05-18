@@ -1,6 +1,8 @@
 const state = {
+  setupKnown: false,
   setupComplete: false,
   authMode: null,
+  authError: "",
   me: null,
   config: null,
   agents: [],
@@ -236,6 +238,17 @@ function toast(message) {
   toast.timer = window.setTimeout(() => node.classList.remove("visible"), 2600);
 }
 
+function renderAuthError() {
+  const node = $("#auth-error");
+  node.textContent = state.authError;
+  node.hidden = !state.authError;
+}
+
+function setAuthError(message) {
+  state.authError = message;
+  renderAuthError();
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -247,6 +260,28 @@ function escapeHtml(value) {
 
 function readForm(form) {
   return Object.fromEntries(new FormData(form).entries());
+}
+
+function validateAuthPayload(payload, isSetup) {
+  payload.username = String(payload.username || "").trim();
+  payload.password = String(payload.password || "");
+  if (payload.username.length < 3) {
+    return "username must be at least 3 characters";
+  }
+  if (!payload.password) {
+    return "password is required";
+  }
+  if (!isSetup) {
+    return "";
+  }
+  payload.password_confirm = String(payload.password_confirm || "");
+  if (payload.password.trim().length < 12) {
+    return "admin password must include at least 12 non-whitespace characters";
+  }
+  if (payload.password !== payload.password_confirm) {
+    return "password confirmation does not match";
+  }
+  return "";
 }
 
 function selectedValues(select) {
@@ -595,6 +630,17 @@ function renderNavigation() {
 }
 
 function renderAuth() {
+  const booting = !state.setupKnown;
+  $("#boot-view").hidden = !booting;
+  $("#auth-view").hidden = booting || Boolean(state.me);
+  $("#app-view").hidden = booting || !state.me;
+  $("#workspace-nav").hidden = booting || !state.me;
+  $("#logout-button").hidden = booting || !state.me;
+  $("#refresh-button").hidden = booting || !state.me;
+  if (booting) {
+    return;
+  }
+
   const authMode = state.setupComplete ? "login" : "setup";
   const authForm = $("#auth-form");
   const usernameInput = authForm.elements.username;
@@ -604,6 +650,7 @@ function renderAuth() {
 
   if (state.authMode !== authMode) {
     authForm.reset();
+    state.authError = "";
     state.authMode = authMode;
   }
 
@@ -623,8 +670,10 @@ function renderAuth() {
   $("#auth-detail").textContent = isSetup
     ? "Create the first local operator account for this Hivemind node."
     : "Sign in with the local username and password configured during setup.";
+  $("#password-policy").hidden = !isSetup;
   $("#auth-submit").textContent = isSetup ? "create admin" : "sign in";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
+  renderAuthError();
   renderNavigation();
 }
 
@@ -941,10 +990,17 @@ function consumeOAuthStatus() {
 async function loadSetupState() {
   const setup = await api("/setup-state");
   state.setupComplete = setup.setup_complete;
+  state.setupKnown = true;
 }
 
 async function refresh() {
-  await loadSetupState();
+  try {
+    await loadSetupState();
+  } catch (error) {
+    state.setupKnown = false;
+    render();
+    throw error;
+  }
   try {
     state.me = await api("/me");
   } catch {
@@ -974,8 +1030,10 @@ $("#auth-form").addEventListener("submit", async (event) => {
   const payload = readForm(form);
   const isSetup = !state.setupComplete;
   const path = isSetup ? "/auth/setup" : "/auth/login";
-  if (isSetup && payload.password !== payload.password_confirm) {
-    toast("password confirmation does not match");
+  setAuthError("");
+  const validationError = validateAuthPayload(payload, isSetup);
+  if (validationError) {
+    setAuthError(validationError);
     return;
   }
   if (!isSetup) {
@@ -987,7 +1045,11 @@ $("#auth-form").addEventListener("submit", async (event) => {
     await refresh();
     toast(isSetup ? "Admin created." : "Signed in.");
   } catch (error) {
-    toast(error.message);
+    setAuthError(error.message);
+    if (isSetup) {
+      await loadSetupState().catch(() => {});
+      render();
+    }
   }
 });
 
