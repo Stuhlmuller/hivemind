@@ -5,6 +5,7 @@ from datetime import timedelta
 import sqlite3
 from typing import Any
 
+from hivemind.prompt_safety import redact_prompt_like_text, validate_prompt_like_text
 from hivemind.secret_refs import (
     BROKER_SECRET_REF_SCHEME,
     validate_external_credential_metadata,
@@ -163,7 +164,7 @@ def _agent_config(row: sqlite3.Row) -> dict[str, Any]:
         "role": row["role"],
         "provider": row["provider"],
         "model": row["model"],
-        "system_prompt": row["system_prompt"],
+        "system_prompt": redact_prompt_like_text(row["system_prompt"]),
     }
 
 
@@ -249,6 +250,11 @@ def _normalize_agents(items: Sequence[Any]) -> list[dict[str, Any]]:
         if agent_id in seen:
             raise DeclarativeConfigError(f"agents[{index}].id duplicates {agent_id}")
         seen.add(agent_id)
+        system_prompt = _optional_str(agent, "system_prompt") or ""
+        try:
+            system_prompt = validate_prompt_like_text(system_prompt, field_name=f"agents[{index}].system_prompt")
+        except ValueError as exc:
+            raise DeclarativeConfigError(str(exc)) from exc
         agents.append(
             {
                 "id": agent_id,
@@ -256,7 +262,7 @@ def _normalize_agents(items: Sequence[Any]) -> list[dict[str, Any]]:
                 "role": _required_str(agent, "role", f"agents[{index}]"),
                 "provider": _required_str(agent, "provider", f"agents[{index}]"),
                 "model": _required_str(agent, "model", f"agents[{index}]"),
-                "system_prompt": _optional_str(agent, "system_prompt") or "",
+                "system_prompt": system_prompt,
             }
         )
     return agents

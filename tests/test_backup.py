@@ -49,6 +49,40 @@ def table_count(db_path: Path, table: str) -> int:
         conn.close()
 
 
+def test_backup_export_redacts_legacy_secret_like_agent_prompts(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    agent = source.list_agents()[0]
+    with source.connect() as conn:
+        conn.execute(
+            "UPDATE agents SET system_prompt = ? WHERE id = ?",
+            ("Use env://OPENROUTER_API_KEY with password = hunter2.", agent["id"]),
+        )
+
+    bundle = source.export_backup_bundle()
+    exported_agent = bundle["tables"]["agents"][0]
+
+    require_equal(exported_agent["system_prompt"], "[redacted]", "backup export should redact unsafe legacy prompts")
+    require_true("OPENROUTER_API_KEY" not in json.dumps(bundle), "backup export should not expose credential ref targets")
+    require_true("hunter2" not in json.dumps(bundle), "backup export should not expose password-like values")
+
+
+def test_backup_restore_rejects_secret_like_agent_prompts(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    bundle = source.export_backup_bundle()
+    bundle["tables"]["agents"][0]["system_prompt"] = "Use file:///var/lib/hivemind/provider-token with api_key = leaked."
+    target = HivemindStore(tmp_path / "target.db")
+
+    try:
+        target.restore_backup_bundle(bundle)
+    except StoreValidationError as exc:
+        require_true("system_prompt contains secret-like material" in str(exc), "restore should reject unsafe prompts")
+        require_true("provider-token" not in str(exc), "restore error should not echo secret-like values")
+    else:
+        raise AssertionError("restore accepted secret-like agent prompt")
+
+
 def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_state(tmp_path: Path) -> None:
     source_db = tmp_path / "source.db"
     source = HivemindStore(source_db)

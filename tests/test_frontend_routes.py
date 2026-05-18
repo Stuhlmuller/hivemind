@@ -50,3 +50,20 @@ def test_frontend_route_selection_handles_trailing_control_paths() -> None:
         "pathname === routePath || pathname.startsWith(`${routePath}/`)" in app_js,
         "frontend should match trailing and nested control routes to their page",
     )
+
+
+def test_agent_prompt_secret_rejection_has_field_level_frontend_surface(tmp_path: Path) -> None:
+    response = client_for(tmp_path).get("/control/agents")
+    repo_root = Path(__file__).resolve().parents[1]
+    app_js = (repo_root / "src/hivemind/static/app.js").read_text(encoding="utf-8")
+
+    require_equal(response.status_code, 200, "agents frontend should be served")
+    require_true('id="system-prompt-error"' in response.text, "system prompt should have a field error target")
+    require_true(
+        'aria-describedby="system-prompt-error"' in response.text,
+        "system prompt should connect the textarea to the field error",
+    )
+    require_true(
+        "showSystemPromptError(error.message)" in app_js,
+        "spawn form should surface backend prompt validation errors beside the field",
+    )

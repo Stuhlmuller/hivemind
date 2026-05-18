@@ -321,7 +321,8 @@ agents: brokered capabilities</pre>
                       <label>issue rate/hour<input name="issue_rate_limit_per_hour" type="number" min="0" max="200" value="0" /></label>
                       <label>issue labels<input name="issue_labels" value="needs-triage" autocomplete="off" /></label>
                     </div>
-                    <label>system prompt<textarea name="system_prompt" rows="3">Communicate in concise, actionable updates.</textarea></label>
+                    <label>system prompt<textarea name="system_prompt" rows="3" aria-describedby="system-prompt-error">Communicate in concise, actionable updates.</textarea></label>
+                    <p id="system-prompt-error" class="field-error" aria-live="polite" hidden></p>
                     <button type="submit">spawn</button>
                   </form>
                   <div id="agents-list" class="list" aria-live="polite"></div>

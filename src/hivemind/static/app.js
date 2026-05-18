@@ -262,6 +262,19 @@ function setAuthError(message) {
   renderAuthError();
 }
 
+function showSystemPromptError(message) {
+  const node = $("#system-prompt-error");
+  const field = $("#spawn-form textarea[name='system_prompt']");
+  if (!node || !field) return;
+  node.textContent = message || "";
+  node.hidden = !message;
+  field.setAttribute("aria-invalid", message ? "true" : "false");
+}
+
+function clearSystemPromptError() {
+  showSystemPromptError("");
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -1435,6 +1448,7 @@ window.addEventListener("popstate", () => {
 
 $("#spawn-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  clearSystemPromptError();
   const form = event.currentTarget;
   const payload = readForm(form);
   payload.can_spawn_subagents = form.elements.can_spawn_subagents.checked;
@@ -1442,9 +1456,16 @@ $("#spawn-form").addEventListener("submit", async (event) => {
   payload.issue_creation_enabled = form.elements.issue_creation_enabled.checked;
   payload.issue_rate_limit_per_hour = Number(payload.issue_rate_limit_per_hour);
   payload.issue_labels = splitCsv(payload.issue_labels);
-  await api("/agents", { method: "POST", body: JSON.stringify(payload) });
-  await refresh();
-  toast("Agent registered.");
+  try {
+    await api("/agents", { method: "POST", body: JSON.stringify(payload) });
+    await refresh();
+    toast("Agent registered.");
+  } catch (error) {
+    if (error.message.includes("system_prompt")) {
+      showSystemPromptError(error.message);
+    }
+    toast(error.message);
+  }
 });
 
 $("#hive-form").addEventListener("submit", async (event) => {
@@ -1502,6 +1523,8 @@ $("#agents-list").addEventListener("click", async (event) => {
     toast(error.message);
   }
 });
+
+$("#spawn-form textarea[name='system_prompt']").addEventListener("input", clearSystemPromptError);
 
 $("#credential-form").addEventListener("submit", async (event) => {
   event.preventDefault();
