@@ -30,7 +30,7 @@ Before doing any other work:
 
 1. Inspect the issue backlog with `gh issue list --state all --limit 100`.
 2. Inspect open PRs with `gh pr list --state open --limit 50`.
-3. Pick the smallest eligible open issue that is not already in flight.
+3. Pick the smallest eligible open issue that is not already in flight, unless the loop preamble lists worker priority labels. When priority labels are configured, apply active branch, open PR, and lane eligibility checks first; then choose by priority-label order, with the smallest eligible issue number as the tie-breaker and fallback.
 4. Work from this dedicated worker worktree only. Do not move issue work into the primary checkout.
 5. Create or continue one issue branch named `issue-<number>-<slug>`.
 6. Implement the issue, run focused verification, and run `qlty check` on the changed files before updating the PR.

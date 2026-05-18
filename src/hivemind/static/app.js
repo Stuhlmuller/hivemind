@@ -11,6 +11,7 @@ const state = {
   schedules: [],
   heartbeats: [],
   auditEvents: [],
+  editingTaskIds: new Set(),
   selectedCredentialTemplate: "github_oauth_app",
 };
 
@@ -155,7 +156,30 @@ const credentialKindLabels = {
 
 const ROUTES = {
   overview: "/",
+  agents: "/control/agents",
+  tasks: "/control/tasks",
+  schedules: "/control/schedules",
+  audit: "/control/audit",
   credentials: "/control/credentials",
+};
+const TASK_STATUSES = ["queued", "running", "blocked", "done", "failed", "cancelled"];
+const TASK_TRANSITIONS = {
+  queued: ["running", "blocked", "done", "failed", "cancelled"],
+  running: ["blocked", "done", "failed", "cancelled"],
+  blocked: ["queued", "running", "done", "failed", "cancelled"],
+  done: [],
+  failed: [],
+  cancelled: [],
+};
+const CLOSED_TASK_STATUSES = new Set(["done", "failed", "cancelled"]);
+
+const PAGE_META = {
+  overview: "overview / runtime state",
+  agents: "agents / registry, provider, status",
+  tasks: "tasks / queue, intent, heartbeat",
+  schedules: "schedules / intervals, due work",
+  audit: "audit / decisions, state changes",
+  credentials: "credential broker / policies, leases, audit",
 };
 
 const agentStatuses = ["idle", "queued", "running", "blocked", "done", "failed"];
@@ -236,6 +260,38 @@ function splitCsv(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeTaskPayload(payload) {
+  return {
+    ...payload,
+    assigned_agent_id: payload.assigned_agent_id || null,
+    credential_id: payload.credential_id || null,
+    heartbeat_seconds: payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null,
+  };
+}
+
+function setText(selector, value) {
+  const node = $(selector);
+  if (node) {
+    node.textContent = String(value);
+  }
+}
+
+function statusCount(items, status) {
+  return items.filter((item) => item.status === status).length;
+}
+
+function isTaskStale(task) {
+  if (!task.next_heartbeat_at || CLOSED_TASK_STATUSES.has(task.status)) return false;
+  const nextHeartbeat = Date.parse(task.next_heartbeat_at);
+  return Number.isFinite(nextHeartbeat) && nextHeartbeat <= Date.now();
+}
+
+function isScheduleDue(schedule) {
+  if (!schedule.enabled || !schedule.next_run_at) return false;
+  const nextRun = Date.parse(schedule.next_run_at);
+  return Number.isFinite(nextRun) && nextRun <= Date.now();
 }
 
 function credentialKindLabel(kind) {
@@ -347,20 +403,36 @@ function item(title, meta, pills = [], actions = "") {
 }
 
 function optionList(items, labelKey = "name", includeEmpty = false, includeId = false) {
-  const empty = includeEmpty ? '<option value="">None</option>' : "";
-  return (
-    empty +
-    items
-      .map((item) => {
-        const label = includeId ? `${item[labelKey]} (${item.id})` : item[labelKey];
-        return `<option value="${escapeHtml(item.id)}">${escapeHtml(label)}</option>`;
-      })
-      .join("")
-  );
+  return optionListWithSelected(items, null, labelKey, includeEmpty, includeId);
+}
+
+function optionListWithSelected(items, selectedValue, labelKey = "name", includeEmpty = false, includeId = false) {
+  const emptySelected = selectedValue === null || selectedValue === undefined || selectedValue === "";
+  const empty = includeEmpty ? `<option value=""${emptySelected ? " selected" : ""}>None</option>` : "";
+  return empty + items.map((item) => {
+    const selected = selectedValue === item.id ? " selected" : "";
+    const label = includeId ? `${item[labelKey]} (${item.id})` : item[labelKey];
+    return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(label)}</option>`;
+  }).join("");
+}
+
+function scalarOptionList(values, selectedValue) {
+  return values.map((value) => {
+    const selected = selectedValue === value ? " selected" : "";
+    return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+  }).join("");
+}
+
+function normalizePagePath(pathname) {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
 }
 
 function currentPage() {
-  return window.location.pathname.startsWith(ROUTES.credentials) ? "credentials" : "overview";
+  const pathname = normalizePagePath(window.location.pathname);
+  const route = Object.entries(ROUTES).find(
+    ([, routePath]) => routePath !== "/" && (pathname === routePath || pathname.startsWith(`${routePath}/`)),
+  );
+  return route ? route[0] : "overview";
 }
 
 function credentialName(credentialId) {
@@ -374,24 +446,144 @@ function agentName(agentId) {
 }
 
 function agentTaskSummary(agent) {
-  if (!agent.assigned_tasks.length) return "none";
-  return agent.assigned_tasks
+  const assignedTasks = agent.assigned_tasks || [];
+  if (!assignedTasks.length) return "none";
+  return assignedTasks
     .map((task) => `${escapeHtml(task.title)} [${escapeHtml(task.status)}]`)
     .join("<br>");
 }
 
 function agentScheduleSummary(agent) {
-  if (!agent.assigned_schedules.length) return "none";
-  return agent.assigned_schedules
+  const assignedSchedules = agent.assigned_schedules || [];
+  if (!assignedSchedules.length) return "none";
+  return assignedSchedules
     .map((schedule) => `${escapeHtml(schedule.name)} -> ${escapeHtml(schedule.task_title)}`)
     .join("<br>");
 }
 
 function agentPolicySummary(agent) {
-  if (!agent.credential_policies.length) return "none";
-  return agent.credential_policies
+  const credentialPolicies = agent.credential_policies || [];
+  if (!credentialPolicies.length) return "none";
+  return credentialPolicies
     .map((policy) => `${escapeHtml(policy.name)} [${escapeHtml(policy.allowed_actions.join(", "))}]`)
     .join("<br>");
+}
+
+function taskAssignmentLabel(task) {
+  return task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned";
+}
+
+function taskCredentialLabel(task) {
+  return task.credential_id ? credentialName(task.credential_id) : "none";
+}
+
+function taskHeartbeatLabel(task) {
+  return task.heartbeat_seconds ? `${escapeHtml(task.heartbeat_seconds)}s` : "manual";
+}
+
+function taskHeartbeatState(task) {
+  if (!task.heartbeat_seconds) return "manual";
+  if (!task.next_heartbeat_at) return "pending";
+  const nextHeartbeatAt = Date.parse(task.next_heartbeat_at);
+  if (Number.isNaN(nextHeartbeatAt)) return "pending";
+  return nextHeartbeatAt <= Date.now() ? "stale" : "waiting";
+}
+
+function latestHeartbeatsByTask() {
+  const latest = new Map();
+  for (const heartbeat of state.heartbeats) {
+    if (!latest.has(heartbeat.task_id)) {
+      latest.set(heartbeat.task_id, heartbeat);
+    }
+  }
+  return latest;
+}
+
+function toggleTaskEdit(taskId) {
+  if (state.editingTaskIds.has(taskId)) {
+    state.editingTaskIds.delete(taskId);
+  } else {
+    state.editingTaskIds.add(taskId);
+  }
+  renderTasks();
+}
+
+function renderTaskStatusButtons(task) {
+  const visibleStatuses = [task.status, ...(TASK_TRANSITIONS[task.status] || [])];
+  return visibleStatuses.map((status) => {
+    const current = status === task.status;
+    return `<button class="status-button${current ? " is-current" : ""}" ${current ? "disabled" : ""} data-task-status="${escapeHtml(task.id)}" data-status="${escapeHtml(status)}" type="button">${escapeHtml(status)}</button>`;
+  }).join("");
+}
+
+function renderTaskEditForm(task) {
+  if (!state.editingTaskIds.has(task.id)) {
+    return "";
+  }
+  return `
+    <form class="task-edit-form stack" data-task-edit-form="${escapeHtml(task.id)}">
+      <div class="inline-heading task-edit-header">
+        <div>
+          <h3>edit task</h3>
+          <p>status stays on explicit transition buttons</p>
+        </div>
+        <code>${escapeHtml(task.id)}</code>
+      </div>
+      <div class="two-col">
+        <label>title<input name="title" value="${escapeHtml(task.title)}" autocomplete="off" required /></label>
+        <label>priority<select name="priority">${scalarOptionList(["low", "normal", "high", "urgent"], task.priority)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>agent<select name="assigned_agent_id">${optionListWithSelected(state.agents, task.assigned_agent_id, "name", true)}</select></label>
+        <label>credential<select name="credential_id">${optionListWithSelected(state.credentials, task.credential_id, "name", true)}</select></label>
+      </div>
+      <div class="two-col">
+        <label>action<input name="action" value="${escapeHtml(task.action || "")}" autocomplete="off" /></label>
+        <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="${escapeHtml(task.heartbeat_seconds ?? "")}" /></label>
+      </div>
+      <label>description<textarea name="description" rows="3">${escapeHtml(task.description || "")}</textarea></label>
+      <label>intent<textarea name="intent" rows="3">${escapeHtml(task.intent || "")}</textarea></label>
+      <div class="button-row">
+        <button type="submit">save edit</button>
+        <button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">close</button>
+      </div>
+    </form>`;
+}
+
+function renderTaskHealth() {
+  const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0]));
+  let staleHeartbeats = 0;
+  for (const task of state.tasks) {
+    counts[task.status] = (counts[task.status] || 0) + 1;
+    if (taskHeartbeatState(task) === "stale") {
+      staleHeartbeats += 1;
+    }
+  }
+  const dueSchedules = state.schedules.filter((schedule) => {
+    if (!schedule.enabled || !schedule.next_run_at) {
+      return false;
+    }
+    const nextRunAt = Date.parse(schedule.next_run_at);
+    return !Number.isNaN(nextRunAt) && nextRunAt <= Date.now();
+  }).length;
+  const taskAudits = state.auditEvents.filter((event) => event.type.startsWith("task.")).length;
+  $("#running-task-count").textContent = counts.running;
+  $("#blocked-task-count").textContent = counts.blocked;
+  $("#due-schedule-count").textContent = dueSchedules;
+  $("#stale-heartbeat-count").textContent = staleHeartbeats;
+  $("#task-health").innerHTML = [
+    ["queued", counts.queued],
+    ["running", counts.running],
+    ["blocked", counts.blocked],
+    ["due runs", dueSchedules],
+    ["stale hb", staleHeartbeats],
+    ["task audit", taskAudits],
+  ]
+    .map(
+      ([label, value]) =>
+        `<div class="status-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`,
+    )
+    .join("");
 }
 
 function leaseTimestampLabel(lease) {
@@ -411,10 +603,13 @@ function leaseDetailRows(lease) {
 
 function renderNavigation() {
   const page = currentPage();
-  $("#overview-page").hidden = page !== "overview";
-  $("#credentials-page").hidden = page !== "credentials";
-  $("#surface-line").textContent =
-    page === "credentials" ? "credential broker / policies, leases, audit" : "runtime overview / agents, tasks, schedules";
+  for (const pageId of Object.keys(ROUTES)) {
+    const pageNode = $(`#${pageId}-page`);
+    if (pageNode) {
+      pageNode.hidden = pageId !== page;
+    }
+  }
+  $("#surface-line").textContent = PAGE_META[page] || PAGE_META.overview;
   for (const link of $$("[data-page-link]")) {
     const active = link.dataset.pageLink === page;
     link.classList.toggle("active", active);
@@ -484,7 +679,12 @@ function renderSelectors() {
 }
 
 function renderAgents() {
-  $("#agent-count").textContent = state.agents.length;
+  setText("#agent-count", state.agents.length);
+  setText("#agents-page-count", state.agents.length);
+  setText("#agents-idle-count", statusCount(state.agents, "idle"));
+  setText("#agents-running-count", statusCount(state.agents, "running"));
+  setText("#agents-blocked-count", statusCount(state.agents, "blocked"));
+  setText("#nav-agents-count", state.agents.length);
   $("#agents-list").innerHTML = state.agents
     .map((agent) => {
       const actions = `
@@ -498,7 +698,7 @@ function renderAgents() {
         </div>`;
       return item(
         agent.name,
-        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
+        `Role: ${escapeHtml(agent.role)}<br>ID: ${escapeHtml(agent.id)}<br>Prompt: ${escapeHtml(agent.system_prompt || "none")}<br>Tasks: ${escapeHtml(agent.active_task_count)} active / ${escapeHtml(agent.assigned_task_count)} assigned<br>Schedules: ${escapeHtml(agent.assigned_schedule_count)}<br>Policies: ${escapeHtml(agent.credential_policy_count)}<br>Task refs: ${agentTaskSummary(agent)}<br>Schedule refs: ${agentScheduleSummary(agent)}<br>Policy refs: ${agentPolicySummary(agent)}`,
         [
           agent.status,
           agent.provider,
@@ -513,7 +713,8 @@ function renderAgents() {
 }
 
 function renderCredentials() {
-  $("#credential-count").textContent = state.credentials.length;
+  setText("#credential-count", state.credentials.length);
+  setText("#nav-credentials-count", state.credentials.length);
   $("#credentials-list").innerHTML = state.credentials
     .map((credential) => {
       const metadata = credential.metadata || {};
@@ -533,7 +734,7 @@ function renderCredentials() {
       return item(credential.name, credentialDetailRows(credential), pills);
     })
     .join("") || '<p class="meta">No credentials yet.</p>';
-  $("#credential-page-count").textContent = state.credentials.length;
+  setText("#credential-page-count", state.credentials.length);
 }
 
 function renderOAuthProviders() {
@@ -561,7 +762,7 @@ function renderOAuthProviders() {
 }
 
 function renderLeases() {
-  $("#lease-count").textContent = state.leases.length;
+  setText("#lease-count", state.leases.length);
   $("#leases-list").innerHTML = state.leases
     .map((lease) =>
       item(
@@ -571,9 +772,9 @@ function renderLeases() {
       ),
     )
     .join("") || '<p class="meta">No leases yet.</p>';
-  $("#credential-active-lease-count").textContent = state.leases.filter((lease) => lease.status === "active").length;
-  $("#credential-pending-lease-count").textContent = state.leases.filter((lease) => lease.status === "pending").length;
-  $("#credential-expired-lease-count").textContent = state.leases.filter((lease) => lease.status === "expired").length;
+  setText("#credential-active-lease-count", state.leases.filter((lease) => lease.status === "active").length);
+  setText("#credential-pending-lease-count", state.leases.filter((lease) => lease.status === "pending").length);
+  setText("#credential-expired-lease-count", state.leases.filter((lease) => lease.status === "expired").length);
 }
 
 function renderPendingApprovals() {
@@ -591,29 +792,63 @@ function renderPendingApprovals() {
 }
 
 function renderTasks() {
-  $("#task-count").textContent = state.tasks.length;
+  const heartbeatsByTask = latestHeartbeatsByTask();
+  setText("#task-count", state.tasks.length);
+  setText("#tasks-page-count", state.tasks.length);
+  setText("#tasks-running-count", statusCount(state.tasks, "running"));
+  setText("#tasks-blocked-count", statusCount(state.tasks, "blocked"));
+  setText("#tasks-stale-count", state.tasks.filter((task) => taskHeartbeatState(task) === "stale").length);
+  setText("#nav-tasks-count", state.tasks.length);
+  renderTaskHealth();
   $("#tasks-list").innerHTML = state.tasks
     .map((task) => {
+      const heartbeatState = taskHeartbeatState(task);
+      const lastHeartbeat = heartbeatsByTask.get(task.id);
+      const editAction = `<button data-task-edit-toggle="${escapeHtml(task.id)}" type="button">${state.editingTaskIds.has(task.id) ? "close edit" : "edit task"}</button>`;
+      const heartbeatAction = CLOSED_TASK_STATUSES.has(task.status)
+        ? '<span class="meta">Heartbeat closed</span>'
+        : `<button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>`;
       const actions = `
-        <div class="button-row">
-          <button data-task-status="${escapeHtml(task.id)}" data-status="running" type="button">Start</button>
-          <button data-task-status="${escapeHtml(task.id)}" data-status="done" type="button">Done</button>
-          <button data-task-heartbeat="${escapeHtml(task.id)}" type="button">Heartbeat</button>
+        <div class="task-actions">
+          <div class="status-row">
+            ${renderTaskStatusButtons(task)}
+          </div>
+          <div class="button-row">
+            ${editAction}
+            ${heartbeatAction}
+          </div>
+          ${renderTaskEditForm(task)}
         </div>`;
       return item(
         task.title,
-        `${escapeHtml(task.description)}<br>Status: ${escapeHtml(task.status)}<br>Agent: ${escapeHtml(task.assigned_agent_id || "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
-        [task.priority],
+        `${escapeHtml(task.description || "No task description.")}<br>ID: ${escapeHtml(task.id)}<br>Agent: ${escapeHtml(taskAssignmentLabel(task))}<br>Credential: ${escapeHtml(taskCredentialLabel(task))}<br>Action: ${escapeHtml(task.action || "none")}<br>Intent: ${escapeHtml(task.intent || "none")}<br>Heartbeat SLA: ${taskHeartbeatLabel(task)}<br>Last heartbeat: ${escapeHtml(lastHeartbeat?.created_at || "none")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}<br>Updated: ${escapeHtml(task.updated_at)}`,
+        [task.status, task.priority, task.assigned_agent_id ? "assigned" : "unassigned", `heartbeat:${heartbeatState}`],
         actions,
       );
     })
     .join("") || '<p class="meta">No tasks yet.</p>';
 }
 
+function renderHeartbeats() {
+  $("#heartbeats-list").innerHTML = state.heartbeats
+    .map((heartbeat) =>
+      `<article class="event"><strong>${escapeHtml(heartbeat.task_id)}</strong><div class="meta">Agent: ${escapeHtml(heartbeat.agent_id || "user")}<br>Note: ${escapeHtml(heartbeat.note)}<br>${escapeHtml(heartbeat.created_at)}</div></article>`,
+    )
+    .join("") || '<p class="meta">No heartbeats yet.</p>';
+}
+
 function renderSchedules() {
-  $("#schedule-count").textContent = state.schedules.length;
+  const dueSchedules = state.schedules.filter(isScheduleDue);
+  setText("#schedule-count", state.schedules.length);
+  setText("#schedules-page-count", state.schedules.length);
+  setText("#schedules-enabled-count", state.schedules.filter((schedule) => schedule.enabled).length);
+  setText("#schedules-due-count", dueSchedules.length);
+  setText("#nav-schedules-count", state.schedules.length);
   $("#schedules-list").innerHTML = state.schedules
     .map((schedule) => {
+      const due = isScheduleDue(schedule);
+      const assignedAgent = schedule.assigned_agent_id ? agentName(schedule.assigned_agent_id) : "unassigned";
+      const credential = schedule.credential_id ? credentialName(schedule.credential_id) : "none";
       const actions = `
         <div class="button-row">
           <button data-schedule-enabled="${escapeHtml(schedule.id)}" data-enabled="${schedule.enabled ? "false" : "true"}" type="button">
@@ -622,8 +857,13 @@ function renderSchedules() {
         </div>`;
       return item(
         schedule.name,
-        `Every ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Next run: ${escapeHtml(schedule.next_run_at)}<br>Last run: ${escapeHtml(schedule.last_run_at || "never")}<br>Task: ${escapeHtml(schedule.task_title)}`,
-        [schedule.enabled ? "enabled" : "paused"],
+        `ID: ${escapeHtml(schedule.id)}<br>Task: ${escapeHtml(schedule.task_title)}<br>Agent: ${escapeHtml(assignedAgent)}<br>Credential: ${escapeHtml(credential)}<br>Action: ${escapeHtml(schedule.action || "none")}<br>Intent: ${escapeHtml(schedule.intent || "none")}<br>Interval: ${escapeHtml(schedule.interval_seconds)}s<br>Catch-up: ${escapeHtml(scheduleCatchUpPolicyLabel(schedule.catch_up_policy))}<br>Last run: ${escapeHtml(schedule.last_run_at || "none")}<br>Next run: ${escapeHtml(schedule.next_run_at)}`,
+        [
+          schedule.enabled ? "enabled" : "paused",
+          schedule.priority,
+          scheduleCatchUpPolicyLabel(schedule.catch_up_policy),
+          due ? "due now" : "scheduled",
+        ],
         actions,
       );
     })
@@ -631,11 +871,18 @@ function renderSchedules() {
 }
 
 function renderAudit() {
-  $("#audit-count").textContent = state.auditEvents.length;
+  setText("#audit-count", state.auditEvents.length);
+  setText("#audit-page-count", state.auditEvents.length);
+  setText("#audit-denied-count", state.auditEvents.filter((event) => event.decision === "denied").length);
+  setText("#task-audit-count", state.auditEvents.filter((event) => event.type.startsWith("task.")).length);
+  setText("#schedule-audit-count", state.auditEvents.filter((event) => event.type.startsWith("schedule.")).length);
+  setText("#nav-audit-count", state.auditEvents.length);
   $("#audit-list").innerHTML = state.auditEvents
     .map(
       (event) =>
-        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}<br>${escapeHtml(event.created_at)}</div></article>`,
+        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${Object.entries(event.metadata || {}).length ? `<br>${Object.entries(event.metadata)
+          .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(typeof value === "string" ? value : JSON.stringify(value))}`)
+          .join("<br>")}` : ""}<br>${escapeHtml(event.created_at)}</div></article>`,
     )
     .join("") || '<p class="meta">No audit events yet.</p>';
 }
@@ -651,6 +898,48 @@ function renderCredentialAudit() {
       return `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>Actor: ${escapeHtml(event.actor_id)} -> Target: ${escapeHtml(event.target_id)}${action}${ttl}${leaseId}<br>${escapeHtml(event.created_at)}</div></article>`;
     })
     .join("") || '<p class="meta">No credential audit events yet.</p>';
+}
+
+function renderOverview() {
+  const activeTasks = state.tasks.filter((task) => !["done", "failed", "cancelled"].includes(task.status)).slice(0, 5);
+  const dueSchedules = state.schedules.filter(isScheduleDue).slice(0, 5);
+  const recentAudit = state.auditEvents.slice(0, 5);
+
+  $("#overview-agents-list").innerHTML = state.agents
+    .slice(0, 5)
+    .map((agent) => item(agent.name, `ID: ${escapeHtml(agent.id)}<br>${escapeHtml(agent.role)}`, [agent.status, agent.provider, agent.model]))
+    .join("") || '<p class="meta">No agents yet.</p>';
+
+  $("#overview-tasks-list").innerHTML = activeTasks
+    .map((task) => {
+      const pills = [task.status, task.priority];
+      if (isTaskStale(task)) {
+        pills.push("stale heartbeat");
+      }
+      return item(
+        task.title,
+        `Agent: ${escapeHtml(task.assigned_agent_id ? agentName(task.assigned_agent_id) : "unassigned")}<br>Next heartbeat: ${escapeHtml(task.next_heartbeat_at || "none")}`,
+        pills,
+      );
+    })
+    .join("") || '<p class="meta">No active tasks.</p>';
+
+  $("#overview-schedules-list").innerHTML = dueSchedules
+    .map((schedule) =>
+      item(
+        schedule.name,
+        `Next run: ${escapeHtml(schedule.next_run_at)}<br>Task: ${escapeHtml(schedule.task_title)}`,
+        [schedule.enabled ? "enabled" : "paused", scheduleCatchUpPolicyLabel(schedule.catch_up_policy)],
+      ),
+    )
+    .join("") || '<p class="meta">No schedules due now.</p>';
+
+  $("#overview-audit-list").innerHTML = recentAudit
+    .map(
+      (event) =>
+        `<article class="event"><strong>${escapeHtml(event.type)}</strong><div class="meta">${escapeHtml(event.decision)}: ${escapeHtml(event.reason)}<br>${escapeHtml(event.created_at)}</div></article>`,
+    )
+    .join("") || '<p class="meta">No audit events yet.</p>';
 }
 
 function renderConfig() {
@@ -676,9 +965,11 @@ function render() {
   renderLeases();
   renderPendingApprovals();
   renderTasks();
+  renderHeartbeats();
   renderSchedules();
   renderAudit();
   renderCredentialAudit();
+  renderOverview();
 }
 
 function consumeOAuthStatus() {
@@ -933,8 +1224,7 @@ $("#pending-approvals-list").addEventListener("click", async (event) => {
 
 $("#task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = readForm(event.currentTarget);
-  payload.heartbeat_seconds = payload.heartbeat_seconds ? Number(payload.heartbeat_seconds) : null;
+  const payload = normalizeTaskPayload(readForm(event.currentTarget));
   await api("/tasks", { method: "POST", body: JSON.stringify(payload) });
   await refresh();
   toast("Task created.");
@@ -943,21 +1233,49 @@ $("#task-form").addEventListener("submit", async (event) => {
 $("#tasks-list").addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
-  if (target.dataset.taskStatus) {
-    await api(`/tasks/${target.dataset.taskStatus}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: target.dataset.status }),
-    });
+  try {
+    if (target.dataset.taskEditToggle) {
+      toggleTaskEdit(target.dataset.taskEditToggle);
+      return;
+    }
+    if (target.dataset.taskStatus) {
+      await api(`/tasks/${target.dataset.taskStatus}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: target.dataset.status }),
+      });
+      await refresh();
+      toast("Task updated.");
+    }
+    if (target.dataset.taskHeartbeat) {
+      await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
+        method: "POST",
+        body: JSON.stringify({ note: "manual heartbeat from console" }),
+      });
+      await refresh();
+      toast("Heartbeat recorded.");
+    }
+  } catch (error) {
     await refresh();
-    toast("Task updated.");
+    toast(error.message);
   }
-  if (target.dataset.taskHeartbeat) {
-    await api(`/tasks/${target.dataset.taskHeartbeat}/heartbeats`, {
-      method: "POST",
-      body: JSON.stringify({ note: "manual heartbeat from console" }),
-    });
+});
+
+$("#tasks-list").addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const taskId = form.dataset.taskEditForm;
+  if (!taskId) return;
+  event.preventDefault();
+  try {
+    const payload = normalizeTaskPayload(readForm(form));
+    await api(`/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    state.editingTaskIds.delete(taskId);
     await refresh();
-    toast("Heartbeat recorded.");
+    toast("Task details updated.");
+  } catch (error) {
+    state.editingTaskIds.add(taskId);
+    await refresh();
+    toast(error.message);
   }
 });
 

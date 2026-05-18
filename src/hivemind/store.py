@@ -17,6 +17,13 @@ from threading import RLock
 from typing import Any, Iterator
 
 from hivemind.config import HivemindConfig
+from hivemind.models import (
+    INITIAL_TASK_STATUSES,
+    TASK_STATUS_TRANSITIONS,
+    TERMINAL_TASK_STATUSES,
+    TaskPriority,
+    TaskStatus,
+)
 from hivemind.oauth import SecretBox
 from hivemind.policy import PolicyEngine, PolicyReviewInput, ProviderIntentReviewer
 from hivemind.providers import (
@@ -119,6 +126,24 @@ AGENT_STATUS_VALUES = frozenset({"idle", "queued", "running", "blocked", "done",
 FINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 AGENT_STATUS_UPDATE_SQL = "UPDATE agents SET status = ?, updated_at = ? WHERE id = ?"
 TASK_STATUS_UPDATE_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
+VALID_TASK_PRIORITIES = frozenset(priority.value for priority in TaskPriority)
+VALID_TASK_STATUSES = frozenset(status.value for status in TaskStatus)
+VALID_INITIAL_TASK_STATUSES = frozenset(status.value for status in INITIAL_TASK_STATUSES)
+TERMINAL_TASK_STATUS_VALUES = frozenset(status.value for status in TERMINAL_TASK_STATUSES)
+EDITABLE_TASK_FIELDS = (
+    "title",
+    "description",
+    "priority",
+    "assigned_agent_id",
+    "credential_id",
+    "action",
+    "intent",
+    "heartbeat_seconds",
+)
+VALID_TASK_STATUS_TRANSITIONS = {
+    status.value: frozenset(next_status.value for next_status in next_statuses)
+    for status, next_statuses in TASK_STATUS_TRANSITIONS.items()
+}
 TASK_RUN_CLAIM_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = ?"
 SCHEDULE_BY_ID_QUERY = "SELECT * FROM schedules WHERE id = ?"
 BEGIN_IMMEDIATE_SQL = "BEGIN IMMEDIATE"
@@ -559,6 +584,7 @@ class HivemindStore:
             self._migrate_schedules_to_catch_up_policy(conn)
             self._migrate_credentials_to_approval_actions(conn)
             self._migrate_leases_to_store_ttl(conn)
+            self._migrate_terminal_task_heartbeats(conn)
 
     def _migrate_sessions_to_token_hashes(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
@@ -631,6 +657,18 @@ class HivemindStore:
             if issued_at is not None and expires_at is not None:
                 ttl_seconds = max(int((expires_at - issued_at).total_seconds()), 0)
             conn.execute("UPDATE leases SET ttl_seconds = ? WHERE id = ?", (ttl_seconds, row["id"]))
+
+    def _migrate_terminal_task_heartbeats(self, conn: sqlite3.Connection) -> None:
+        terminal_statuses = tuple(sorted(TERMINAL_TASK_STATUS_VALUES))
+        conn.execute(
+            """
+            UPDATE tasks
+            SET next_heartbeat_at = NULL
+            WHERE status IN (?, ?, ?)
+              AND next_heartbeat_at IS NOT NULL
+            """,
+            terminal_statuses,
+        )
 
     def _migrate_schedules_to_catch_up_policy(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
@@ -1732,7 +1770,111 @@ class HivemindStore:
                 f"assigned_agent_id is not allowed to use credential {credential_id}: {assigned_agent_id}"
             )
 
-    def _insert_task(self, conn: sqlite3.Connection, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    def validate_task_priority(self, priority: str) -> None:
+        if priority not in VALID_TASK_PRIORITIES:
+            choices = ", ".join(sorted(VALID_TASK_PRIORITIES))
+            raise StoreValidationError(f"priority must be one of: {choices}")
+
+    def validate_task_status(self, status: str) -> None:
+        if status not in VALID_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_TASK_STATUSES))
+            raise StoreValidationError(f"status must be one of: {choices}")
+
+    def validate_initial_task_status(self, status: str) -> None:
+        if status not in VALID_INITIAL_TASK_STATUSES:
+            choices = ", ".join(sorted(VALID_INITIAL_TASK_STATUSES))
+            raise StoreValidationError(f"new tasks must start in one of: {choices}")
+
+    def validate_task_transition(self, current_status: str, next_status: str) -> None:
+        if current_status == next_status:
+            return
+        allowed_statuses = VALID_TASK_STATUS_TRANSITIONS.get(current_status)
+        if allowed_statuses is None or next_status not in allowed_statuses:
+            raise StoreValidationError(f"cannot transition task from {current_status} to {next_status}")
+
+    def validate_task_update_data(self, conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+        if "priority" in data:
+            if data["priority"] is None:
+                raise StoreValidationError("priority must not be null")
+            self.validate_task_priority(str(data["priority"]))
+        if "assigned_agent_id" in data:
+            self.validate_optional_agent_reference(
+                conn,
+                field_name="assigned_agent_id",
+                value=data["assigned_agent_id"] or None,
+            )
+        if "credential_id" in data:
+            self.validate_optional_credential_reference(
+                conn,
+                field_name="credential_id",
+                value=data["credential_id"] or None,
+            )
+
+    def normalize_task_update_value(self, field: str, value: Any) -> Any:
+        if field == "title" and value is None:
+            raise StoreValidationError("title must not be null")
+        if field in {"description", "action", "intent"} and value is None:
+            return ""
+        if field in {"assigned_agent_id", "credential_id"}:
+            return value or None
+        return value
+
+    def apply_task_update_field(
+        self,
+        row: sqlite3.Row,
+        updated: dict[str, Any],
+        *,
+        field: str,
+        next_value: Any,
+        now: datetime,
+    ) -> bool:
+        if field == "heartbeat_seconds":
+            if next_value == row[field]:
+                return False
+            updated[field] = next_value
+            updated["next_heartbeat_at"] = iso(now + timedelta(seconds=int(next_value))) if next_value else None
+            return True
+        if next_value == row[field]:
+            return False
+        updated[field] = next_value
+        return True
+
+    def normalize_schedule_priority(
+        self,
+        conn: sqlite3.Connection,
+        schedule_row: sqlite3.Row,
+        *,
+        actor_id: str,
+        now: datetime,
+    ) -> str:
+        priority = str(schedule_row["priority"] or "")
+        if priority in VALID_TASK_PRIORITIES:
+            return priority
+        normalized = TaskPriority.NORMAL.value
+        conn.execute(
+            "UPDATE schedules SET priority = ?, updated_at = ? WHERE id = ?",
+            (normalized, iso(now), schedule_row["id"]),
+        )
+        self._insert_audit(
+            conn,
+            "schedule.priority.normalized",
+            actor_id,
+            str(schedule_row["id"]),
+            "allowed",
+            "legacy schedule priority normalized",
+            {"from_priority": priority, "to_priority": normalized},
+            now=now,
+        )
+        return normalized
+
+    def _insert_task(
+        self,
+        conn: sqlite3.Connection,
+        data: dict[str, Any],
+        *,
+        actor_id: str = "system",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         task_time = now or utcnow()
         heartbeat_seconds = data.get("heartbeat_seconds")
         row = {
@@ -1750,6 +1892,9 @@ class HivemindStore:
             "created_at": iso(task_time),
             "updated_at": iso(task_time),
         }
+        self.validate_task_status(str(row["status"]))
+        self.validate_initial_task_status(str(row["status"]))
+        self.validate_task_priority(str(row["priority"]))
         self.validate_optional_agent_reference(
             conn,
             field_name="assigned_agent_id",
@@ -1779,29 +1924,112 @@ class HivemindStore:
         self._insert_audit(
             conn,
             "task.created",
-            row["assigned_agent_id"] or "user",
+            actor_id,
             row["id"],
             "allowed",
             "task created",
-            {"status": row["status"]},
+            {
+                "status": row["status"],
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "heartbeat_seconds": row["heartbeat_seconds"],
+            },
             now=task_time,
         )
         return row
 
-    def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_task(self, data: dict[str, Any], *, actor_id: str = "system") -> dict[str, Any]:
         with self.connect() as conn:
-            return self._insert_task(conn, data)
+            return self._insert_task(conn, data, actor_id=actor_id)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
 
-    def update_task_status(self, task_id: str, status: str) -> dict[str, Any]:
-        now = iso()
+    def update_task(self, task_id: str, data: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        now = utcnow()
         with self.connect() as conn:
             row = self.get_task_row(conn, task_id)
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
-        self.audit("task.status.updated", row["assigned_agent_id"] or "user", task_id, "allowed", f"task marked {status}", {})
+            requested_fields = tuple(field for field in EDITABLE_TASK_FIELDS if field in data)
+            if not requested_fields:
+                raise StoreValidationError("task update requires at least one editable field")
+            updated = dict(row)
+            changes: list[str] = []
+            self.validate_task_update_data(conn, data)
+
+            for field in requested_fields:
+                next_value = self.normalize_task_update_value(field, data[field])
+                if self.apply_task_update_field(row, updated, field=field, next_value=next_value, now=now):
+                    changes.append(field)
+
+            if not changes:
+                return dict(row)
+
+            if {"assigned_agent_id", "credential_id"} & set(changes):
+                self.validate_agent_credential_binding(
+                    conn,
+                    assigned_agent_id=updated["assigned_agent_id"],
+                    credential_id=updated["credential_id"],
+                )
+            if str(updated["status"]) in TERMINAL_TASK_STATUS_VALUES:
+                updated["next_heartbeat_at"] = None
+            updated["updated_at"] = iso(now)
+            conn.execute(
+                """
+                UPDATE tasks
+                SET title = ?, description = ?, priority = ?, assigned_agent_id = ?, credential_id = ?, action = ?, intent = ?, heartbeat_seconds = ?, next_heartbeat_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updated["title"],
+                    updated["description"],
+                    updated["priority"],
+                    updated["assigned_agent_id"],
+                    updated["credential_id"],
+                    updated["action"],
+                    updated["intent"],
+                    updated["heartbeat_seconds"],
+                    updated["next_heartbeat_at"],
+                    updated["updated_at"],
+                    task_id,
+                ),
+            )
+        self.audit(
+            "task.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            "task details updated",
+            {"fields": changes},
+        )
+        return self.get_task(task_id)
+
+    def update_task_status(self, task_id: str, status: str, *, actor_id: str) -> dict[str, Any]:
+        now = iso()
+        next_status = str(status)
+        self.validate_task_status(next_status)
+        with self.connect() as conn:
+            row = self.get_task_row(conn, task_id)
+            current_status = str(row["status"])
+            self.validate_task_transition(current_status, next_status)
+            if current_status == next_status:
+                return dict(row)
+            next_heartbeat_at = None if next_status in TERMINAL_TASK_STATUS_VALUES else row["next_heartbeat_at"]
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+                (next_status, next_heartbeat_at, now, task_id),
+            )
+        self.audit(
+            "task.status.updated",
+            actor_id,
+            task_id,
+            "allowed",
+            f"task marked {next_status}",
+            {"from_status": current_status, "to_status": next_status},
+        )
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
@@ -2100,7 +2328,10 @@ class HivemindStore:
     ) -> None:
         now = iso()
         with self.connect() as conn:
-            conn.execute(TASK_STATUS_UPDATE_SQL, (status, now, task_id))
+            conn.execute(
+                "UPDATE tasks SET status = ?, next_heartbeat_at = NULL, updated_at = ? WHERE id = ?",
+                (status, now, task_id),
+            )
             running_task = conn.execute(
                 """
                 SELECT 1
@@ -2120,10 +2351,12 @@ class HivemindStore:
         event_type = "task.execution.completed" if status == "done" else "task.execution.failed"
         self.audit(event_type, agent_id, task_id, decision, reason, metadata)
 
-    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str) -> dict[str, Any]:
+    def record_heartbeat(self, task_id: str, agent_id: str | None, note: str, *, actor_id: str = "system") -> dict[str, Any]:
         now = utcnow()
         with self.connect() as conn:
             task = self.get_task_row(conn, task_id)
+            if task["status"] in TERMINAL_TASK_STATUS_VALUES:
+                raise StoreValidationError(f"cannot record heartbeat for task in terminal status: {task['status']}")
             provided_agent_id = agent_id or None
             self.validate_optional_agent_reference(
                 conn,
@@ -2153,7 +2386,14 @@ class HivemindStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreValidationError("agent_id references unknown agent") from exc
             conn.execute("UPDATE tasks SET next_heartbeat_at = ?, updated_at = ? WHERE id = ?", (next_heartbeat, iso(now), task_id))
-        self.audit("task.heartbeat", event["agent_id"] or "user", task_id, "allowed", "heartbeat recorded", {"note": note})
+        self.audit(
+            "task.heartbeat",
+            actor_id,
+            task_id,
+            "allowed",
+            "heartbeat recorded",
+            {"note": note, "agent_id": event["agent_id"]},
+        )
         return event
 
     def list_heartbeats(self, task_id: str | None = None) -> list[dict[str, Any]]:
@@ -2164,7 +2404,7 @@ class HivemindStore:
                 rows = conn.execute("SELECT * FROM heartbeat_events ORDER BY created_at DESC")
             return [dict(row) for row in rows]
 
-    def create_schedule(self, data: dict[str, Any]) -> dict[str, Any]:
+    def create_schedule(self, data: dict[str, Any], *, actor_id: str = "system") -> dict[str, Any]:
         now = utcnow()
         interval = int(data["interval_seconds"])
         if interval < 60:
@@ -2196,6 +2436,7 @@ class HivemindStore:
             "updated_at": iso(now),
         }
         with self.connect() as conn:
+            self.validate_task_priority(str(row["priority"]))
             self.validate_optional_agent_reference(
                 conn,
                 field_name="assigned_agent_id",
@@ -2224,11 +2465,20 @@ class HivemindStore:
                 raise StoreValidationError("schedule references an unknown agent or credential") from exc
         self.audit(
             "schedule.created",
-            row["assigned_agent_id"] or "user",
+            actor_id,
             row["id"],
             "allowed",
             "schedule created",
-            {"interval_seconds": interval, "catch_up_policy": catch_up_policy},
+            {
+                "interval_seconds": interval,
+                "catch_up_policy": catch_up_policy,
+                "priority": row["priority"],
+                "assigned_agent_id": row["assigned_agent_id"],
+                "credential_id": row["credential_id"],
+                "action": row["action"],
+                "intent": row["intent"],
+                "enabled": bool(row["enabled"]),
+            },
         )
         return self.public_schedule(row)
 
@@ -2249,7 +2499,7 @@ class HivemindStore:
         self.audit("schedule.enabled.updated", actor, schedule_id, "allowed", reason, {"enabled": enabled})
         return self.get_schedule(schedule_id)
 
-    def run_due_schedules_once(self) -> list[dict[str, Any]]:
+    def run_due_schedules_once(self, *, actor_id: str = "scheduler") -> list[dict[str, Any]]:
         now = utcnow()
         created: list[dict[str, Any]] = []
         with self._lock:
@@ -2268,6 +2518,7 @@ class HivemindStore:
                     catch_up_policy = row["catch_up_policy"] or "run_once"
                     if catch_up_policy not in SCHEDULE_CATCH_UP_POLICIES:
                         raise StoreError(f"unsupported catch-up policy: {catch_up_policy}")
+                    priority = self.normalize_schedule_priority(conn, row, actor_id=actor_id, now=now)
                     missed_run_count = int((now - next_run_at).total_seconds() // interval_seconds) + 1
                     if catch_up_policy == "backfill":
                         run_count = min(missed_run_count, SCHEDULE_BACKFILL_BATCH_LIMIT)
@@ -2293,13 +2544,14 @@ class HivemindStore:
                             {
                                 "title": row["task_title"],
                                 "description": row["task_description"],
-                                "priority": row["priority"],
+                                "priority": priority,
                                 "assigned_agent_id": row["assigned_agent_id"],
                                 "credential_id": row["credential_id"],
                                 "action": row["action"],
                                 "intent": row["intent"],
                                 "heartbeat_seconds": None,
                             },
+                            actor_id=actor_id,
                             now=now,
                         )
                         created.append(task)
@@ -2311,7 +2563,7 @@ class HivemindStore:
                     self._insert_audit(
                         conn,
                         "schedule.ran",
-                        row["assigned_agent_id"] or "scheduler",
+                        actor_id,
                         row["id"],
                         "allowed",
                         "scheduled task created",

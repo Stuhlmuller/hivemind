@@ -1,4 +1,4 @@
 interface:
   display_name: "Hivemind Idea Issues"
-  short_description: "Capture the best Hivemind ideas as a small number of concrete issues."
-  default_prompt: "Use $hivemind-idea-issues to inspect the Hivemind repo, prefer refining existing backlog items, and file only the strongest non-duplicate idea as a GitHub issue without starting implementation."
+  short_description: "Capture the best Hivemind ideas as labeled, concrete issues."
+  default_prompt: "Use $hivemind-idea-issues to inspect the Hivemind repo, prefer refining existing backlog items, and file only the strongest non-duplicate idea as a labeled GitHub issue without starting implementation."
