@@ -291,6 +291,106 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
     )
 
 
+def test_backup_round_trip_preserves_custom_tool_actions(tmp_path: Path) -> None:
+    source_db = tmp_path / "source.db"
+    source = HivemindStore(source_db)
+    source.setup_admin("admin", TEST_PASSWORD)
+    agent = source.create_agent(
+        {
+            "name": "Registry Restorer",
+            "role": "Verify tool action registry backups.",
+        }
+    )
+    credential = source.create_credential(
+        {
+            "name": "Read-only repository token",
+            "provider": "github",
+            "secret_ref": "env://HIVEMIND_BACKUP_TEST_TOKEN",
+            "allowed_agents": [agent["id"]],
+            "allowed_actions": ["read_repo"],
+            "max_ttl_seconds": 180,
+            "require_intent": True,
+        }
+    )
+    tool_action = source.create_tool_action(
+        {
+            "name": "repo_status",
+            "description": "Read repository status through the read_repo credential scope.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        }
+    )
+    task = source.create_task(
+        {
+            "title": "Restore tool action task",
+            "description": "Exercise a restored custom tool action.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": tool_action["name"],
+            "intent": "Read repository status after logical restore.",
+        }
+    )
+    schedule = source.create_schedule(
+        {
+            "name": "Restore tool action schedule",
+            "enabled": True,
+            "interval_seconds": 3600,
+            "task_title": "Restore scheduled tool action task",
+            "task_description": "Exercise a restored scheduled custom tool action.",
+            "priority": "normal",
+            "assigned_agent_id": agent["id"],
+            "credential_id": credential["id"],
+            "action": tool_action["name"],
+            "intent": "Read scheduled repository status after logical restore.",
+            "next_run_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+
+    bundle = source.export_backup_bundle()
+    target_db = tmp_path / "target.db"
+    target = HivemindStore(target_db)
+    target.restore_backup_bundle(bundle)
+    restored_action = target.get_tool_action(tool_action["name"])
+    token, lease = target.request_lease(
+        credential["id"],
+        agent["id"],
+        tool_action["name"],
+        "Read repository status after restoring the tool action registry.",
+        30,
+    )
+    result = target.perform_credential_action(token or "", tool_action["name"], {"repo": "hivemind"})
+
+    require_true(
+        any(row["name"] == tool_action["name"] for row in bundle["tables"]["tool_actions"]),
+        "custom tool actions should be exported",
+    )
+    require_equal(
+        table_rows(target_db, "tool_actions"),
+        bundle["tables"]["tool_actions"],
+        "tool actions should round-trip through restore",
+    )
+    require_equal(
+        restored_action["required_credential_action"],
+        "read_repo",
+        "restored tool action should preserve its mapped credential action",
+    )
+    require_equal(table_rows(target_db, "tasks")[0]["action"], task["action"], "restored tasks should keep custom tool actions")
+    require_equal(
+        table_rows(target_db, "schedules")[0]["action"],
+        schedule["action"],
+        "restored schedules should keep custom tool actions",
+    )
+    require_equal(lease["action"], tool_action["name"], "restored custom tool actions should issue exact scoped leases")
+    require_equal(result["credential_action"], "read_repo", "restored custom tool actions should execute via their mapped scope")
+
+
 def test_restore_rejects_incompatible_backup_version(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
     source.setup_admin("admin", TEST_PASSWORD)
@@ -366,6 +466,29 @@ def test_restore_accepts_v1_backup_without_hive_fields(tmp_path: Path) -> None:
     restored_schedule = next(row for row in restored_schedules if row["id"] == schedule["id"])
     require_equal(restored_task["hive_id"], None, "legacy tasks should restore without hive assignment")
     require_equal(restored_schedule["hive_id"], None, "legacy schedules should restore without hive assignment")
+
+
+def test_restore_rejects_unsafe_tool_action_identifiers(tmp_path: Path) -> None:
+    source = HivemindStore(tmp_path / "source.db")
+    source.setup_admin("admin", TEST_PASSWORD)
+    bundle = source.export_backup_bundle()
+
+    for column in ("name", "required_credential_action"):
+        unsafe_bundle = json.loads(json.dumps(bundle))
+        unsafe_bundle["tables"]["tool_actions"][0][column] = "token-unsafe"
+        target = HivemindStore(tmp_path / f"target-{column}.db")
+
+        try:
+            target.restore_backup_bundle(unsafe_bundle)
+        except StoreValidationError as exc:
+            require_true(
+                "actions must use lowercase snake_case names" in str(exc),
+                f"restore should reject unsafe tool action {column}",
+            )
+        else:
+            raise AssertionError(f"restore should reject unsafe tool action {column}")
+
+        require_true(target.is_setup_complete() is False, "failed restores should not create a setup state")
 
 
 def test_restore_normalizes_schedule_timestamp_offsets(tmp_path: Path) -> None:

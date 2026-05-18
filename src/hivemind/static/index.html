@@ -28,14 +28,38 @@
         </nav>
         <nav aria-label="Primary">
           <a href="/docs">openapi</a>
-          <button id="refresh-button" type="button">sync</button>
-          <button id="logout-button" type="button">logout</button>
+          <button id="refresh-button" type="button" hidden>sync</button>
+          <button id="logout-button" type="button" hidden>logout</button>
         </nav>
       </div>
     </header>
 
     <main>
-      <section id="auth-view" class="auth-shell">
+      <section id="boot-view" class="auth-shell auth-boot">
+        <div class="terminal-card">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <strong>bootstrap</strong>
+          </div>
+          <pre>runtime: local
+auth-state: checking setup
+session: waiting
+secrets: broker separated
+leases: scoped + ttl</pre>
+        </div>
+        <section class="panel stack" aria-live="polite">
+          <div class="panel-heading auth-heading">
+            <div class="heading-lockup">
+              <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
+              <h2>checking setup</h2>
+            </div>
+            <p>local node</p>
+          </div>
+          <p class="field-hint">Reading setup state before showing the admin console.</p>
+        </section>
+      </section>
+
+      <section id="auth-view" class="auth-shell" hidden>
         <div class="terminal-card">
           <div class="terminal-bar">
             <span></span><span></span><span></span>
@@ -48,7 +72,7 @@ secrets: refs or broker-encrypted
 leases: scoped + ttl
 agents: brokered capabilities</pre>
         </div>
-        <form id="auth-form" class="panel stack">
+        <form id="auth-form" class="panel stack" aria-describedby="auth-detail password-policy auth-error">
           <div class="panel-heading auth-heading">
             <div class="heading-lockup">
               <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
@@ -67,6 +91,7 @@ agents: brokered capabilities</pre>
               type="password"
               placeholder="create admin password"
               autocomplete="new-password"
+              minlength="12"
               required
             />
           </label>
@@ -77,9 +102,12 @@ agents: brokered capabilities</pre>
               type="password"
               placeholder="repeat admin password"
               autocomplete="new-password"
+              minlength="12"
             />
           </label>
           <p id="auth-detail" class="field-hint">Create the first local operator account for this Hivemind node.</p>
+          <p id="password-policy" class="field-hint">Admin passwords need at least 12 non-whitespace characters and are stored as local hashes.</p>
+          <p id="auth-error" class="field-error" role="alert" hidden></p>
           <button id="auth-submit" type="submit">create admin</button>
         </form>
       </section>
@@ -94,13 +122,21 @@ agents: brokered capabilities</pre>
                 <strong>local://hivemind</strong>
               </div>
             </div>
+            <nav class="side-nav" aria-label="Runtime pages">
+              <a href="/" data-page-link="overview"><span>overview</span><code>local</code></a>
+              <a href="/control/agents" data-page-link="agents"><span>agents</span><code id="nav-agents-count">0</code></a>
+              <a href="/control/tasks" data-page-link="tasks"><span>tasks</span><code id="nav-tasks-count">0</code></a>
+              <a href="/control/schedules" data-page-link="schedules"><span>schedules</span><code id="nav-schedules-count">0</code></a>
+              <a href="/control/audit" data-page-link="audit"><span>audit</span><code id="nav-audit-count">0</code></a>
+              <a href="/control/credentials" data-page-link="credentials"><span>credentials</span><code id="nav-credentials-count">0</code></a>
+            </nav>
             <div class="side-section">
               <p>session</p>
               <code id="session-line">loading</code>
             </div>
             <div class="side-section">
               <p>surface</p>
-              <code id="surface-line">runtime overview / agents, tasks, schedules</code>
+              <code id="surface-line">overview / runtime state</code>
             </div>
             <div class="side-section">
               <p>policy checks</p>
@@ -137,12 +173,124 @@ agents: brokered capabilities</pre>
                 <div><span id="blocked-task-count">0</span><p>blocked tasks</p></div>
                 <div><span id="due-schedule-count">0</span><p>due schedules</p></div>
                 <div><span id="stale-heartbeat-count">0</span><p>stale heartbeats</p></div>
+                <div><span id="missing-heartbeat-count">0</span><p>missing heartbeats</p></div>
               </section>
 
               <section class="workspace overview-workspace">
+                <div class="panel panel-span-3" id="runtime-health-panel">
+                  <div class="panel-heading">
+                    <h2>node health</h2>
+                    <p id="runtime-health-summary">db reachability, scheduler state, and overdue work at a glance.</p>
+                  </div>
+                  <div class="health-status">
+                    <div class="status-stack">
+                      <div class="status-line">
+                        <span>runtime</span>
+                        <span id="runtime-status" class="status-chip">loading</span>
+                      </div>
+                      <div class="status-line">
+                        <span>db</span>
+                        <span id="runtime-db-status" class="status-chip">loading</span>
+                      </div>
+                      <div class="status-line">
+                        <span>scheduler</span>
+                        <span id="runtime-scheduler-status" class="status-chip">loading</span>
+                      </div>
+                    </div>
+                    <p id="runtime-health-detail" class="meta">Waiting for runtime snapshot.</p>
+                    <p class="meta">Last refresh: <span id="runtime-updated-at">pending</span></p>
+                  </div>
+                  <section class="metrics runtime-metrics" aria-label="Node health summary">
+                    <div><span id="runtime-active-leases-count">0</span><p>active leases</p></div>
+                    <div><span id="runtime-due-schedules-count">0</span><p>due schedules</p></div>
+                    <div><span id="runtime-stale-heartbeats-count">0</span><p>stale heartbeats</p></div>
+                    <div><span id="runtime-failed-tasks-count">0</span><p>failed tasks</p></div>
+                  </section>
+                  <section class="health-lists">
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>due schedules</h3>
+                          <p>enabled schedules waiting to run</p>
+                        </div>
+                      </div>
+                      <div id="due-schedules-health-list" class="list"></div>
+                    </div>
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>stale heartbeats</h3>
+                          <p>tasks that missed their next heartbeat</p>
+                        </div>
+                      </div>
+                      <div id="stale-heartbeats-health-list" class="list"></div>
+                    </div>
+                    <div class="subpanel stack">
+                      <div class="inline-heading">
+                        <div>
+                          <h3>failed tasks</h3>
+                          <p>recent task failures on this node</p>
+                        </div>
+                      </div>
+                      <div id="failed-tasks-health-list" class="list"></div>
+                    </div>
+                  </section>
+                </div>
+
                 <div class="panel">
                   <div class="panel-heading">
                     <h2>agents</h2>
+                    <p>registry / lifecycle / policy scope</p>
+                  </div>
+                  <div id="overview-agents-list" class="list" aria-live="polite"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>active tasks</h2>
+                    <p>status and heartbeat</p>
+                  </div>
+                  <div id="overview-tasks-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>due schedules</h2>
+                    <p>enabled local jobs</p>
+                  </div>
+                  <div id="overview-schedules-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>recent audit</h2>
+                    <p>latest decisions</p>
+                  </div>
+                  <div id="overview-audit-list" class="timeline"></div>
+                </div>
+              </section>
+            </section>
+
+            <section id="agents-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">agents</p>
+                  <h2>agent registry</h2>
+                </div>
+                <p>registered agents, provider/model identity, status, and operating prompt.</p>
+              </div>
+
+              <section class="metrics" aria-label="Agent summary">
+                <div><span id="agents-page-count">0</span><p>agents</p></div>
+                <div><span id="agents-idle-count">0</span><p>idle</p></div>
+                <div><span id="agents-running-count">0</span><p>running</p></div>
+                <div><span id="agents-blocked-count">0</span><p>blocked</p></div>
+              </section>
+
+              <section class="workspace agents-workspace">
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>spawn agent</h2>
                     <p>runtime registry</p>
                   </div>
                   <form id="spawn-form" class="stack">
@@ -178,11 +326,30 @@ agents: brokered capabilities</pre>
                   </form>
                   <div id="agents-list" class="list" aria-live="polite"></div>
                 </div>
+              </section>
+            </section>
 
+            <section id="tasks-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">tasks</p>
+                  <h2>task queue</h2>
+                </div>
+                <p>assigned work, credential intent, action scope, status transitions, and heartbeat state.</p>
+              </div>
+
+              <section class="metrics" aria-label="Task summary">
+                <div><span id="tasks-page-count">0</span><p>tasks</p></div>
+                <div><span id="tasks-running-count">0</span><p>running</p></div>
+                <div><span id="tasks-blocked-count">0</span><p>blocked</p></div>
+                <div><span id="tasks-stale-count">0</span><p>overdue heartbeat</p></div>
+              </section>
+
+              <section class="workspace tasks-workspace">
                 <div class="panel">
                   <div class="panel-heading">
-                    <h2>tasks</h2>
-                    <p>queue, edit, assignment, heartbeat SLA</p>
+                    <h2>create task</h2>
+                    <p>assignment, heartbeat SLA, status seed</p>
                   </div>
                   <form id="task-form" class="stack">
                     <label>title<input name="title" value="review credential policy" autocomplete="off" /></label>
@@ -199,7 +366,7 @@ agents: brokered capabilities</pre>
                         <option value="high">high</option>
                         <option value="urgent">urgent</option>
                       </select></label>
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                     </div>
                     <div class="two-col">
                       <label>heartbeat seconds<input name="heartbeat_seconds" type="number" min="30" value="300" /></label>
@@ -218,8 +385,35 @@ agents: brokered capabilities</pre>
 
                 <div class="panel">
                   <div class="panel-heading">
-                    <h2>schedules</h2>
-                    <p>interval jobs and due runs</p>
+                    <h2>heartbeat watch</h2>
+                    <p>overdue work and liveness records</p>
+                  </div>
+                  <div id="heartbeat-alert-list" class="list"></div>
+                  <div id="heartbeats-list" class="timeline"></div>
+                </div>
+              </section>
+            </section>
+
+            <section id="schedules-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">schedules</p>
+                  <h2>local interval jobs</h2>
+                </div>
+                <p>enabled state, catch-up policy, next run, generated task template, and due-run control.</p>
+              </div>
+
+              <section class="metrics" aria-label="Schedule summary">
+                <div><span id="schedules-page-count">0</span><p>schedules</p></div>
+                <div><span id="schedules-enabled-count">0</span><p>enabled</p></div>
+                <div><span id="schedules-due-count">0</span><p>due now</p></div>
+              </section>
+
+              <section class="workspace schedules-workspace">
+                <div class="panel">
+                  <div class="panel-heading">
+                    <h2>create schedule</h2>
+                    <p>local interval jobs</p>
                   </div>
                   <form id="schedule-form" class="stack">
                     <label>name<input name="name" value="policy review cadence" autocomplete="off" /></label>
@@ -251,7 +445,7 @@ agents: brokered capabilities</pre>
                       </select></label>
                     </div>
                     <div class="two-col">
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                       <label>schedule state<input value="enabled" autocomplete="off" readonly /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="3">Scheduled review for security drift and missing audits.</textarea></label>
@@ -260,6 +454,23 @@ agents: brokered capabilities</pre>
                   <button id="run-due-button" type="button">run due</button>
                   <div id="schedules-list" class="list"></div>
                 </div>
+              </section>
+            </section>
+
+            <section id="audit-page" class="page" hidden>
+              <div class="page-header">
+                <div>
+                  <p class="eyebrow">audit</p>
+                  <h2>decision log</h2>
+                </div>
+                <p>append-only records for credential decisions, task changes, heartbeat updates, and schedule runs.</p>
+              </div>
+
+              <section class="metrics" aria-label="Audit summary">
+                <div><span id="audit-page-count">0</span><p>events</p></div>
+                <div><span id="audit-denied-count">0</span><p>denied</p></div>
+                <div><span id="task-audit-count">0</span><p>task events</p></div>
+                <div><span id="schedule-audit-count">0</span><p>schedule events</p></div>
               </section>
 
               <section class="audit panel">
@@ -457,6 +668,14 @@ agents: brokered capabilities</pre>
 
                 <div class="panel">
                   <div class="panel-heading">
+                    <h2>action registry</h2>
+                    <p>tool metadata + required scope</p>
+                  </div>
+                  <div id="tool-actions-list" class="list"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-heading">
                     <h2>issue jit lease</h2>
                     <p>agent + action + ttl</p>
                   </div>
@@ -464,7 +683,7 @@ agents: brokered capabilities</pre>
                     <label>agent<select name="agent_id"></select></label>
                     <label>credential<select name="credential_id"></select></label>
                     <div class="two-col">
-                      <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                      <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                       <label>ttl seconds<input name="ttl_seconds" type="number" min="1" value="60" /></label>
                     </div>
                     <label>intent<textarea name="intent" rows="4">Read repository metadata to triage the next safe implementation step.</textarea></label>
@@ -495,7 +714,7 @@ agents: brokered capabilities</pre>
                   </div>
                   <form id="action-form" class="stack">
                     <label>lease token<input name="lease_token" placeholder="hvl_..." autocomplete="off" /></label>
-                    <label>action<input name="action" value="read_repo" autocomplete="off" /></label>
+                    <label>action<input name="action" value="read_repo" list="tool-action-options" autocomplete="off" /></label>
                     <label>payload<textarea name="payload" rows="5">{"repo":"hivemind"}</textarea></label>
                     <button type="submit">check lease</button>
                   </form>
@@ -517,6 +736,7 @@ agents: brokered capabilities</pre>
     </main>
 
     <div id="toast" role="status" aria-live="polite"></div>
+    <datalist id="tool-action-options"></datalist>
     <script src="/static/app.js" type="module"></script>
   </body>
 </html>

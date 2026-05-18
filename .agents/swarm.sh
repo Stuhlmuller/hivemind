@@ -25,6 +25,7 @@ roles=()
 while IFS= read -r role; do
   roles+=("$role")
 done < <(swarm_role_names)
+selected_roles_result=()
 
 usage() {
   cat <<'EOF'
@@ -64,6 +65,43 @@ Legacy fleet flags:
 EOF
 }
 
+swarm_log_line() {
+  local level="$1"
+  shift
+  local message="$*"
+
+  printf '[swarm] %s: %s\n' "$level" "$message"
+}
+
+swarm_log_info() {
+  swarm_log_line "info" "$@"
+}
+
+swarm_log_warn() {
+  swarm_log_line "warn" "$@" >&2
+}
+
+swarm_log_error() {
+  swarm_log_line "error" "$@" >&2
+}
+
+swarm_debug_enabled() {
+  case "${HIVEMIND_SWARM_DEBUG:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+swarm_log_debug() {
+  if swarm_debug_enabled; then
+    swarm_log_line "debug" "$@" >&2
+  fi
+}
+
 legacy_flag_role() {
   case "$1" in
     --reviewers) printf '%s\n' "reviewer" ;;
@@ -72,7 +110,7 @@ legacy_flag_role() {
     --scouts) printf '%s\n' "scout" ;;
     --pr-shepherds|--beekeepers) printf '%s\n' "beekeeper" ;;
     *)
-      echo "[swarm] unknown option: $1" >&2
+      swarm_log_error "unknown option: $1"
       return 1
       ;;
   esac
@@ -86,7 +124,7 @@ role_script() {
     scout) printf '%s\n' "$script_dir/scout-loop.sh" ;;
     beekeeper) printf '%s\n' "$script_dir/beekeeper-loop.sh" ;;
     *)
-      echo "[swarm] unknown role: $1" >&2
+      swarm_log_error "unknown role: $1"
       exit 1
       ;;
   esac
@@ -123,12 +161,12 @@ selected_roles() {
       --reviewers|--workers|--feature-requesters|--scouts|--pr-shepherds|--beekeepers)
         requested_count="${1:-}"
         if [[ -z "$requested_count" ]]; then
-          echo "[swarm] missing count for $requested_role" >&2
+          swarm_log_error "missing count for $requested_role"
           exit 1
         fi
         case "$requested_count" in
           ''|*[!0-9]*)
-            echo "[swarm] invalid count for $requested_role: $requested_count" >&2
+            swarm_log_error "invalid count for $requested_role: $requested_count"
             exit 1
             ;;
         esac
@@ -139,7 +177,7 @@ selected_roles() {
         role="$(legacy_flag_role "$requested_role")" || exit 1
         ;;
       --*)
-        echo "[swarm] unknown option: $requested_role" >&2
+        swarm_log_error "unknown option: $requested_role"
         exit 1
         ;;
       *)
@@ -155,6 +193,20 @@ selected_roles() {
         ;;
     esac
   done
+}
+
+load_selected_roles() {
+  local selected_output
+  local role
+
+  selected_roles_result=()
+  selected_output="$(selected_roles "$@")" || return 1
+
+  while IFS= read -r role; do
+    if [[ -n "$role" ]]; then
+      selected_roles_result+=("$role")
+    fi
+  done <<<"$selected_output"
 }
 
 role_color_code() {
@@ -188,6 +240,7 @@ print_role_log_line() {
 }
 
 ensure_runtime_dirs() {
+  swarm_log_debug "ensuring runtime directories: logs=$logs_root pids=$pids_root"
   mkdir -p "$logs_root" "$pids_root"
 }
 
@@ -220,6 +273,7 @@ cleanup_stale_pid() {
     return
   fi
 
+  swarm_log_debug "removing stale pid file: $pid_file"
   rm -f "$pid_file"
 }
 
@@ -234,10 +288,11 @@ start_role() {
   log_path="$(role_log_path "$role")"
   run_root="$(role_worktree "$role")"
 
+  swarm_log_debug "starting role $role with run root $run_root, pid file $pid_file, log $log_path"
   cleanup_stale_pid "$pid_file"
   if [[ -f "$pid_file" ]]; then
     pid="$(<"$pid_file")"
-    echo "[swarm] $role is already running with pid $pid"
+    swarm_log_warn "$role is already running with pid $pid"
     return
   fi
 
@@ -247,7 +302,7 @@ start_role() {
   nohup "$(role_script "$role")" "$run_root" >>"$log_path" 2>&1 &
   pid="$!"
   printf '%s\n' "$pid" >"$pid_file"
-  echo "[swarm] started $role (pid $pid) in $run_root"
+  swarm_log_info "started $role (pid $pid) in $run_root"
 }
 
 ensure_role_started() {
@@ -269,18 +324,19 @@ stop_role() {
   cleanup_stale_pid "$pid_file"
 
   if [[ ! -f "$pid_file" ]]; then
-    echo "[swarm] $role is not running"
+    swarm_log_warn "$role is not running"
     return
   fi
 
   pid="$(<"$pid_file")"
+  swarm_log_debug "stopping role $role with pid $pid from $pid_file"
   if pid_is_running "$pid"; then
     kill "$pid"
     sleep 1
   fi
 
   rm -f "$pid_file"
-  echo "[swarm] stopped $role"
+  swarm_log_info "stopped $role"
 }
 
 run_supervisor() {
@@ -288,9 +344,8 @@ run_supervisor() {
   local role
   local -a supervisor_roles=()
 
-  while IFS= read -r role; do
-    supervisor_roles+=("$role")
-  done < <(selected_roles "$@")
+  load_selected_roles "$@" || exit 1
+  supervisor_roles=("${selected_roles_result[@]}")
 
   supervisor_cleanup() {
     local cleanup_role
@@ -300,12 +355,13 @@ run_supervisor() {
     done
   }
 
-  trap 'printf "\n[swarm] stopping supervisor\n"; supervisor_cleanup; exit 0' INT TERM
+  trap 'printf "\n"; swarm_log_info "stopping supervisor"; supervisor_cleanup; exit 0' INT TERM
 
-  echo "[swarm] starting endless supervisor for roles: ${supervisor_roles[*]}"
+  swarm_log_info "starting endless supervisor for roles: ${supervisor_roles[*]}"
 
   while :; do
     for role in "${supervisor_roles[@]}"; do
+      swarm_log_debug "supervisor ensuring role is running: $role"
       ensure_role_started "$role"
     done
     sleep "$supervisor_sleep_seconds"
@@ -393,11 +449,13 @@ follow_logs() {
   local log_path
   local -a log_paths=()
 
-  while IFS= read -r role; do
+  load_selected_roles "$@" || exit 1
+  for role in "${selected_roles_result[@]}"; do
     log_path="$(role_log_path "$role")"
+    swarm_log_debug "following log for $role: $log_path"
     : >>"$log_path"
     log_paths+=("$log_path")
-  done < <(selected_roles "$@")
+  done
 
   while IFS= read -r line; do
     case "$line" in
@@ -452,15 +510,17 @@ show_logs_command() {
   fi
 
   if [[ "${#target_roles[@]}" -gt 0 ]]; then
-    while IFS= read -r role; do
+    load_selected_roles "${target_roles[@]}" || exit 1
+    for role in "${selected_roles_result[@]}"; do
       show_logs "$role"
-    done < <(selected_roles "${target_roles[@]}")
+    done
     return
   fi
 
-  while IFS= read -r role; do
+  load_selected_roles || exit 1
+  for role in "${selected_roles_result[@]}"; do
     show_logs "$role"
-  done < <(selected_roles)
+  done
 }
 
 main() {
@@ -474,6 +534,7 @@ main() {
   fi
 
   ensure_runtime_dirs
+  swarm_log_debug "command: $command; runtime root: $runtime_root; worktree root: $worktree_root"
 
   case "$command" in
     start)
@@ -482,9 +543,10 @@ main() {
       ensure_codex_ready "swarm"
       ensure_bootstrap_files "swarm"
       ensure_github_ready "swarm"
-      while IFS= read -r role; do
+      load_selected_roles "$@" || exit 1
+      for role in "${selected_roles_result[@]}"; do
         start_role "$role"
-      done < <(selected_roles "$@")
+      done
       ;;
     run)
       ensure_not_nested_codex "swarm"
@@ -496,17 +558,19 @@ main() {
       ;;
     status)
       ensure_git_ready "swarm"
-      while IFS= read -r role; do
+      load_selected_roles "$@" || exit 1
+      for role in "${selected_roles_result[@]}"; do
         print_status "$role"
-      done < <(selected_roles "$@")
+      done
       ;;
     logs)
       show_logs_command "$@"
       ;;
     stop)
-      while IFS= read -r role; do
+      load_selected_roles "$@" || exit 1
+      for role in "${selected_roles_result[@]}"; do
         stop_role "$role"
-      done < <(selected_roles "$@")
+      done
       ;;
     *)
       usage >&2

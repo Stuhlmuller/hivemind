@@ -7,12 +7,6 @@ from secrets import token_urlsafe
 from typing import Any
 
 
-class AgentStatus(StrEnum):
-    IDLE = "idle"
-    WORKING = "working"
-    BLOCKED = "blocked"
-
-
 class LeaseStatus(StrEnum):
     PENDING = "pending"
     ACTIVE = "active"
@@ -82,16 +76,6 @@ TASK_STATUS_TRANSITIONS = {
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
 }
-
-
-@dataclass(frozen=True)
-class Agent:
-    id: str
-    name: str
-    role: str
-    provider: str
-    model: str
-    status: AgentStatus = AgentStatus.IDLE
 
 
 @dataclass(frozen=True)
