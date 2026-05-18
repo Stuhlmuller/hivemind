@@ -501,6 +501,32 @@ def test_setup_rejects_whitespace_only_admin_password(tmp_path: Path) -> None:
     require_equal(setup_state.json(), {"setup_complete": False}, "blank password should not complete setup")
 
 
+def test_setup_counts_only_non_whitespace_admin_password_characters(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    short_password_response = client.post(
+        "/auth/setup",
+        json={
+            "username": "admin",
+            "password": "a b c d e f g",
+            "password_confirm": "a b c d e f g",
+        },
+    )
+    setup_state = client.get("/setup-state")
+
+    require_equal(
+        short_password_response.status_code,
+        400,
+        "setup should reject passwords with fewer than 12 non-whitespace characters",
+    )
+    require_equal(
+        short_password_response.json(),
+        {"detail": "admin password must include at least 12 non-whitespace characters"},
+        "setup should count internal whitespace as policy padding",
+    )
+    require_equal(setup_state.json(), {"setup_complete": False}, "short non-whitespace password should not complete setup")
+
+
 def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 

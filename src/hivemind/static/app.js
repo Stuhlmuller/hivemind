@@ -275,7 +275,7 @@ function validateAuthPayload(payload, isSetup) {
     return "";
   }
   payload.password_confirm = String(payload.password_confirm || "");
-  if (payload.password.trim().length < 12) {
+  if (payload.password.replace(/\s/g, "").length < 12) {
     return "admin password must include at least 12 non-whitespace characters";
   }
   if (payload.password !== payload.password_confirm) {
