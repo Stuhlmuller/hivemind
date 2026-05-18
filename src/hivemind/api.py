@@ -7,7 +7,7 @@ import logging
 import os
 from importlib.resources import files
 from threading import Event, Lock, Thread
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlencode
 
 import httpx
@@ -16,6 +16,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from hivemind.declarative import (
+    export_declarative_config,
+    import_declarative_config,
+    validate_declarative_config,
+)
 from hivemind.oauth import (
     OAuthConfigurationError,
     SecretBox,
@@ -248,6 +253,43 @@ class CreateScheduleRequest(BaseModel):
 
 class UpdateScheduleRequest(BaseModel):
     enabled: bool
+
+
+class DeclarativeConfigRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class ImportDeclarativeConfigRequest(DeclarativeConfigRequest):
+    dry_run: bool = True
+
+
+def _register_declarative_config_routes(
+    app: FastAPI,
+    db: HivemindStore,
+    require_user: Callable[..., SessionUser],
+) -> None:
+    @app.get("/declarative-config")
+    def export_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        return export_declarative_config(db)
+
+    @app.post("/declarative-config/validate")
+    def validate_config(request: DeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return validate_declarative_config(db, request.config)
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/declarative-config/import")
+    def import_config(request: ImportDeclarativeConfigRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        try:
+            return import_declarative_config(
+                db,
+                request.config,
+                actor_id=user.id,
+                dry_run=request.dry_run,
+            )
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | None = None) -> FastAPI:
@@ -717,6 +759,8 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             return {"created_tasks": db.run_due_schedules_once(actor_id=user.id)}
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _register_declarative_config_routes(app, db, require_user)
 
     @app.get("/runtime/overview")
     def runtime_overview(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
