@@ -1365,12 +1365,19 @@ class HivemindStore:
         with self.connect() as conn:
             return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
-    def setup_admin(self, username: str, password: str) -> dict[str, Any]:
+    def normalize_admin_username(self, username: str) -> str:
         normalized_username = username.strip().lower()
         if len(normalized_username) < 3:
             raise StoreError("username must be at least 3 characters")
+        return normalized_username
+
+    def validate_admin_password(self, password: str) -> None:
         if sum(1 for character in password if not character.isspace()) < 12:
             raise StoreError("admin password must include at least 12 non-whitespace characters")
+
+    def setup_admin(self, username: str, password: str) -> dict[str, Any]:
+        normalized_username = self.normalize_admin_username(username)
+        self.validate_admin_password(password)
         with self.connect() as conn:
             conn.execute(BEGIN_IMMEDIATE_SQL)
             if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
@@ -1388,6 +1395,44 @@ class HivemindStore:
             )
         if self.config.demo_mode:
             self.seed_demo_if_empty()
+        return self.public_user(user)
+
+    def reset_admin_password(
+        self,
+        username: str,
+        password: str,
+        *,
+        actor_id: str = "operator.local_recovery",
+    ) -> dict[str, Any]:
+        normalized_username = self.normalize_admin_username(username)
+        self.validate_admin_password(password)
+        with self.connect() as conn:
+            conn.execute(BEGIN_IMMEDIATE_SQL)
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ? AND role = 'admin'",
+                (normalized_username,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("admin user not found")
+            user = dict(row)
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hash_password(password), user["id"]),
+            )
+            revoked_sessions = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],)).rowcount
+            self._insert_audit(
+                conn,
+                "auth.admin_recovery.password_reset",
+                actor_id,
+                user["id"],
+                "allowed",
+                "local admin password reset by offline operator workflow",
+                {
+                    "username": normalized_username,
+                    "sessions_revoked": max(revoked_sessions, 0),
+                    "method": "offline_cli",
+                },
+            )
         return self.public_user(user)
 
     def login(self, username: str, password: str) -> tuple[str, dict[str, Any]]:

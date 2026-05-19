@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from hivemind.oauth import SecretBox
 from hivemind.store import BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BACKUP_TABLE_QUERIES, HivemindStore, StoreValidationError
 
 TEST_PASSWORD = "operator-not-secret"  # nosec B105
+RECOVERY_PASSWORD = "operator-recovery-secret"  # nosec B105
 MANAGED_SECRET_VALUE = "example"  # nosec B105
 STALE_MANAGED_SECRET_VALUE = "stale-example"  # nosec B105
 TABLE_COUNT_QUERIES = {
@@ -692,6 +694,82 @@ def test_cli_backup_rejects_missing_hivemind_db_path_without_creating_database(
     require_true("configured database does not exist" in captured.err, "backup should explain the missing DB path")
     require_true(missing_db.exists() is False, "backup should not create a fresh source database")
     require_true(backup_path.exists() is False, "backup should not write an output bundle after source validation fails")
+
+
+def test_cli_admin_reset_password_uses_existing_database_and_stdin(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = tmp_path / "recovery.db"
+    source = HivemindStore(db_path)
+    source.setup_admin("admin", TEST_PASSWORD)
+    old_token, _ = source.login("admin", TEST_PASSWORD)
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(db_path))
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{RECOVERY_PASSWORD}\n"))
+
+    require_equal(
+        main(["admin", "reset-password", "--username", "ADMIN", "--password-stdin"]),
+        0,
+        "admin reset-password should exit cleanly",
+    )
+
+    recovered = HivemindStore(db_path)
+    _, user = recovered.login("admin", RECOVERY_PASSWORD)
+    require_equal(user["username"], "admin", "recovered password should authenticate the existing admin")
+    require_equal(recovered.get_session_user(old_token), None, "CLI recovery should revoke active sessions")
+
+    captured = capsys.readouterr()
+    require_true("reset local admin password for admin" in captured.err, "CLI should confirm the recovered admin")
+    require_true(RECOVERY_PASSWORD not in captured.err, "CLI should not print the recovery password")
+
+
+def test_cli_admin_reset_password_rejects_missing_database_without_creating_one(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    missing_db = tmp_path / "missing.db"
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(missing_db))
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{RECOVERY_PASSWORD}\n"))
+
+    require_equal(
+        main(["admin", "reset-password", "--username", "admin", "--password-stdin"]),
+        1,
+        "admin reset-password should reject a missing configured database",
+    )
+
+    captured = capsys.readouterr()
+    require_true("configured database does not exist" in captured.err, "CLI should explain the missing DB path")
+    require_true(missing_db.exists() is False, "CLI recovery should not create a fresh database")
+
+
+def test_cli_admin_reset_password_rejects_interactive_confirmation_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = tmp_path / "recovery.db"
+    store = HivemindStore(db_path)
+    store.setup_admin("admin", TEST_PASSWORD)
+    prompts = iter([RECOVERY_PASSWORD, "different-recovery-secret"])
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(db_path))
+    monkeypatch.setattr("getpass.getpass", lambda _: next(prompts))
+
+    require_equal(
+        main(["admin", "reset-password", "--username", "admin"]),
+        1,
+        "admin reset-password should reject mismatched interactive confirmation",
+    )
+
+    captured = capsys.readouterr()
+    require_true("password confirmation does not match" in captured.err, "CLI should explain confirmation mismatch")
+    require_true(RECOVERY_PASSWORD not in captured.err, "CLI should not print the attempted password")
+    require_equal(
+        HivemindStore(db_path).login("admin", TEST_PASSWORD)[1]["username"],
+        "admin",
+        "failed interactive recovery should not alter admin auth",
+    )
 
 
 def test_cli_restore_reads_input_before_opening_destination_database(
