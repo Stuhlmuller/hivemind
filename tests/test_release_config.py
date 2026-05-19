@@ -62,6 +62,16 @@ def dockerfile_copy_sources(repo_root: Path) -> list[str]:
     return sources
 
 
+def test_dockerfile_sets_container_database_path_explicitly() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    require_true(
+        "ENV HIVEMIND_DB_PATH=/data/hivemind.db" in dockerfile,
+        "container launches should keep the production database path explicit",
+    )
+
+
 def test_semantic_release_config_skips_npm_publish_for_container_app() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     config = json.loads((repo_root / ".releaserc.json").read_text(encoding="utf-8"))

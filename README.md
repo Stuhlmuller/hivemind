@@ -48,6 +48,9 @@ uvicorn hivemind.api:create_app --factory --reload --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://localhost:8000/`.
+Local processes default to `.data/hivemind.db` when `HIVEMIND_DB_PATH` is not
+set; the explicit export above keeps the active path visible and easy to
+override.
 
 `HIVEMIND_DEVELOPMENT_MODE=true` is required for plain HTTP local development.
 Outside explicit development mode, Hivemind marks auth session cookies `Secure`,
@@ -245,8 +248,8 @@ hivemind backup ./hivemind-backup.json
 hivemind restore ./hivemind-backup.json
 ```
 
-Inside a container, the default database path is `/data/hivemind.db` unless you
-override `HIVEMIND_DB_PATH`. A typical volume-backed flow looks like:
+Inside a container, the image sets `HIVEMIND_DB_PATH=/data/hivemind.db` unless
+you override it. A typical volume-backed flow looks like:
 
 ```bash
 docker exec hivemind hivemind backup /data/backups/hivemind-backup.json

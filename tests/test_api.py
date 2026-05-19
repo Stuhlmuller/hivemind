@@ -165,6 +165,37 @@ def test_create_app_uses_lifespan_without_on_event_deprecation(tmp_path: Path) -
     )
 
 
+def test_store_from_env_defaults_to_repo_local_dev_database(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HIVEMIND_DB_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    store = HivemindStore.from_env()
+
+    expected_path = tmp_path / ".data" / "hivemind.db"
+    require_equal(store.db_path, expected_path, "unset HIVEMIND_DB_PATH should use the repo-local dev database")
+    require_true(expected_path.is_file(), "store creation should initialize the local dev database file")
+
+
+def test_store_from_env_preserves_explicit_database_path(tmp_path: Path, monkeypatch) -> None:
+    expected_path = tmp_path / "explicit.db"
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(expected_path))
+
+    store = HivemindStore.from_env()
+
+    require_equal(store.db_path, expected_path, "explicit HIVEMIND_DB_PATH should override the local dev default")
+    require_true(expected_path.is_file(), "store creation should initialize the explicit database file")
+
+
+def test_store_from_env_logs_active_database_path(tmp_path: Path, monkeypatch, caplog) -> None:
+    expected_path = tmp_path / "hivemind.db"
+    monkeypatch.setenv("HIVEMIND_DB_PATH", str(expected_path))
+
+    with caplog.at_level(logging.INFO, logger="hivemind.runtime"):
+        HivemindStore.from_env()
+
+    require_true(str(expected_path) in caplog.text, "startup diagnostics should include the active database path")
+
+
 def test_scheduler_lifespan_respects_explicit_disable(tmp_path: Path) -> None:
     app = create_app(HivemindStore(tmp_path / "hivemind.db"), start_scheduler=False)
 
@@ -5802,6 +5833,7 @@ def test_health_reports_db_and_scheduler_state(tmp_path: Path) -> None:
     require_equal(payload["status"], "ok", "health should report ok")
     require_equal(payload["db"]["status"], "ok", "health should report db ok")
     require_equal(payload["scheduler"]["status"], "disabled", "health should report disabled test scheduler")
+    require_true(str(tmp_path / "hivemind.db") not in response.text, "health should not expose the database path")
 
 
 def test_health_reports_scheduler_run_loop_failures(tmp_path: Path) -> None:
