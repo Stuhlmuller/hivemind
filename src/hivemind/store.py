@@ -166,6 +166,7 @@ SENSITIVE_LOG_KEY_FRAGMENTS = (
 AUDIT_LOGGER = logging.getLogger("hivemind.audit")
 RUNTIME_LOGGER = logging.getLogger("hivemind.runtime")
 STRUCTURED_AUDIT_LOG_PREFIXES = ("credential.lease.", "credential.action.")
+BROKER_ACTION_AUDIT_CONTRACT = "broker.action_attempt.v1"
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 AGENT_STATUS_ALIASES = {"working": "running"}
 AGENT_STATUS_VALUES = frozenset({"idle", "queued", "running", "blocked", "done", "failed"})
@@ -213,6 +214,7 @@ CREDENTIAL_INSERT_SQL = """
     )
 """
 SAFE_ACTION_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+SAFE_AUDIT_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 BACKUP_FORMAT = "hivemind-logical-backup"
 BACKUP_LEGACY_FORMAT_VERSION = 1
 BACKUP_FORMAT_VERSION = 2
@@ -2541,6 +2543,17 @@ class HivemindStore:
             conn.execute(BEGIN_IMMEDIATE_SQL)
             denial = self.lease_request_rate_limit_denial(conn, credential=credential, agent_id=agent_id)
             if denial is not None:
+                metadata = self.broker_action_audit_metadata(
+                    normalized_action,
+                    agent_id=agent_id,
+                    credential_id=credential_id,
+                    broker_decision="denied",
+                    broker_reason=denial.reason,
+                    broker_action_state="lease_denied",
+                    base_metadata=base_audit_metadata,
+                    credential_action=credential_action,
+                )
+                metadata.update(denial.metadata)
                 self._insert_audit(
                     conn,
                     LEASE_DENIED_EVENT,
@@ -2548,12 +2561,7 @@ class HivemindStore:
                     credential_id,
                     "denied",
                     denial.reason,
-                    {
-                        **base_audit_metadata,
-                        **self.audit_action_metadata(normalized_action),
-                        "credential_action": credential_action,
-                        **denial.metadata,
-                    },
+                    metadata,
                 )
                 return denial.reason
             conn.execute(
@@ -2563,19 +2571,27 @@ class HivemindStore:
                 """,
                 row,
             )
+            decision = "pending" if requires_approval else "allowed"
+            reason = "action requires operator approval" if requires_approval else review_reason
             self._insert_audit(
                 conn,
                 "credential.lease.pending" if requires_approval else "credential.lease.issued",
                 agent_id,
                 credential_id,
-                "pending" if requires_approval else "allowed",
-                "action requires operator approval" if requires_approval else review_reason,
-                {
-                    **base_audit_metadata,
-                    **self.audit_action_metadata(normalized_action, ttl_seconds=ttl),
-                    "credential_action": credential_action,
-                    "lease_id": row["id"],
-                },
+                decision,
+                reason,
+                self.broker_action_audit_metadata(
+                    normalized_action,
+                    agent_id=agent_id,
+                    credential_id=credential_id,
+                    broker_decision=decision,
+                    broker_reason=reason,
+                    broker_action_state="approval_pending" if requires_approval else "lease_issued",
+                    base_metadata=base_audit_metadata,
+                    credential_action=credential_action,
+                    lease_id=row["id"],
+                    ttl_seconds=ttl,
+                ),
             )
         return None
 
@@ -2594,6 +2610,17 @@ class HivemindStore:
             denial = self.lease_request_rate_limit_denial(conn, credential=credential, agent_id=agent_id)
             if denial is None:
                 return None
+            metadata = self.broker_action_audit_metadata(
+                normalized_action,
+                agent_id=agent_id,
+                credential_id=credential_id,
+                broker_decision="denied",
+                broker_reason=denial.reason,
+                broker_action_state="lease_denied",
+                base_metadata=base_audit_metadata,
+                credential_action=credential_action,
+            )
+            metadata.update(denial.metadata)
             self._insert_audit(
                 conn,
                 LEASE_DENIED_EVENT,
@@ -2601,12 +2628,7 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 denial.reason,
-                {
-                    **base_audit_metadata,
-                    **self.audit_action_metadata(normalized_action),
-                    "credential_action": credential_action,
-                    **denial.metadata,
-                },
+                metadata,
             )
             return denial.reason
 
@@ -2676,19 +2698,25 @@ class HivemindStore:
 
         def lease_audit_metadata(
             *,
+            broker_decision: str,
+            broker_reason: str,
+            broker_action_state: str,
             ttl_seconds: int | None = None,
             lease_id: str | None = None,
             credential_action_name: str | None = None,
         ) -> dict[str, Any]:
-            metadata = {
-                **base_audit_metadata,
-                **self.audit_action_metadata(normalized_action, ttl_seconds=ttl_seconds),
-            }
-            if credential_action_name is not None:
-                metadata["credential_action"] = credential_action_name
-            if lease_id is not None:
-                metadata["lease_id"] = lease_id
-            return metadata
+            return self.broker_action_audit_metadata(
+                normalized_action,
+                agent_id=agent_id,
+                credential_id=credential_id,
+                broker_decision=broker_decision,
+                broker_reason=broker_reason,
+                broker_action_state=broker_action_state,
+                base_metadata=base_audit_metadata,
+                credential_action=credential_action_name,
+                lease_id=lease_id,
+                ttl_seconds=ttl_seconds,
+            )
 
         try:
             with self.connect() as conn:
@@ -2700,7 +2728,11 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 str(exc),
-                lease_audit_metadata(),
+                lease_audit_metadata(
+                    broker_decision="denied",
+                    broker_reason=str(exc),
+                    broker_action_state="lease_denied",
+                ),
             )
             raise
         try:
@@ -2712,7 +2744,11 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 str(exc),
-                lease_audit_metadata(),
+                lease_audit_metadata(
+                    broker_decision="denied",
+                    broker_reason=str(exc),
+                    broker_action_state="lease_denied",
+                ),
             )
             raise
         try:
@@ -2724,7 +2760,11 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 str(exc),
-                lease_audit_metadata(),
+                lease_audit_metadata(
+                    broker_decision="denied",
+                    broker_reason=str(exc),
+                    broker_action_state="lease_denied",
+                ),
             )
             raise
         normalized_action = tool_action["name"]
@@ -2749,7 +2789,12 @@ class HivemindStore:
                 credential_id,
                 "denied",
                 deterministic_review.reason,
-                lease_audit_metadata(credential_action_name=credential_action),
+                lease_audit_metadata(
+                    broker_decision="denied",
+                    broker_reason=deterministic_review.reason,
+                    broker_action_state="lease_denied",
+                    credential_action_name=credential_action,
+                ),
             )
             raise StoreError(deterministic_review.reason)
         error_detail = self.record_lease_rate_limit_denial_if_limited(
@@ -2765,7 +2810,12 @@ class HivemindStore:
 
         review = self._policy_engine.review_request(review_input)
         if not review.allowed:
-            metadata = lease_audit_metadata(credential_action_name=credential_action)
+            metadata = lease_audit_metadata(
+                broker_decision="denied",
+                broker_reason=review.reason,
+                broker_action_state="lease_denied",
+                credential_action_name=credential_action,
+            )
             metadata[LEASE_REQUEST_COUNTED_METADATA_KEY] = True
             self.audit(
                 LEASE_DENIED_EVENT,
@@ -2820,9 +2870,11 @@ class HivemindStore:
         payload: dict[str, Any],
         *,
         validate_payload: bool = True,
+        audit_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         token_hash = self.hash_token(lease_token)
         normalized_action = normalize_tool_action_name(action)
+        base_audit_metadata = dict(audit_metadata or {})
         payload_key_count = len(payload)
         error_detail: str | None = None
         result: dict[str, Any] | None = None
@@ -2836,6 +2888,7 @@ class HivemindStore:
                     normalized_action,
                     error_detail,
                     payload_key_count,
+                    base_audit_metadata=base_audit_metadata,
                 )
             else:
                 error_detail = self._preflight_credential_action(
@@ -2844,6 +2897,7 @@ class HivemindStore:
                     normalized_action,
                     payload,
                     payload_key_count,
+                    base_audit_metadata=base_audit_metadata,
                     validate_payload=validate_payload,
                 )
                 if error_detail is None:
@@ -2857,6 +2911,7 @@ class HivemindStore:
                             denial.reason,
                             payload_key_count,
                             metadata=denial.metadata,
+                            base_audit_metadata=base_audit_metadata,
                         )
                     else:
                         result, error_detail = self._consume_credential_action(
@@ -2864,6 +2919,7 @@ class HivemindStore:
                             lease,
                             normalized_action,
                             payload,
+                            base_audit_metadata=base_audit_metadata,
                         )
         if error_detail is not None:
             raise StoreError(error_detail)
@@ -2879,17 +2935,32 @@ class HivemindStore:
         payload: dict[str, Any],
         payload_key_count: int,
         *,
+        base_audit_metadata: Mapping[str, Any],
         validate_payload: bool,
     ) -> str | None:
         error_detail = self._credential_action_denial_reason(lease, normalized_action)
         if error_detail is not None:
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
+            self._insert_credential_action_denial(
+                conn,
+                lease,
+                normalized_action,
+                error_detail,
+                payload_key_count,
+                base_audit_metadata=base_audit_metadata,
+            )
             return error_detail
         try:
             tool_action = self._tool_action_for_request(normalized_action)
         except StoreError as exc:
             error_detail = str(exc)
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
+            self._insert_credential_action_denial(
+                conn,
+                lease,
+                normalized_action,
+                error_detail,
+                payload_key_count,
+                base_audit_metadata=base_audit_metadata,
+            )
             return error_detail
         payload_error = payload_schema_error(tool_action["input_schema"], payload) if validate_payload else None
         if payload_error is None:
@@ -2900,6 +2971,7 @@ class HivemindStore:
             normalized_action,
             payload_error,
             payload_key_count,
+            base_audit_metadata=base_audit_metadata,
         )
         return payload_error
 
@@ -2920,6 +2992,8 @@ class HivemindStore:
         normalized_action: str,
         error_detail: str,
         payload_key_count: int,
+        *,
+        base_audit_metadata: Mapping[str, Any],
     ) -> None:
         self._insert_audit(
             conn,
@@ -2928,7 +3002,18 @@ class HivemindStore:
             "credential_lease",
             "denied",
             error_detail,
-            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
+            self.broker_action_audit_metadata(
+                normalized_action,
+                agent_id="unknown",
+                credential_id=None,
+                broker_decision="denied",
+                broker_reason=error_detail,
+                broker_action_state="action_denied",
+                base_metadata=base_audit_metadata,
+                resource_type="credential_lease",
+                resource_id="unknown",
+                payload_key_count=payload_key_count,
+            ),
         )
 
     def credential_action_denial_metadata(
@@ -2936,9 +3021,20 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         payload_key_count: int,
+        error_detail: str,
+        base_audit_metadata: Mapping[str, Any],
     ) -> dict[str, Any]:
-        metadata = self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count)
-        metadata["lease_id"] = lease["id"]
+        metadata = self.broker_action_audit_metadata(
+            normalized_action,
+            agent_id=lease["agent_id"],
+            credential_id=lease["credential_id"],
+            broker_decision="denied",
+            broker_reason=error_detail,
+            broker_action_state="action_denied",
+            base_metadata=base_audit_metadata,
+            lease_id=lease["id"],
+            payload_key_count=payload_key_count,
+        )
         if lease["status"] in {"pending", "denied"}:
             metadata["lease_status"] = lease["status"]
         return metadata
@@ -2952,8 +3048,15 @@ class HivemindStore:
         payload_key_count: int,
         *,
         metadata: dict[str, Any] | None = None,
+        base_audit_metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        audit_metadata = self.credential_action_denial_metadata(lease, normalized_action, payload_key_count)
+        audit_metadata = self.credential_action_denial_metadata(
+            lease,
+            normalized_action,
+            payload_key_count,
+            error_detail,
+            dict(base_audit_metadata or {}),
+        )
         audit_metadata.update(metadata or {})
         self._insert_audit(
             conn,
@@ -2971,18 +3074,34 @@ class HivemindStore:
         lease: sqlite3.Row,
         normalized_action: str,
         payload: dict[str, Any],
+        *,
+        base_audit_metadata: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | None, str | None]:
         payload_key_count = len(payload)
         credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (lease["credential_id"],)).fetchone()
         if credential is None:
             error_detail = "credential no longer exists"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
+            self._insert_credential_action_denial(
+                conn,
+                lease,
+                normalized_action,
+                error_detail,
+                payload_key_count,
+                base_audit_metadata=base_audit_metadata,
+            )
             return None, error_detail
         try:
             tool_action = self._tool_action_for_request(normalized_action)
         except StoreError as exc:
             error_detail = str(exc)
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
+            self._insert_credential_action_denial(
+                conn,
+                lease,
+                normalized_action,
+                error_detail,
+                payload_key_count,
+                base_audit_metadata=base_audit_metadata,
+            )
             return None, error_detail
         consumed_at = utcnow()
         cursor = conn.execute(
@@ -2998,16 +3117,35 @@ class HivemindStore:
         )
         if cursor.rowcount != 1:
             error_detail = "credential lease is expired or revoked"
-            self._insert_credential_action_denial(conn, lease, normalized_action, error_detail, payload_key_count)
+            self._insert_credential_action_denial(
+                conn,
+                lease,
+                normalized_action,
+                error_detail,
+                payload_key_count,
+                base_audit_metadata=base_audit_metadata,
+            )
             return None, error_detail
+        reason = "action matched active credential lease"
         self._insert_audit(
             conn,
             "credential.action.performed",
             lease["agent_id"],
             lease["credential_id"],
             "allowed",
-            "action matched active credential lease",
-            self.audit_action_metadata(normalized_action, payload_key_count=payload_key_count),
+            reason,
+            self.broker_action_audit_metadata(
+                normalized_action,
+                agent_id=lease["agent_id"],
+                credential_id=lease["credential_id"],
+                broker_decision="allowed",
+                broker_reason=reason,
+                broker_action_state="action_performed",
+                base_metadata=base_audit_metadata,
+                credential_action=tool_action["required_credential_action"],
+                lease_id=lease["id"],
+                payload_key_count=payload_key_count,
+            ),
         )
         return (
             {
@@ -3045,16 +3183,24 @@ class HivemindStore:
             updated["status"] = "active"
             updated["issued_at"] = iso(now)
             updated["expires_at"] = iso(expires_at)
-        approval_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
-        approval_metadata["agent_id"] = updated["agent_id"]
-        approval_metadata["lease_id"] = updated["id"]
+        approval_reason = "operator approved lease request"
         self.audit(
             "credential.lease.approved",
             actor_id,
             updated["credential_id"],
             "allowed",
-            "operator approved lease request",
-            approval_metadata,
+            approval_reason,
+            self.broker_action_audit_metadata(
+                updated["action"],
+                agent_id=updated["agent_id"],
+                credential_id=updated["credential_id"],
+                broker_decision="allowed",
+                broker_reason=approval_reason,
+                broker_action_state="lease_approved",
+                credential_action=updated["action"],
+                lease_id=updated["id"],
+                ttl_seconds=updated["ttl_seconds"],
+            ),
         )
         public = self.public_lease(updated)
         public["lease_token"] = token
@@ -3070,16 +3216,24 @@ class HivemindStore:
             conn.execute("UPDATE leases SET status = ? WHERE id = ?", ("denied", lease_id))
             updated = dict(lease)
             updated["status"] = "denied"
-        denial_metadata = self.audit_action_metadata(updated["action"], ttl_seconds=updated["ttl_seconds"])
-        denial_metadata["agent_id"] = updated["agent_id"]
-        denial_metadata["lease_id"] = updated["id"]
+        denial_reason = "operator denied lease request"
         self.audit(
             LEASE_DENIED_EVENT,
             actor_id,
             updated["credential_id"],
             "denied",
-            "operator denied lease request",
-            denial_metadata,
+            denial_reason,
+            self.broker_action_audit_metadata(
+                updated["action"],
+                agent_id=updated["agent_id"],
+                credential_id=updated["credential_id"],
+                broker_decision="denied",
+                broker_reason=denial_reason,
+                broker_action_state="approval_denied",
+                credential_action=updated["action"],
+                lease_id=updated["id"],
+                ttl_seconds=updated["ttl_seconds"],
+            ),
         )
         return self.public_lease(updated)
 
@@ -3245,6 +3399,61 @@ class HivemindStore:
         if normalized and len(normalized) <= 64 and SAFE_ACTION_NAME.fullmatch(normalized):
             return normalized
         return "<redacted>"
+
+    def audit_identifier_label(self, value: str | None) -> str:
+        normalized = str(value or "").strip()
+        if (
+            not normalized
+            or SAFE_AUDIT_IDENTIFIER.fullmatch(normalized) is None
+            or SECRET_REF_TEXT_PATTERN.search(normalized)
+            or is_sensitive_provider_key(normalized)
+        ):
+            return "<redacted>"
+        return normalized
+
+    def audit_resource_descriptor(self, resource_type: str, resource_id: str | None) -> dict[str, str]:
+        return {
+            "type": self.audit_identifier_label(resource_type),
+            "id": self.audit_identifier_label(resource_id),
+        }
+
+    def audit_reason_label(self, reason: str) -> str:
+        return redact_prompt_like_text(reason)
+
+    def broker_action_audit_metadata(
+        self,
+        action: str,
+        *,
+        agent_id: str,
+        credential_id: str | None,
+        broker_decision: str,
+        broker_reason: str,
+        broker_action_state: str,
+        base_metadata: Mapping[str, Any] | None = None,
+        credential_action: str | None = None,
+        lease_id: str | None = None,
+        resource_type: str = "credential",
+        resource_id: str | None = None,
+        ttl_seconds: int | None = None,
+        payload_key_count: int | None = None,
+    ) -> dict[str, Any]:
+        metadata = {
+            **dict(base_metadata or {}),
+            **self.audit_action_metadata(action, ttl_seconds=ttl_seconds, payload_key_count=payload_key_count),
+            "audit_contract": BROKER_ACTION_AUDIT_CONTRACT,
+            "agent_id": self.audit_identifier_label(agent_id),
+            "broker_decision": broker_decision,
+            "broker_reason": self.audit_reason_label(broker_reason),
+            "broker_action_state": broker_action_state,
+            "resource_descriptor": self.audit_resource_descriptor(resource_type, resource_id or credential_id),
+        }
+        if credential_id is not None:
+            metadata["credential_id"] = self.audit_identifier_label(credential_id)
+        if credential_action is not None:
+            metadata["credential_action"] = self.audit_action_label(credential_action)
+        if lease_id is not None:
+            metadata["lease_id"] = self.audit_identifier_label(lease_id)
+        return metadata
 
     def heartbeat_audit_metadata(self, note: str) -> dict[str, Any]:
         normalized_note = note.strip()
@@ -4055,6 +4264,12 @@ class HivemindStore:
     ) -> dict[str, Any]:
         action = self.agent_provider_credential_action(credential_id=credential_id, provider_id=provider_id)
         intent = f"Run task {task_id} through the {provider_id} agent provider using model {model}."
+        audit_metadata = {
+            "task_id": task_id,
+            "provider": provider_id,
+            "model": model,
+            "capability": "agent_provider",
+        }
         try:
             token, lease = self.request_lease(
                 credential_id=credential_id,
@@ -4062,12 +4277,7 @@ class HivemindStore:
                 action=action,
                 intent=intent,
                 ttl_seconds=60,
-                audit_metadata={
-                    "task_id": task_id,
-                    "provider": provider_id,
-                    "model": model,
-                    "capability": "agent_provider",
-                },
+                audit_metadata=audit_metadata,
             )
             if token is None:
                 reason = "agent provider credential requires operator-approved lease"
@@ -4096,6 +4306,7 @@ class HivemindStore:
                     "capability": "agent_provider",
                 },
                 validate_payload=False,
+                audit_metadata=audit_metadata,
             )
         except StoreError as exc:
             if str(exc) != "agent provider credential requires operator-approved lease":
@@ -4137,6 +4348,12 @@ class HivemindStore:
         if not task["credential_id"] or not task["action"]:
             return None
         action = str(task["action"]).strip().lower()
+        audit_metadata = {
+            "task_id": task["id"],
+            "provider": provider_id,
+            "model": model,
+            "capability": "provider_tool",
+        }
         try:
             token, lease = self.request_lease(
                 credential_id=task["credential_id"],
@@ -4144,12 +4361,7 @@ class HivemindStore:
                 action=task["action"],
                 intent=task["intent"],
                 ttl_seconds=None,
-                audit_metadata={
-                    "task_id": task["id"],
-                    "provider": provider_id,
-                    "model": model,
-                    "capability": "provider_tool",
-                },
+                audit_metadata=audit_metadata,
             )
             if token is None:
                 denied_reason = "credential action requires operator-approved lease"
@@ -4178,6 +4390,7 @@ class HivemindStore:
                     "capability": "provider_tool",
                 },
                 validate_payload=False,
+                audit_metadata=audit_metadata,
             )
         except StoreError as exc:
             if str(exc) != "credential action requires operator-approved lease":
