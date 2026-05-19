@@ -4348,17 +4348,16 @@ class HivemindStore:
         with self.connect() as conn:
             return [self.public_schedule(row) for row in conn.execute("SELECT * FROM schedules ORDER BY created_at DESC")]
 
-    def update_schedule_enabled(self, schedule_id: str, enabled: bool) -> dict[str, Any]:
+    def update_schedule_enabled(self, schedule_id: str, enabled: bool, *, actor_id: str = "user") -> dict[str, Any]:
         now = iso()
         with self.connect() as conn:
-            row = self.get_schedule_row(conn, schedule_id)
+            self.get_schedule_row(conn, schedule_id)
             conn.execute(
                 "UPDATE schedules SET enabled = ?, updated_at = ? WHERE id = ?",
                 (1 if enabled else 0, now, schedule_id),
             )
-        actor = row["assigned_agent_id"] or "user"
         reason = "schedule enabled" if enabled else "schedule paused"
-        self.audit("schedule.enabled.updated", actor, schedule_id, "allowed", reason, {"enabled": enabled})
+        self.audit("schedule.enabled.updated", actor_id, schedule_id, "allowed", reason, {"enabled": enabled})
         return self.get_schedule(schedule_id)
 
     def run_due_schedules_once(self, *, actor_id: str = "scheduler") -> list[dict[str, Any]]:

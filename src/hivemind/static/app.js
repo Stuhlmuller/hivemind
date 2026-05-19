@@ -6,6 +6,7 @@ const state = {
   authError: "",
   me: null,
   config: null,
+  queenBee: null,
   hives: [],
   agents: [],
   toolActions: [],
@@ -1234,6 +1235,39 @@ function renderCredentialAudit() {
     .join("") || '<p class="meta">No credential audit events yet.</p>';
 }
 
+function renderQueenBee() {
+  const profile = state.queenBee;
+  if (!profile) return;
+  const tools = profile.tools || [];
+  const writeTools = tools.filter((tool) => tool.mutates);
+  setText("#queen-bee-agent-id", profile.id || "agent_queen_bee");
+  setText("#queen-bee-tool-count", tools.length);
+  setText("#queen-bee-write-tool-count", writeTools.length);
+
+  const statusNode = $("#queen-bee-status");
+  if (profile.provisioned) {
+    statusNode.textContent = "provisioned";
+    statusNode.dataset.state = "ready";
+    $("#queen-bee-detail").textContent = "Tool calls run as agent_queen_bee and keep the invoking operator in audit metadata.";
+  } else {
+    statusNode.textContent = "not provisioned";
+    statusNode.dataset.state = "warning";
+    $("#queen-bee-detail").textContent = "Provision Queen Bee before routing write operations through first-party tools.";
+  }
+
+  $("#queen-bee-provision").hidden = Boolean(profile.provisioned);
+  $("#queen-bee-tools-list").innerHTML = tools
+    .slice(0, 6)
+    .map((tool) =>
+      item(
+        tool.name,
+        escapeHtml(tool.description || "No tool description."),
+        [tool.risk_level, tool.mutates ? "write" : "read-only"],
+      ),
+    )
+    .join("") || '<p class="meta">No Queen Bee tools registered.</p>';
+}
+
 function renderOverview() {
   const activeTasks = state.tasks.filter((task) => !["done", "failed", "cancelled"].includes(task.status)).slice(0, 5);
   const dueSchedules = state.schedules.filter(isScheduleDue).slice(0, 5);
@@ -1293,6 +1327,7 @@ function render() {
   if (!state.me) return;
   renderConfig();
   renderRuntimeOverview();
+  renderQueenBee();
   renderSelectors();
   renderOAuthProviders();
   renderHives();
@@ -1350,6 +1385,7 @@ async function refresh() {
   try {
     runtimePayload = await Promise.all([
       api("/config"),
+      api("/queen-bee"),
       api("/hives"),
       api("/agents"),
       api("/tool-actions"),
@@ -1366,8 +1402,8 @@ async function refresh() {
     render();
     throw error;
   }
-  const [config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
-  Object.assign(state, { config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
+  const [config, queenBee, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload;
+  Object.assign(state, { config, queenBee, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime });
   render();
   consumeOAuthStatus();
 }
@@ -1411,6 +1447,12 @@ $("#logout-button").addEventListener("click", async () => {
 $("#refresh-button").addEventListener("click", async () => {
   await refresh();
   toast("Runtime refreshed.");
+});
+
+$("#queen-bee-provision").addEventListener("click", async () => {
+  await api("/queen-bee/provision", { method: "POST" });
+  await refresh();
+  toast("Queen Bee provisioned.");
 });
 
 $("#credential-template-picker").addEventListener("click", (event) => {

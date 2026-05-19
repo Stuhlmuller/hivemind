@@ -535,9 +535,10 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "frontend should treat runtime API loading as a recoverable batch",
     )
     require_true(
-        "const [config, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
+        "const [config, queenBee, hives, agents, toolActions, credentials, oauthProviders, leases, tasks, schedules, heartbeats, auditEvents, runtime] = runtimePayload" in response.text,
         "frontend should render a recoverable shell if runtime data loading fails",
     )
+    require_true('api("/queen-bee")' in response.text, "frontend should fetch the Queen Bee operator profile")
     require_true("loadRuntimeOverview()" in response.text, "frontend should fetch runtime overview without breaking core loading")
     require_true("function validateAuthPayload" in response.text, "frontend should validate auth form state")
     require_true("admin password must include at least 12 non-whitespace characters" in response.text, "frontend should reject blank setup passwords")
@@ -1380,6 +1381,166 @@ def test_tool_action_registry_skips_unsafe_legacy_actions(tmp_path: Path) -> Non
 
     require_true("archive_repo" in action_names, "safe legacy action should migrate into the tool registry")
     require_true("token-unsafe" not in action_names, "unsafe legacy action should not broaden the tool registry")
+
+
+def test_queen_bee_profile_and_tool_catalog_are_auth_guarded_and_safe(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    unauthenticated = client.get("/queen-bee")
+    require_equal(unauthenticated.status_code, 401, "Queen Bee profile should require operator auth")
+
+    setup(client)
+
+    profile_response = client.get("/queen-bee")
+    require_equal(profile_response.status_code, 200, "authenticated operators should see Queen Bee profile")
+    profile = profile_response.json()
+
+    require_equal(profile["id"], "agent_queen_bee", "Queen Bee should have a stable first-party agent id")
+    require_equal(profile["name"], "Queen Bee", "Queen Bee profile should name the operator agent")
+    require_equal(profile["provisioned"], False, "Queen Bee should not be silently seeded during setup")
+    require_equal(client.get("/agents").json(), [], "first-run setup should still create only the local admin account")
+
+    tools = {tool["name"]: tool for tool in profile["tools"]}
+    for expected_tool in ("read_public_config", "create_task", "create_credential_reference", "import_declarative_config"):
+        require_true(expected_tool in tools, f"Queen Bee catalog should include {expected_tool}")
+    require_true(
+        "secret_value" not in json.dumps(tools["create_credential_reference"]),
+        "Queen Bee credential-reference tool should not advertise raw secret input",
+    )
+
+
+def test_queen_bee_provisioning_creates_explicit_operator_agent(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    provision_response = client.post("/queen-bee/provision")
+    require_equal(provision_response.status_code, 201, "operator should explicitly provision Queen Bee")
+    queen = provision_response.json()
+
+    require_equal(queen["id"], "agent_queen_bee", "provisioned Queen Bee should use the stable id")
+    require_equal(queen["name"], "Queen Bee", "provisioned agent should be Queen Bee")
+    require_equal(queen["status"], "idle", "provisioned Queen Bee should start idle")
+    require_true(
+        "first-party tools" in queen["system_prompt"],
+        "Queen Bee prompt should route operation through first-party tools",
+    )
+
+    second_response = client.post("/queen-bee/provision")
+    require_equal(second_response.status_code, 201, "re-provisioning Queen Bee should be idempotent")
+    require_equal(second_response.json()["id"], queen["id"], "re-provisioning should return the existing agent")
+
+    agents = client.get("/agents").json()
+    require_equal([agent["id"] for agent in agents], ["agent_queen_bee"], "Queen Bee should be the only explicit agent")
+
+
+def test_queen_bee_tool_creates_task_with_agent_attributed_audit(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup_demo(client)
+    operator = client.get("/me").json()
+    queen = client.post("/queen-bee/provision").json()
+    scout = next(agent for agent in client.get("/agents").json() if agent["name"] == "Scout")
+    credential = client.get("/credentials").json()[0]
+
+    response = client.post(
+        "/queen-bee/tools/create_task",
+        json={
+            "arguments": {
+                "title": "Inspect broker policy",
+                "description": "Review the JIT policy surface through the Queen Bee tool.",
+                "priority": "high",
+                "assigned_agent_id": scout["id"],
+                "credential_id": credential["id"],
+                "action": "read_repo",
+                "intent": "Inspect the broker policy without exposing raw secrets.",
+                "heartbeat_seconds": 60,
+            }
+        },
+    )
+
+    require_equal(response.status_code, 200, "Queen Bee create_task tool should succeed")
+    payload = response.json()
+    require_equal(payload["actor_id"], queen["id"], "tool response should identify Queen Bee as actor")
+    task = payload["result"]
+    require_equal(task["title"], "Inspect broker policy", "tool should return the created task")
+    require_equal(task["assigned_agent_id"], scout["id"], "tool should preserve assigned agent")
+
+    audit_events = client.get("/audit-events").json()
+    task_created = next(event for event in audit_events if event["type"] == "task.created" and event["target_id"] == task["id"])
+    require_equal(task_created["actor_id"], queen["id"], "task creation should be attributed to Queen Bee")
+    tool_audit = next(event for event in audit_events if event["type"] == "queen_bee.tool.executed")
+    require_equal(tool_audit["actor_id"], queen["id"], "tool audit should be attributed to Queen Bee")
+    require_equal(tool_audit["metadata"]["operator_id"], operator["id"], "tool audit should retain the invoking operator")
+    require_equal(tool_audit["metadata"]["tool_name"], "create_task", "tool audit should name the tool")
+
+
+def test_queen_bee_credential_tool_rejects_raw_secret_payloads(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    queen = client.post("/queen-bee/provision").json()
+
+    response = client.post(
+        "/queen-bee/tools/create_credential_reference",
+        json={
+            "arguments": {
+                "name": "Unsafe inline token",
+                "provider": "github",
+                "secret_ref": "env://HIVEMIND_OPERATOR_TOKEN",
+                "secret_value": "inline-sensitive-material",
+                "allowed_agents": [queen["id"]],
+                "allowed_actions": ["read_repo"],
+                "metadata": {"credential_kind": "generic_reference"},
+            }
+        },
+    )
+
+    require_equal(response.status_code, 400, "Queen Bee credential tool should reject raw secret fields")
+    require_true(
+        "inline-sensitive-material" not in response.text,
+        "raw secret values must not be reflected in validation responses",
+    )
+
+    audit_events = client.get("/audit-events").json()
+    require_true(
+        "inline-sensitive-material" not in json.dumps(audit_events),
+        "raw secret values must not be written to audit events",
+    )
+    denied = next(event for event in audit_events if event["type"] == "queen_bee.tool.denied")
+    require_equal(denied["actor_id"], queen["id"], "denied tool use should be attributed to Queen Bee once provisioned")
+    require_equal(denied["decision"], "denied", "denied tool audit should be explicit")
+
+
+def test_queen_bee_creates_secret_reference_credentials_without_raw_secret_exposure(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+    queen = client.post("/queen-bee/provision").json()
+
+    response = client.post(
+        "/queen-bee/tools/create_credential_reference",
+        json={
+            "arguments": {
+                "name": "Operator repo reader",
+                "provider": "github",
+                "secret_ref": "env://HIVEMIND_OPERATOR_TOKEN",
+                "allowed_agents": [queen["id"]],
+                "allowed_actions": ["read_repo"],
+                "approval_required_actions": ["read_repo"],
+                "max_ttl_seconds": 120,
+                "require_intent": True,
+                "metadata": {"credential_kind": "generic_reference"},
+            }
+        },
+    )
+
+    require_equal(response.status_code, 200, "Queen Bee should create external secret-reference credentials")
+    credential = response.json()["result"]
+    require_equal(credential["name"], "Operator repo reader", "credential result should name the policy")
+    require_equal(credential["policy"]["allowed_agents"], [queen["id"]], "credential should be scoped to Queen Bee")
+    require_equal(credential["policy"]["approval_required_actions"], ["read_repo"], "approval gate should be preserved")
+    require_true("secret_ref" not in credential, "public credential result should not expose raw secret_ref")
+    require_true(
+        credential["secret_ref_preview"].startswith("env://HIV..."),
+        "public credential result should only expose a secret ref preview",
+    )
 
 
 def test_unknown_tool_action_is_denied_before_lease_issuance(tmp_path: Path) -> None:

@@ -62,3 +62,14 @@ def test_frontend_oauth_defaults_are_provider_neutral() -> None:
 
     if findings:
         raise AssertionError(f"frontend OAuth defaults should be provider-neutral: {findings}")
+
+
+def test_readme_and_frontend_present_queen_bee_as_operator_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    readme_text = (repo_root / "README.md").read_text(encoding="utf-8").lower()
+    frontend_text = (repo_root / "src/hivemind/static/index.html").read_text(encoding="utf-8").lower()
+
+    for text, source in ((readme_text, "README.md"), (frontend_text, "frontend")):
+        missing = [term for term in ("queen bee", "manual fallback") if term not in text]
+        if missing:
+            raise AssertionError(f"{source} should present Queen Bee and manual fallback wording: {missing}")

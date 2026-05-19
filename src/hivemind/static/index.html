@@ -156,7 +156,7 @@ agents: brokered capabilities</pre>
                   <p class="eyebrow">overview</p>
                   <h2>runtime surface</h2>
                 </div>
-                <p>agents, tasks, schedules, stale heartbeats, and audit events share one operator surface.</p>
+                <p>Queen Bee is the default operator path; direct forms remain manual fallback.</p>
               </div>
 
               <section class="metrics" aria-label="Runtime summary">
@@ -178,6 +178,35 @@ agents: brokered capabilities</pre>
               </section>
 
               <section class="workspace overview-workspace">
+                <div class="panel panel-span-3" id="queen-bee-panel">
+                  <div class="panel-heading">
+                    <div>
+                      <h2>queen bee operator</h2>
+                      <p>first-party tools / policy checks / audit</p>
+                    </div>
+                    <button id="queen-bee-provision" type="button" hidden>provision queen bee</button>
+                  </div>
+                  <div class="health-status">
+                    <div class="status-stack">
+                      <div class="status-line">
+                        <span>agent</span>
+                        <code id="queen-bee-agent-id">agent_queen_bee</code>
+                      </div>
+                      <div class="status-line">
+                        <span>status</span>
+                        <span id="queen-bee-status" class="status-chip">loading</span>
+                      </div>
+                      <div class="status-line">
+                        <span>tools</span>
+                        <code><span id="queen-bee-tool-count">0</span> total / <span id="queen-bee-write-tool-count">0</span> write</code>
+                      </div>
+                    </div>
+                    <p id="queen-bee-detail" class="meta">Waiting for Queen Bee profile.</p>
+                    <p class="meta">Manual controls stay available for fallback and break-glass operation.</p>
+                  </div>
+                  <div id="queen-bee-tools-list" class="list"></div>
+                </div>
+
                 <div class="panel panel-span-3" id="runtime-health-panel">
                   <div class="panel-heading">
                     <h2>node health</h2>
