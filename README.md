@@ -133,6 +133,25 @@ To start over during local development, stop the dev server and point
 `HIVEMIND_DB_PATH` at a new file before restarting. The dev shell and the
 explicit quickstart both default the database to `.data/hivemind.db`.
 
+For retained self-hosted data, reset a forgotten local admin password through
+the offline operator CLI instead of deleting or editing SQLite rows by hand.
+Stop the Hivemind server, or otherwise make sure no API traffic is writing to
+the database, then run:
+
+```bash
+HIVEMIND_DB_PATH=/path/to/hivemind.db hivemind admin reset-password --username local-admin
+```
+
+The command prompts for a new password, updates only the named existing admin,
+revokes that admin's active sessions, and records an audit event without
+storing the plaintext password. For a volume-backed container, run the same
+image as a one-shot maintenance command against the existing data volume:
+
+```bash
+docker run --rm -it -v hivemind-data:/data ghcr.io/<owner>/hivemind \
+  hivemind admin reset-password --username local-admin
+```
+
 To seed a disposable local demo hive, set `HIVEMIND_DEMO_MODE=true` before the
 first setup request. Demo mode creates a `Scout` agent and a demo GitHub
 credential policy that references `env://HIVEMIND_DEMO_GITHUB_TOKEN`; leave it

@@ -32,6 +32,7 @@ from hivemind.store import (
 )
 
 TEST_PASSWORD = "operator-not-secret"  # nosec B105
+RECOVERY_PASSWORD = "operator-recovery-secret"  # nosec B105
 PROVIDER_CREDENTIAL_ID = "cred_provider_openrouter"
 
 
@@ -704,6 +705,71 @@ def test_setup_rejects_whitespace_only_admin_password(tmp_path: Path) -> None:
         {"setup_complete": False, "demo_mode": False},
         "blank password should not complete setup",
     )
+
+
+def test_admin_recovery_resets_setup_complete_admin_password_and_revokes_sessions(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "recovery.db")
+    admin = store.setup_admin("admin", TEST_PASSWORD)
+    token, _ = store.login("admin", TEST_PASSWORD)
+
+    recovered = store.reset_admin_password("ADMIN", RECOVERY_PASSWORD)
+
+    require_equal(recovered["id"], admin["id"], "recovery should reset the existing admin account")
+    require_equal(recovered["username"], "admin", "recovery should normalize the admin username")
+    require_equal(store.get_session_user(token), None, "recovery should revoke active admin sessions")
+    try:
+        store.login("admin", TEST_PASSWORD)
+    except StoreError as exc:
+        require_equal(str(exc), "invalid username or password", "old password should no longer authenticate")
+    else:
+        raise AssertionError("old admin password should not authenticate after recovery")
+
+    _, user = store.login("admin", RECOVERY_PASSWORD)
+    require_equal(user["id"], admin["id"], "new password should authenticate the recovered admin")
+
+    audit_events = store.list_audit_events()
+    recovery_events = [event for event in audit_events if event["type"] == "auth.admin_recovery.password_reset"]
+    require_equal(len(recovery_events), 1, "recovery should write one audit event")
+    event = recovery_events[0]
+    require_equal(event["actor_id"], "operator.local_recovery", "recovery audit should use an explicit local actor")
+    require_equal(event["target_id"], admin["id"], "recovery audit should target the reset admin")
+    require_equal(event["decision"], "allowed", "successful recovery should be audited as allowed")
+    require_equal(event["metadata"]["username"], "admin", "recovery audit should include the admin username")
+    require_equal(event["metadata"]["sessions_revoked"], 1, "recovery audit should count revoked sessions")
+    require_true(RECOVERY_PASSWORD not in json.dumps(event), "recovery audit should not expose the password")
+
+
+def test_admin_recovery_fails_closed_for_unknown_admin(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "recovery.db")
+    store.setup_admin("admin", TEST_PASSWORD)
+
+    try:
+        store.reset_admin_password("missing-admin", RECOVERY_PASSWORD)
+    except StoreError as exc:
+        require_equal(str(exc), "admin user not found", "recovery should reject unknown admin users")
+    else:
+        raise AssertionError("recovery should reject unknown admin users")
+
+    require_equal(store.login("admin", TEST_PASSWORD)[1]["username"], "admin", "failed recovery should not alter admin auth")
+
+
+def test_admin_recovery_fails_closed_for_non_admin_user(tmp_path: Path) -> None:
+    store = HivemindStore(tmp_path / "recovery.db")
+    store.setup_admin("admin", TEST_PASSWORD)
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("user_member", "member", hash_password(TEST_PASSWORD), "member", "2026-01-01T00:00:00+00:00"),
+        )
+
+    try:
+        store.reset_admin_password("member", RECOVERY_PASSWORD)
+    except StoreError as exc:
+        require_equal(str(exc), "admin user not found", "recovery should reject non-admin users")
+    else:
+        raise AssertionError("recovery should reject non-admin users")
+
+    require_equal(store.login("member", TEST_PASSWORD)[1]["username"], "member", "failed recovery should not alter member auth")
 
 
 def test_setup_counts_only_non_whitespace_admin_password_characters(tmp_path: Path) -> None:

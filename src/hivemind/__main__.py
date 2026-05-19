@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sqlite3
@@ -27,6 +28,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     restore = subparsers.add_parser("restore", help="restore a logical JSON backup bundle")
     restore.add_argument("path", help="input path or - for stdin")
+
+    admin = subparsers.add_parser("admin", help="offline local admin maintenance")
+    admin_subparsers = admin.add_subparsers(dest="admin_command")
+    reset_password = admin_subparsers.add_parser(
+        "reset-password",
+        help="reset an existing local admin password from an offline operator shell",
+    )
+    reset_password.add_argument("--username", required=True, help="existing local admin username")
+    reset_password.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the new password from stdin instead of an interactive prompt",
+    )
     return parser
 
 
@@ -60,6 +74,16 @@ def emit_summary(action: str, path: str, summary: dict[str, int]) -> None:
     print(f"{action} {path}: {counts}", file=sys.stderr)
 
 
+def read_admin_recovery_password(*, password_stdin: bool) -> str:
+    if password_stdin:
+        return sys.stdin.readline().rstrip("\n")
+    password = getpass.getpass("New admin password: ")
+    confirmation = getpass.getpass("Confirm admin password: ")
+    if password != confirmation:
+        raise StoreError("password confirmation does not match")
+    return password
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     raw_args = list(sys.argv[1:] if argv is None else argv)
@@ -81,6 +105,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             store = HivemindStore.from_env()
             summary = store.restore_backup_bundle(bundle)
             emit_summary("restored", args.path, summary)
+            return 0
+        if args.command == "admin" and args.admin_command == "reset-password":
+            store = HivemindStore.from_env(require_existing=True)
+            password = read_admin_recovery_password(password_stdin=args.password_stdin)
+            user = store.reset_admin_password(args.username, password)
+            print(f"reset local admin password for {user['username']}; active sessions revoked", file=sys.stderr)
             return 0
     except (OSError, json.JSONDecodeError, sqlite3.Error, StoreError) as exc:
         print(str(exc), file=sys.stderr)
