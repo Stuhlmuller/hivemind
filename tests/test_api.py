@@ -682,6 +682,119 @@ def test_auth_surface_uses_username_and_first_user_becomes_admin(tmp_path: Path)
     require_true("email" not in me_response.json(), "me should not expose an email field")
 
 
+def test_failed_logins_under_threshold_do_not_block_valid_login(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    for attempt in range(4):
+        response = client.post(
+            "/auth/login",
+            json={"username": "ADMIN", "password": f"bad password {attempt}"},
+        )
+        require_equal(response.status_code, 401, "failed login should reject bad credentials")
+        require_equal(response.json(), {"detail": "invalid username or password"}, "failed login should not reveal account state")
+
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(login_response.status_code, 200, "valid login should still work before the abuse threshold")
+    require_equal(
+        len([event for event in audit_events if event["type"] == "auth.login.failed"]),
+        4,
+        "each failed login should create an operator-visible audit signal",
+    )
+    require_equal(
+        [event for event in audit_events if event["type"] == "auth.login.locked"],
+        [],
+        "sub-threshold failures should not create lockout audit events",
+    )
+    require_true("bad password" not in json.dumps(audit_events), "auth failure audit should not expose submitted passwords")
+
+
+def test_repeated_failed_logins_temporarily_lock_local_auth_and_audit_signal(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+    setup(client)
+
+    for attempt in range(5):
+        response = client.post(
+            "/auth/login",
+            json={"username": "ADMIN", "password": f"bad password {attempt}"},
+        )
+        require_equal(response.status_code, 401, "failed login should reject bad credentials")
+
+    locked_response = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": "bad password lockout"},
+    )
+    valid_during_lockout = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    audit_response = client.get("/audit-events")
+    audit_events = audit_response.json()
+    failed_events = [event for event in audit_events if event["type"] == "auth.login.failed"]
+    locked_events = [event for event in audit_events if event["type"] == "auth.login.locked"]
+
+    require_equal(locked_response.status_code, 429, "sixth failed login should activate the lockout")
+    require_equal(
+        locked_response.json(),
+        {"detail": "too many failed login attempts; retry later"},
+        "lockout response should be predictable and account-state neutral",
+    )
+    require_equal(valid_during_lockout.status_code, 429, "lockout should also delay a correct password until it expires")
+    require_equal(audit_response.status_code, 200, "operator should be able to review auth abuse audit events")
+    require_equal(len(failed_events), 5, "threshold failures should be audited once each")
+    require_equal(len(locked_events), 2, "locked attempts should create separate audit events")
+
+    latest_lockout_metadata = locked_events[0]["metadata"]
+    require_equal(latest_lockout_metadata["username"], "admin", "lockout audit should include the normalized username")
+    require_equal(latest_lockout_metadata["failure_threshold"], 5, "lockout audit should expose the threshold")
+    require_equal(latest_lockout_metadata["lockout_seconds"], 300, "lockout audit should expose the lockout duration")
+    require_equal(
+        latest_lockout_metadata["failure_window_seconds"],
+        900,
+        "lockout audit should expose the failure window",
+    )
+    require_true("source_ip" in latest_lockout_metadata, "lockout audit should include the request source")
+    require_true("retry_after_seconds" in latest_lockout_metadata, "lockout audit should include retry guidance")
+    require_true(
+        latest_lockout_metadata["lockout_scope"] in {"username", "source_ip"},
+        "lockout audit should identify whether username or source IP tripped the policy",
+    )
+    audit_payload = json.dumps(audit_events)
+    require_true("bad password" not in audit_payload, "auth abuse audit should not expose submitted passwords")
+    require_true(TEST_PASSWORD not in audit_payload, "auth abuse audit should not expose the valid password")
+
+
+def test_pre_setup_failed_logins_do_not_lock_first_admin_setup(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    for attempt in range(5):
+        response = client.post(
+            "/auth/login",
+            json={"username": "admin", "password": f"bad password {attempt}"},
+        )
+        require_equal(response.status_code, 401, "pre-setup login attempts should not authenticate")
+
+    setup_response = client.post(
+        "/auth/setup",
+        json={"username": "admin", "password": TEST_PASSWORD},
+    )
+    me_response = client.get("/me")
+    audit_events = client.get("/audit-events").json()
+
+    require_equal(setup_response.status_code, 201, "first admin setup should not be blocked by pre-setup failures")
+    require_equal(me_response.status_code, 200, "setup should still create the initial authenticated session")
+    require_equal(
+        len([event for event in audit_events if event["type"] == "auth.login.failed"]),
+        5,
+        "pre-setup failures should remain visible after setup",
+    )
+
+
 def test_setup_rejects_mismatched_password_confirmation(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 

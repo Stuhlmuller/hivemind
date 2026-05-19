@@ -34,7 +34,7 @@ from hivemind.operator_tools import (
     queen_bee_tools_manifest,
 )
 from hivemind.models import TaskPriority, TaskStatus
-from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError, iso
+from hivemind.store import AuthLoginLockedError, HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError, iso
 
 
 SESSION_COOKIE = "hivemind_session"
@@ -476,18 +476,21 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
             raise HTTPException(status_code=400, detail="password confirmation does not match")
         try:
             user = db.setup_admin(request.username, request.password)
-            token, user = db.login(request.username, request.password)
+            token, user = db.login(request.username, request.password, enforce_backoff=False)
             set_session_cookie(response, token)
             return {"user": user}
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/auth/login")
-    def login(request: LoginRequest, response: Response) -> dict[str, Any]:
+    def login(request: LoginRequest, response: Response, http_request: Request) -> dict[str, Any]:
+        source_ip = http_request.client.host if http_request.client is not None else None
         try:
-            token, user = db.login(request.username, request.password)
+            token, user = db.login(request.username, request.password, source_ip=source_ip)
             set_session_cookie(response, token)
             return {"user": user}
+        except AuthLoginLockedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except StoreError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
 

@@ -76,6 +76,12 @@ LEASE_REQUEST_RATE_LIMIT_EVENTS = (
 )
 ACTION_RATE_LIMIT_EVENTS = ("credential.action.performed",)
 CREDENTIAL_BY_ID_QUERY = "SELECT * FROM credentials WHERE id = ?"
+AUTH_LOGIN_FAILED_EVENT = "auth.login.failed"
+AUTH_LOGIN_LOCKED_EVENT = "auth.login.locked"
+AUTH_LOGIN_FAILURE_THRESHOLD = 5
+AUTH_LOGIN_FAILURE_WINDOW_SECONDS = 15 * 60
+AUTH_LOGIN_LOCKOUT_SECONDS = 5 * 60
+AUTH_LOGIN_LOCKED_REASON = "too many failed login attempts; retry later"
 
 
 def utcnow() -> datetime:
@@ -146,6 +152,10 @@ class StoreNotFoundError(StoreError):
 
 
 class StoreValidationError(StoreError):
+    pass
+
+
+class AuthLoginLockedError(StoreError):
     pass
 
 
@@ -590,6 +600,14 @@ class SessionUser:
 class RateLimitDenial:
     reason: str
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LoginFailureSnapshot:
+    username_count: int
+    source_ip_count: int
+    latest_username_failure_at: datetime | None
+    latest_source_ip_failure_at: datetime | None
 
 
 class HivemindStore:
@@ -1437,14 +1455,179 @@ class HivemindStore:
             )
         return self.public_user(user)
 
-    def login(self, username: str, password: str) -> tuple[str, dict[str, Any]]:
+    def _normalize_login_source_ip(self, source_ip: str | None) -> str:
+        return self.audit_identifier_label(source_ip or "unknown")
+
+    def _auth_login_audit_metadata(
+        self,
+        *,
+        username: str,
+        source_ip: str,
+        failure_count: int,
+        lockout_scope: str | None = None,
+        retry_after_seconds: int | None = None,
+        lockout_until: datetime | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "username": self.audit_identifier_label(username),
+            "source_ip": self._normalize_login_source_ip(source_ip),
+            "failure_count": failure_count,
+            "failure_threshold": AUTH_LOGIN_FAILURE_THRESHOLD,
+            "failure_window_seconds": AUTH_LOGIN_FAILURE_WINDOW_SECONDS,
+            "lockout_seconds": AUTH_LOGIN_LOCKOUT_SECONDS,
+        }
+        if lockout_scope is not None:
+            metadata["lockout_scope"] = lockout_scope
+        if retry_after_seconds is not None:
+            metadata["retry_after_seconds"] = retry_after_seconds
+        if lockout_until is not None:
+            metadata["lockout_until"] = iso(lockout_until)
+        return metadata
+
+    def _audit_metadata_from_row(self, metadata: str | None) -> dict[str, Any]:
+        try:
+            parsed = loads(metadata, {})
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _newest_datetime(self, current: datetime | None, candidate: datetime | None) -> datetime | None:
+        if candidate is None:
+            return current
+        if current is None or candidate > current:
+            return candidate
+        return current
+
+    def _login_failure_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        username_label: str,
+        source_ip_label: str,
+        now: datetime,
+    ) -> LoginFailureSnapshot:
+        since = iso(now - timedelta(seconds=AUTH_LOGIN_FAILURE_WINDOW_SECONDS))
+        username_count = 0
+        source_ip_count = 0
+        latest_username_failure_at: datetime | None = None
+        latest_source_ip_failure_at: datetime | None = None
+        rows = conn.execute(
+            "SELECT target_id, metadata, created_at FROM audit_events WHERE type = ? AND created_at >= ?",
+            (AUTH_LOGIN_FAILED_EVENT, since),
+        ).fetchall()
+        for row in rows:
+            metadata = self._audit_metadata_from_row(row["metadata"])
+            created_at = parse_dt(row["created_at"])
+            if row["target_id"] == username_label or metadata.get("username") == username_label:
+                username_count += 1
+                latest_username_failure_at = self._newest_datetime(latest_username_failure_at, created_at)
+            if metadata.get("source_ip") == source_ip_label:
+                source_ip_count += 1
+                latest_source_ip_failure_at = self._newest_datetime(latest_source_ip_failure_at, created_at)
+        return LoginFailureSnapshot(
+            username_count=username_count,
+            source_ip_count=source_ip_count,
+            latest_username_failure_at=latest_username_failure_at,
+            latest_source_ip_failure_at=latest_source_ip_failure_at,
+        )
+
+    def _auth_login_lockout_metadata(
+        self,
+        *,
+        snapshot: LoginFailureSnapshot,
+        username: str,
+        source_ip: str,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        username_locked = snapshot.username_count >= AUTH_LOGIN_FAILURE_THRESHOLD
+        source_ip_locked = snapshot.source_ip_count >= AUTH_LOGIN_FAILURE_THRESHOLD
+        if not username_locked and not source_ip_locked:
+            return None
+        if username_locked:
+            lockout_scope = "username"
+            failure_count = snapshot.username_count
+            latest_failure_at = snapshot.latest_username_failure_at
+        else:
+            lockout_scope = "source_ip"
+            failure_count = snapshot.source_ip_count
+            latest_failure_at = snapshot.latest_source_ip_failure_at
+        if latest_failure_at is None:
+            return None
+        lockout_until = latest_failure_at + timedelta(seconds=AUTH_LOGIN_LOCKOUT_SECONDS)
+        if lockout_until <= now:
+            return None
+        retry_after_seconds = max(1, int((lockout_until - now).total_seconds() + 0.999))
+        return self._auth_login_audit_metadata(
+            username=username,
+            source_ip=source_ip,
+            failure_count=failure_count,
+            lockout_scope=lockout_scope,
+            retry_after_seconds=retry_after_seconds,
+            lockout_until=lockout_until,
+        )
+
+    def login(
+        self,
+        username: str,
+        password: str,
+        *,
+        source_ip: str | None = None,
+        enforce_backoff: bool = True,
+    ) -> tuple[str, dict[str, Any]]:
+        normalized_username = username.strip().lower()
+        source_ip_label = self._normalize_login_source_ip(source_ip)
+        username_label = self.audit_identifier_label(normalized_username)
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM users WHERE username = ?", (username.strip().lower(),)).fetchone()
+            conn.execute(BEGIN_IMMEDIATE_SQL)
+            now = utcnow()
+            snapshot = LoginFailureSnapshot(0, 0, None, None)
+            if enforce_backoff:
+                snapshot = self._login_failure_snapshot(
+                    conn,
+                    username_label=username_label,
+                    source_ip_label=source_ip_label,
+                    now=now,
+                )
+                lockout_metadata = self._auth_login_lockout_metadata(
+                    snapshot=snapshot,
+                    username=normalized_username,
+                    source_ip=source_ip_label,
+                    now=now,
+                )
+                if lockout_metadata is not None:
+                    self._insert_audit(
+                        conn,
+                        AUTH_LOGIN_LOCKED_EVENT,
+                        "operator.local_auth",
+                        username_label,
+                        "denied",
+                        AUTH_LOGIN_LOCKED_REASON,
+                        lockout_metadata,
+                        now=now,
+                    )
+                    conn.commit()
+                    raise AuthLoginLockedError(AUTH_LOGIN_LOCKED_REASON)
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (normalized_username,)).fetchone()
             if row is None or not verify_password(password, row["password_hash"]):
+                failure_count = max(snapshot.username_count, snapshot.source_ip_count) + 1
+                self._insert_audit(
+                    conn,
+                    AUTH_LOGIN_FAILED_EVENT,
+                    "operator.local_auth",
+                    username_label,
+                    "denied",
+                    "invalid username or password",
+                    self._auth_login_audit_metadata(
+                        username=normalized_username,
+                        source_ip=source_ip_label,
+                        failure_count=failure_count,
+                    ),
+                    now=now,
+                )
+                conn.commit()
                 raise StoreError("invalid username or password")
             token = secrets.token_urlsafe(32)
             token_hash = self.hash_token(token)
-            now = utcnow()
             conn.execute(
                 "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
                 (token_hash, row["id"], iso(now), iso(now + timedelta(hours=12))),
