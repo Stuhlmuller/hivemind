@@ -1386,7 +1386,8 @@ class HivemindStore:
                 "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (:id, :username, :password_hash, :role, :created_at)",
                 user,
             )
-        self.seed_demo_if_empty()
+        if self.config.demo_mode:
+            self.seed_demo_if_empty()
         return self.public_user(user)
 
     def login(self, username: str, password: str) -> tuple[str, dict[str, Any]]:

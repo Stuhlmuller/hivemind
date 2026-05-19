@@ -49,9 +49,15 @@ def table_count(db_path: Path, table: str) -> int:
         conn.close()
 
 
+def setup_store_with_demo(store: HivemindStore, username: str = "admin") -> dict[str, object]:
+    user = store.setup_admin(username, TEST_PASSWORD)
+    store.seed_demo_if_empty()
+    return user
+
+
 def test_backup_export_redacts_legacy_secret_like_agent_prompts(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
-    source.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(source)
     agent = source.list_agents()[0]
     with source.connect() as conn:
         conn.execute(
@@ -69,7 +75,7 @@ def test_backup_export_redacts_legacy_secret_like_agent_prompts(tmp_path: Path) 
 
 def test_backup_restore_rejects_secret_like_agent_prompts(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
-    source.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(source)
     bundle = source.export_backup_bundle()
     bundle["tables"]["agents"][0]["system_prompt"] = "Use file:///var/lib/hivemind/provider-token with api_key = leaked."
     target = HivemindStore(tmp_path / "target.db")
@@ -292,7 +298,7 @@ def test_backup_bundle_round_trip_restores_durable_state_and_clears_ephemeral_st
 
     target_db = tmp_path / "target.db"
     target = HivemindStore(target_db)
-    target_admin = target.setup_admin("staleadmin", TEST_PASSWORD)
+    target_admin = setup_store_with_demo(target, "staleadmin")
     target.login("staleadmin", TEST_PASSWORD)
     stale_agent = target.list_agents()[0]
     target.request_lease(
@@ -465,7 +471,7 @@ def test_restore_rejects_incompatible_backup_version(tmp_path: Path) -> None:
 
 def test_restore_accepts_v1_backup_without_hive_fields(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
-    source.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(source)
     agent = source.list_agents()[0]
     task = source.create_task(
         {
@@ -521,7 +527,7 @@ def test_restore_accepts_v1_backup_without_hive_fields(tmp_path: Path) -> None:
 
 def test_restore_applies_defaults_for_legacy_credential_rate_limit_columns(tmp_path: Path) -> None:
     source = HivemindStore(tmp_path / "source.db")
-    source.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(source)
     bundle = source.export_backup_bundle()
     credential = bundle["tables"]["credentials"][0]
     for field_name in (

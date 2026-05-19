@@ -112,11 +112,13 @@ class HivemindConfig:
     intent_reviewer: IntentReviewerConfig
     agent_providers: dict[str, AgentProviderConfig] = field(default_factory=load_agent_provider_configs_from_env)
     development_mode: bool = False
+    demo_mode: bool = False
 
     @classmethod
     def from_env(cls) -> "HivemindConfig":
         return cls(
             development_mode=env_flag("HIVEMIND_DEVELOPMENT_MODE", default=False),
+            demo_mode=env_flag("HIVEMIND_DEMO_MODE", default=False),
             intent_reviewer=IntentReviewerConfig(
                 provider=os.getenv("HIVEMIND_INTENT_REVIEWER_PROVIDER") or LOCAL_INTENT_REVIEWER_PROVIDER,
                 model=os.getenv("HIVEMIND_INTENT_REVIEWER_MODEL") or "deterministic-policy",

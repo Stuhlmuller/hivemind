@@ -1,6 +1,7 @@
 const state = {
   setupKnown: false,
   setupComplete: false,
+  demoMode: false,
   authMode: null,
   authError: "",
   me: null,
@@ -834,6 +835,7 @@ function renderAuth() {
   $("#auth-detail").textContent = isSetup
     ? "Create the first local operator account for this Hivemind node."
     : "Sign in with the local username and password configured during setup.";
+  $("#auth-demo-mode").hidden = !(isSetup && state.demoMode);
   $("#password-policy").hidden = !isSetup;
   $("#auth-submit").textContent = isSetup ? "create admin" : "sign in";
   $("#session-line").textContent = state.me ? `${state.me.username} / ${state.me.role}` : "Not signed in";
@@ -1323,6 +1325,7 @@ function consumeOAuthStatus() {
 async function loadSetupState() {
   const setup = await api("/setup-state");
   state.setupComplete = setup.setup_complete;
+  state.demoMode = Boolean(setup.demo_mode);
   state.setupKnown = true;
 }
 

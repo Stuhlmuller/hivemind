@@ -151,6 +151,17 @@ def setup(client: TestClient) -> None:
     assert response.status_code == 201  # nosec B101
 
 
+def setup_demo(client: TestClient) -> None:
+    setup(client)
+    client.app.state.store.seed_demo_if_empty()
+
+
+def setup_store_with_demo(store: HivemindStore, username: str = "admin") -> dict[str, object]:
+    user = store.setup_admin(username, TEST_PASSWORD)
+    store.seed_demo_if_empty()
+    return user
+
+
 def test_create_app_uses_lifespan_without_on_event_deprecation(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "hivemind.db")
 
@@ -395,6 +406,43 @@ def test_concurrent_setup_only_creates_one_bootstrap_admin(tmp_path: Path) -> No
     assert len(usernames) == 1  # nosec B101
 
 
+def test_auth_setup_creates_only_local_admin_by_default(tmp_path: Path) -> None:
+    client = client_for(tmp_path)
+
+    require_equal(
+        client.get("/setup-state").json(),
+        {"setup_complete": False, "demo_mode": False},
+        "setup state should report default demo mode as disabled",
+    )
+    setup(client)
+
+    require_equal(client.get("/agents").json(), [], "default setup should not seed demo agents")
+    require_equal(client.get("/credentials").json(), [], "default setup should not seed demo credentials")
+    require_equal(client.get("/hives").json(), [], "default setup should not seed demo hives")
+
+
+def test_auth_setup_seeds_demo_state_only_in_explicit_demo_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMIND_DEMO_MODE", "true")
+    client = client_for(tmp_path)
+
+    require_equal(
+        client.get("/setup-state").json(),
+        {"setup_complete": False, "demo_mode": True},
+        "setup state should report explicit demo mode",
+    )
+    setup(client)
+
+    agents = client.get("/agents").json()
+    credentials = client.get("/credentials").json()
+    hives = client.get("/hives").json()
+
+    require_equal(len(agents), 1, "demo mode should seed one local agent")
+    require_equal(agents[0]["name"], "Scout", "demo mode should seed the Scout agent")
+    require_equal(len(credentials), 1, "demo mode should seed one demo credential")
+    require_equal(credentials[0]["id"], "cred_demo_github", "demo mode should seed the demo GitHub credential")
+    require_equal(len(hives), 1, "demo mode should seed one local hive")
+
+
 def test_frontend_is_served(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
@@ -412,6 +460,7 @@ def test_frontend_is_served(tmp_path: Path) -> None:
         'name="password_confirm"',
         'autocomplete="new-password"',
         'minlength="12"',
+        'id="auth-demo-mode"',
     ]:
         if required not in response.text:
             raise AssertionError(f"missing expected auth form markup: {required}")
@@ -432,6 +481,10 @@ def test_frontend_is_served(tmp_path: Path) -> None:
     require_true(
         "Admin passwords need at least 12 non-whitespace characters" in response.text,
         "frontend should prompt for a non-blank admin password",
+    )
+    require_true(
+        "Demo mode is on. Setup will also create Scout and a demo GitHub credential policy." in response.text,
+        "frontend should include explicit demo-mode setup copy",
     )
     for required in [
         'id="stale-heartbeat-count"',
@@ -459,6 +512,8 @@ def test_frontend_formats_structured_api_errors(tmp_path: Path) -> None:
         "API helper should use formatted error messages",
     )
     require_true("setupKnown: false" in response.text, "frontend should start without assuming setup is incomplete")
+    require_true("demoMode: false" in response.text, "frontend should default demo-mode state to disabled")
+    require_true("state.demoMode = Boolean(setup.demo_mode)" in response.text, "frontend should read demo mode from setup state")
     require_true(
         "const hadSetupState = state.setupKnown" in response.text,
         "frontend should remember whether setup state was already loaded",
@@ -615,7 +670,11 @@ def test_setup_rejects_mismatched_password_confirmation(tmp_path: Path) -> None:
         {"detail": "password confirmation does not match"},
         "setup should return a direct mismatch error",
     )
-    require_equal(setup_state.json(), {"setup_complete": False}, "mismatch should not complete setup")
+    require_equal(
+        setup_state.json(),
+        {"setup_complete": False, "demo_mode": False},
+        "mismatch should not complete setup",
+    )
     require_equal(setup_response.status_code, 201, "matching confirmation should create the admin")
     require_equal(setup_response.json()["user"]["role"], "admin", "first user should be admin")
 
@@ -639,7 +698,11 @@ def test_setup_rejects_whitespace_only_admin_password(tmp_path: Path) -> None:
         {"detail": "admin password must include at least 12 non-whitespace characters"},
         "setup should explain the password rule",
     )
-    require_equal(setup_state.json(), {"setup_complete": False}, "blank password should not complete setup")
+    require_equal(
+        setup_state.json(),
+        {"setup_complete": False, "demo_mode": False},
+        "blank password should not complete setup",
+    )
 
 
 def test_setup_counts_only_non_whitespace_admin_password_characters(tmp_path: Path) -> None:
@@ -665,7 +728,11 @@ def test_setup_counts_only_non_whitespace_admin_password_characters(tmp_path: Pa
         {"detail": "admin password must include at least 12 non-whitespace characters"},
         "setup should count internal whitespace as policy padding",
     )
-    require_equal(setup_state.json(), {"setup_complete": False}, "short non-whitespace password should not complete setup")
+    require_equal(
+        setup_state.json(),
+        {"setup_complete": False, "demo_mode": False},
+        "short non-whitespace password should not complete setup",
+    )
 
 
 def test_auth_session_cookies_require_https_by_default(tmp_path: Path) -> None:
@@ -745,7 +812,7 @@ def test_config_requires_login_and_redacts_reviewer_credential_ref_after_setup(t
     client = client_for(tmp_path)
 
     assert client.get("/config").status_code == 401  # nosec B101
-    setup(client)
+    setup_demo(client)
     response = client.get("/config")
     reviewer = response.json()["intent_reviewer"]
     credential = client.get("/credentials").json()[0]
@@ -764,7 +831,7 @@ def test_config_exposes_redacted_provider_backed_reviewer_settings(tmp_path: Pat
     monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
     client = client_for(tmp_path)
 
-    setup(client)
+    setup_demo(client)
     response = client.get("/config")
     reviewer = response.json()["intent_reviewer"]
 
@@ -791,7 +858,7 @@ def test_config_exposes_redacted_agent_provider_settings(tmp_path: Path, monkeyp
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     client = client_for(tmp_path)
 
-    setup(client)
+    setup_demo(client)
     response = client.get("/config")
     providers = {provider["provider"]: provider for provider in response.json()["agent_providers"]}
     expected_providers = {"openai", "codex", "claude", "gemini", "openrouter", "bedrock", "huggingface", "ollama"}
@@ -819,7 +886,7 @@ def test_config_rejects_agent_provider_secret_ref_env(monkeypatch) -> None:
 def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/agents",
@@ -836,7 +903,7 @@ def test_spawn_agent_uses_provider_config_model_when_model_is_omitted(tmp_path: 
 
 def test_spawn_agent_rejects_secret_like_system_prompt(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     private_key_prompt = "-----BEGIN " + "PRIVATE KEY-----\nabc123\n-----END " + "PRIVATE KEY-----"
 
     prompts = (
@@ -891,7 +958,7 @@ def test_store_create_agent_rejects_secret_like_system_prompt(tmp_path: Path) ->
 
 def test_spawn_agent_allows_safe_capability_guidance_prompt(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     system_prompt = "Use brokered capabilities when a task needs credentials. Keep updates concise."
 
     response = client.post(
@@ -913,7 +980,7 @@ def test_spawn_agent_allows_safe_capability_guidance_prompt(tmp_path: Path) -> N
 
 def test_agents_public_responses_redact_legacy_secret_like_system_prompt(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "hivemind.db")
-    store.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(store)
     agent = store.list_agents()[0]
     unsafe_prompt = "Use env://OPENROUTER_API_KEY with password = hunter2."
     with store.connect() as conn:
@@ -932,7 +999,7 @@ def test_agents_public_responses_redact_legacy_secret_like_system_prompt(tmp_pat
 
 def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     payload_key = f"token-{secrets.token_hex(8)}"
@@ -978,7 +1045,7 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
 
 def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     payload_key = f"token-{secrets.token_hex(8)}"
@@ -1032,7 +1099,7 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
 
 def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     missing_agent_response = client.post(
@@ -1095,7 +1162,7 @@ def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) 
 
 def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     unsafe_action = f"token-{secrets.token_hex(8)}"
@@ -1135,7 +1202,7 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
 
 def test_unknown_lease_agent_is_rejected(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     credential = client.get("/credentials").json()[0]
 
     response = client.post(
@@ -1157,7 +1224,7 @@ def test_tool_action_registry_lists_builtins_and_persists_custom_actions(tmp_pat
     db_path = tmp_path / "tool-actions.db"
     store = HivemindStore(db_path)
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
 
     builtins = client.get("/tool-actions")
     create_response = client.post(
@@ -1189,7 +1256,7 @@ def test_tool_action_registry_lists_builtins_and_persists_custom_actions(tmp_pat
 
 def test_tool_action_registry_rejects_inconsistent_input_schemas(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     missing_required = client.post(
         "/tool-actions",
@@ -1317,7 +1384,7 @@ def test_tool_action_registry_skips_unsafe_legacy_actions(tmp_path: Path) -> Non
 
 def test_unknown_tool_action_is_denied_before_lease_issuance(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1348,7 +1415,7 @@ def test_unknown_tool_action_is_denied_before_lease_issuance(tmp_path: Path) -> 
 
 def test_tool_action_maps_to_required_credential_action_and_validates_payload(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     tool_response = client.post(
@@ -1401,7 +1468,7 @@ def test_tool_action_maps_to_required_credential_action_and_validates_payload(tm
 
 def test_lease_for_one_tool_action_cannot_execute_another_with_same_credential_scope(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     for action_name in ("repo_status", "repo_summary"):
@@ -1453,7 +1520,7 @@ def test_lease_for_one_tool_action_cannot_execute_another_with_same_credential_s
 
 def test_tasks_and_schedules_reject_unregistered_tool_actions(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1495,7 +1562,7 @@ def test_tasks_and_schedules_reject_unregistered_tool_actions(tmp_path: Path) ->
 
 def test_credential_policy_rate_limits_are_exposed_and_enforced_for_agent_requests(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     response = client.post(
@@ -1551,7 +1618,7 @@ def test_credential_policy_rate_limits_are_exposed_and_enforced_for_agent_reques
 
 def test_credential_lease_limit_applies_across_agents(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     first_agent = client.get("/agents").json()[0]
     second_agent = client.post(
         "/agents",
@@ -1608,7 +1675,7 @@ def test_credential_lease_rate_limit_runs_before_provider_intent_review(tmp_path
         provider_reviewers={"openrouter": reviewer},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.post(
         "/credentials",
@@ -1662,7 +1729,7 @@ def test_credential_lease_rate_limit_counts_provider_review_denials(tmp_path: Pa
         provider_reviewers={"openrouter": reviewer},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.post(
         "/credentials",
@@ -1716,7 +1783,7 @@ def test_credential_lease_rate_limit_counts_provider_review_denials(tmp_path: Pa
 
 def test_credential_action_limit_denies_before_consuming_second_lease(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.post(
         "/credentials",
@@ -1784,7 +1851,7 @@ def test_provider_backed_reviewer_can_approve_store_backed_lease_requests(tmp_pa
         provider_reviewers={"openrouter": reviewer},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1826,7 +1893,7 @@ def test_unknown_provider_backed_reviewer_fails_closed_for_store_backed_lease_re
         ),
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1861,7 +1928,7 @@ def test_provider_reviewer_errors_fail_closed_without_leaking_secret_refs(tmp_pa
         provider_reviewers={"openrouter": FailingProviderReviewer()},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1890,7 +1957,7 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
     monkeypatch.setenv("HIVEMIND_INTENT_REVIEWER_CREDENTIAL_REF", "env://OPENROUTER_API_KEY")
     client = TestClient(create_app(start_scheduler=False), base_url="https://testserver")
 
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -1915,7 +1982,7 @@ def test_default_app_path_fails_closed_for_unregistered_provider_reviewer(tmp_pa
 def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None:
     db_path = tmp_path / "persisted-lease-race.db"
     setup_store = HivemindStore(db_path)
-    setup_store.setup_admin("admin", TEST_PASSWORD)
+    setup_store_with_demo(setup_store)
     agent = setup_store.list_agents()[0]
     credential = setup_store.list_credentials()[0]
     lease_token, _ = setup_store.request_lease(
@@ -1970,7 +2037,7 @@ def test_persisted_lease_concurrent_action_consumes_once(tmp_path: Path) -> None
 
 def test_local_agent_task_execution_uses_deterministic_adapter_without_network(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     task = client.post(
         "/tasks",
@@ -2011,7 +2078,7 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2115,7 +2182,7 @@ def test_task_execution_redacts_legacy_secret_like_agent_prompts(tmp_path: Path,
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2159,7 +2226,7 @@ def test_agent_provider_credential_accepts_legacy_action_prefix(tmp_path: Path, 
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2212,7 +2279,7 @@ def test_agent_provider_credential_policy_denial_fails_before_adapter(tmp_path: 
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     allowed_agent = client.get("/agents").json()[0]
     denied_agent = client.post(
         "/agents",
@@ -2262,7 +2329,7 @@ def test_agent_provider_task_credential_policy_denial_fails_before_adapter(tmp_p
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     denied_agent = client.post(
         "/agents",
         json={
@@ -2323,7 +2390,7 @@ def test_agent_provider_task_approval_required_action_fails_before_adapter(tmp_p
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2541,7 +2608,7 @@ def test_remote_agent_provider_requires_credential_id_before_adapter_execution(t
         agent_provider_adapters={"openrouter": adapter},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2576,7 +2643,7 @@ def test_unregistered_agent_provider_fails_closed_without_leaking_secret_ref(tmp
     monkeypatch.setenv("HIVEMIND_AGENT_PROVIDER_OPENROUTER_CREDENTIAL_ID", PROVIDER_CREDENTIAL_ID)
     store = HivemindStore(tmp_path / "hivemind.db", config=HivemindConfig.from_env())
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2617,7 +2684,7 @@ def test_agent_provider_results_redact_secret_refs_from_public_response(tmp_path
         agent_provider_adapters={"openrouter": LeakingAgentProviderAdapter()},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2694,7 +2761,7 @@ def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audi
         agent_provider_adapters={"openrouter": LeakingAgentProviderAdapter(fail=True)},
     )
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.post(
         "/agents",
         json={
@@ -2727,7 +2794,7 @@ def test_agent_provider_error_messages_redact_secret_refs_from_response_and_audi
 
 def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     response = client.post(
@@ -2762,7 +2829,7 @@ def test_guided_github_app_credential_round_trips_public_metadata(tmp_path: Path
 
 def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     create_response = client.post(
         "/agents",
@@ -2872,7 +2939,7 @@ def test_agent_registry_exposes_lifecycle_and_related_assignments(tmp_path: Path
 
 def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.patch("/agents/agent_missing/status", json={"status": "blocked"})
 
@@ -2882,7 +2949,7 @@ def test_unknown_agent_status_update_returns_404(tmp_path: Path) -> None:
 
 def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     create_response = client.post(
         "/agents",
@@ -2908,7 +2975,7 @@ def test_legacy_working_agent_status_alias_is_normalized(tmp_path: Path) -> None
 
 def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     create_response = client.post(
         "/agents",
@@ -3028,7 +3095,7 @@ def test_agents_persist_across_store_restart(tmp_path: Path) -> None:
 
 def test_credential_rejects_unknown_allowed_agent(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/credentials",
@@ -3080,7 +3147,7 @@ def test_oauth_credential_rejects_unknown_allowed_agent_on_callback(
     monkeypatch.setattr(httpx, "post", fake_post)
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     start_response = client.post(
         "/oauth/credentials/start",
@@ -3126,7 +3193,7 @@ def test_oauth_credential_rejects_unknown_allowed_agent_on_callback(
 
 def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     response = client.post(
@@ -3167,7 +3234,7 @@ def test_public_credential_metadata_redacts_secret_like_values(tmp_path: Path) -
 
 def test_credential_actions_accept_digits_after_first_character(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     response = client.post(
@@ -3201,7 +3268,7 @@ def test_credential_actions_accept_digits_after_first_character(tmp_path: Path) 
 
 def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     credential_response = client.post(
@@ -3302,7 +3369,7 @@ def test_approval_required_lease_flow_requires_operator_decision(tmp_path: Path)
 
 def test_hive_tracker_config_and_agent_issue_rate_limits(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     hive_response = client.post(
         "/hives",
@@ -3459,7 +3526,7 @@ def test_approval_decision_audit_redacts_legacy_unsafe_action_identifier(tmp_pat
     db_path = tmp_path / "legacy-unsafe-approval-action.db"
     store = HivemindStore(db_path)
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential_id = "cred_legacy_unsafe_action"
     unsafe_action = f"token-{secrets.token_hex(8)}"
@@ -3542,7 +3609,7 @@ def test_persisted_pending_and_denied_lease_tokens_cannot_perform_actions(tmp_pa
     db_path = tmp_path / "persisted-approval-status.db"
     store = HivemindStore(db_path)
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     caplog.set_level(logging.INFO, logger="hivemind.audit")
     agent = client.get("/agents").json()[0]
     secret_ref_value = f"env://GITHUB_WRITE_{secrets.token_hex(4).upper()}"
@@ -3810,7 +3877,7 @@ def test_operational_endpoints_return_401_before_auth(tmp_path: Path) -> None:
 
 def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/credentials",
@@ -3832,7 +3899,7 @@ def test_create_credential_rejects_invalid_secret_ref(tmp_path: Path) -> None:
 
 def test_create_credential_rejects_client_supplied_secret_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/credentials",
@@ -3876,7 +3943,7 @@ def test_store_rejects_client_supplied_broker_secret_ref(tmp_path: Path) -> None
 
 def test_create_credential_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/credentials",
@@ -3922,7 +3989,7 @@ def test_store_rejects_managed_secret_kind_for_external_ref(tmp_path: Path) -> N
 
 def test_broker_managed_secret_requires_secret_store_key(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/credentials",
@@ -3945,7 +4012,7 @@ def test_broker_managed_secret_is_encrypted_redacted_and_broker_only(
 ) -> None:
     monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     managed_value = "  -----BEGIN TEST SECRET-----\nline-one\nline-two\n-----END TEST SECRET-----\n"
 
@@ -4006,7 +4073,7 @@ def test_declarative_config_export_excludes_broker_managed_secret_refs(
 ) -> None:
     monkeypatch.setenv("HIVEMIND_SECRETS_KEY", "local-test-secret-key")
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     managed_value = secrets.token_urlsafe(16)
 
@@ -4355,7 +4422,7 @@ def test_declarative_config_round_trips_without_raw_secrets(tmp_path: Path) -> N
 
 def test_declarative_config_redacts_and_rejects_secret_like_agent_prompts(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     unsafe_prompt = "Use file:///var/lib/hivemind/provider-token with api_key = leaked."
 
@@ -4403,7 +4470,7 @@ def test_declarative_config_redacts_and_rejects_secret_like_agent_prompts(tmp_pa
 
 def test_declarative_config_normalizes_mixed_case_policy_actions(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     config = {
         "version": 1,
@@ -4472,7 +4539,7 @@ def test_declarative_config_normalizes_mixed_case_policy_actions(tmp_path: Path)
 
 def test_declarative_config_accepts_existing_runtime_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     credential_response = client.post(
@@ -4629,7 +4696,7 @@ def test_declarative_config_round_trips_long_schedule_intervals(tmp_path: Path) 
 
 def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     bad_secret_ref = {
@@ -5030,7 +5097,7 @@ def test_declarative_config_import_rejects_raw_secret_shapes(tmp_path: Path) -> 
 
 def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     oauth_response = client.post(
         "/credentials",
@@ -5061,7 +5128,7 @@ def test_guided_github_credential_metadata_is_validated(tmp_path: Path) -> None:
 
 def test_oauth_provider_status_reports_missing_broker_secret_store(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.get("/oauth/providers")
 
@@ -5106,7 +5173,7 @@ def test_codex_oauth_flow_creates_redacted_credential_and_encrypts_tokens(
     monkeypatch.setattr(httpx, "post", fake_post)
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     start_response = client.post(
@@ -5173,7 +5240,7 @@ def test_codex_oauth_start_rejects_invalid_actions_before_redirect(tmp_path: Pat
     monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     response = client.post(
@@ -5222,7 +5289,7 @@ def test_codex_oauth_flow_rejects_non_object_token_response(
     monkeypatch.setattr(httpx, "post", fake_post)
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     start_response = client.post(
@@ -5266,7 +5333,7 @@ def test_codex_oauth_flow_audits_unknown_state_callback(
     monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     callback_response = client.get(
         "/oauth/callback/codex?state=oauth_state_missing&code=broker-code",
@@ -5293,7 +5360,7 @@ def test_codex_oauth_flow_audits_missing_code_callback(
     monkeypatch.setenv("HIVEMIND_OAUTH_CODEX_CLIENT_ID", "codex-client")
 
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     start_response = client.post(
@@ -5330,7 +5397,7 @@ def test_codex_oauth_flow_audits_missing_code_callback(
 
 def test_tasks_heartbeats_and_due_schedules_run_once_by_default(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     me = client.get("/me").json()
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
@@ -5597,7 +5664,7 @@ def test_due_schedule_run_rolls_back_partial_task_insert_on_failure(tmp_path: Pa
 
 def test_due_schedules_skip_missed_runs_and_preserve_cadence(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
     schedule_response = client.post(
@@ -5637,7 +5704,7 @@ def test_due_schedules_skip_missed_runs_and_preserve_cadence(tmp_path: Path) -> 
 
 def test_due_schedules_backfill_every_missed_run(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
     schedule_response = client.post(
@@ -5675,7 +5742,7 @@ def test_due_schedules_backfill_every_missed_run(tmp_path: Path) -> None:
 
 def test_due_schedules_run_once_counts_long_downtime_without_expanding_slots(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     schedule_response = client.post(
         "/schedules",
@@ -5708,7 +5775,7 @@ def test_due_schedules_run_once_counts_long_downtime_without_expanding_slots(tmp
 
 def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     base_now = datetime.now(timezone.utc).replace(microsecond=0)
 
     schedule_response = client.post(
@@ -5749,7 +5816,7 @@ def test_due_schedules_backfill_batches_long_downtime(tmp_path: Path) -> None:
 
 def test_due_schedules_normalize_persisted_offset_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     offset_zone = timezone(timedelta(hours=14))
     due_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
     offset_due_at = due_at.astimezone(offset_zone)
@@ -5796,7 +5863,7 @@ def test_due_schedules_normalize_persisted_offset_next_run_at(tmp_path: Path) ->
 
 def test_due_schedules_rejects_malformed_existing_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     schedule_response = client.post(
         "/schedules",
@@ -5881,7 +5948,7 @@ def test_health_fails_clearly_when_db_is_unavailable(tmp_path: Path, monkeypatch
 def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_and_failed_tasks(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "runtime.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -5962,7 +6029,7 @@ def test_runtime_overview_counts_active_leases_due_schedules_stale_heartbeats_an
 def test_runtime_overview_exposes_full_due_and_stale_id_sets(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "runtime-ids.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     due_schedule_ids = []
     stale_task_ids = []
@@ -6007,7 +6074,7 @@ def test_runtime_overview_exposes_full_due_and_stale_id_sets(tmp_path: Path) -> 
 def test_runtime_overview_uses_operator_safe_error_detail(tmp_path: Path, monkeypatch) -> None:
     store = HivemindStore(tmp_path / "runtime-error.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
 
     def broken_runtime_overview() -> dict[str, object]:
         raise sqlite3.OperationalError("raw database path /tmp/secret.db")
@@ -6065,7 +6132,7 @@ def test_audit_logs_are_structured_and_redact_sensitive_fields(tmp_path: Path, c
 
 def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectations(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     missing_task = client.post(
@@ -6128,7 +6195,7 @@ def test_tasks_surface_missing_and_stale_heartbeats_and_clear_terminal_expectati
 def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "hivemind.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     task_response = client.post(
         "/tasks",
@@ -6176,7 +6243,7 @@ def test_task_heartbeat_deadline_does_not_alert_before_due_second(tmp_path: Path
 
 def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     me = client.get("/me").json()
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
@@ -6277,7 +6344,7 @@ def test_task_management_flow_exposes_create_list_status_and_audit_state(tmp_pat
 
 def test_task_management_allows_non_status_updates_via_task_api(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
 
@@ -6332,7 +6399,7 @@ def test_task_management_allows_non_status_updates_via_task_api(tmp_path: Path) 
 
 def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     created_task = client.post(
         "/tasks",
@@ -6372,7 +6439,7 @@ def test_task_update_rejects_null_title_and_clears_optional_text_fields(tmp_path
 
 def test_task_update_rejects_payloads_without_editable_fields(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     created_task = client.post(
         "/tasks",
@@ -6410,7 +6477,7 @@ def test_task_update_rejects_payloads_without_editable_fields(tmp_path: Path) ->
 def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "task-persistence.db"
     first_client = TestClient(create_app(HivemindStore(db_path), start_scheduler=False), base_url="https://testserver")
-    setup(first_client)
+    setup_demo(first_client)
     first_user = first_client.get("/me").json()
     agent = first_client.get("/agents").json()[0]
     credential = first_client.get("/credentials").json()[0]
@@ -6497,7 +6564,7 @@ def test_task_management_state_persists_across_app_restart(tmp_path: Path) -> No
 
 def test_task_status_transitions_and_terminal_heartbeats_are_enforced(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agent = client.get("/agents").json()[0]
 
     invalid_create = client.post(
@@ -6637,7 +6704,7 @@ def test_terminal_task_heartbeat_deadlines_are_cleared_during_migration(tmp_path
 
 def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     task_response = client.post(
         "/tasks",
@@ -6670,7 +6737,7 @@ def test_task_and_schedule_forms_accept_empty_optional_references(tmp_path: Path
 
 def test_schedule_creation_rejects_invalid_catch_up_policy(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/schedules",
@@ -6686,7 +6753,7 @@ def test_schedule_creation_rejects_invalid_catch_up_policy(tmp_path: Path) -> No
 
 def test_schedule_creation_rejects_naive_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/schedules",
@@ -6707,7 +6774,7 @@ def test_schedule_creation_rejects_naive_next_run_at(tmp_path: Path) -> None:
 
 def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
 
     response = client.post(
         "/schedules",
@@ -6728,7 +6795,7 @@ def test_schedule_creation_rejects_malformed_next_run_at(tmp_path: Path) -> None
 def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_path: Path) -> None:
     store = HivemindStore(tmp_path / "legacy-schedule-priority.db")
     client = TestClient(create_app(store, start_scheduler=False), base_url="https://testserver")
-    setup(client)
+    setup_demo(client)
     me = client.get("/me").json()
     agent = client.get("/agents").json()[0]
 
@@ -6789,7 +6856,7 @@ def test_legacy_schedule_priority_is_normalized_without_blocking_due_runs(tmp_pa
 
 def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     offset_zone = timezone(timedelta(hours=14))
     future_at = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=5)).astimezone(offset_zone)
 
@@ -6811,7 +6878,7 @@ def test_schedule_creation_normalizes_offset_next_run_at(tmp_path: Path) -> None
 
 def test_bad_task_schedule_and_heartbeat_references_return_4xx(tmp_path: Path) -> None:
     client = client_for(tmp_path)
-    setup(client)
+    setup_demo(client)
     agents = client.get("/agents").json()
     primary_agent = agents[0]
     secondary_agent = client.post(
