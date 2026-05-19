@@ -72,7 +72,7 @@ secrets: refs or broker-encrypted
 leases: scoped + ttl
 agents: brokered capabilities</pre>
         </div>
-        <form id="auth-form" class="panel stack" aria-describedby="auth-detail password-policy auth-error">
+        <form id="auth-form" class="panel stack" aria-describedby="auth-detail auth-demo-mode password-policy auth-error">
           <div class="panel-heading auth-heading">
             <div class="heading-lockup">
               <img class="section-mark" src="/static/favicon-32.png" alt="" aria-hidden="true" />
@@ -106,6 +106,7 @@ agents: brokered capabilities</pre>
             />
           </label>
           <p id="auth-detail" class="field-hint">Create the first local operator account for this Hivemind node.</p>
+          <p id="auth-demo-mode" class="field-hint" hidden>Demo mode is on. Setup will also create Scout and a demo GitHub credential policy.</p>
           <p id="password-policy" class="field-hint">Admin passwords need at least 12 non-whitespace characters and are stored as local hashes.</p>
           <p id="auth-error" class="field-error" role="alert" hidden></p>
           <button id="auth-submit" type="submit">create admin</button>

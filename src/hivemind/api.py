@@ -458,7 +458,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
 
     @app.get("/setup-state")
     def setup_state() -> dict[str, bool]:
-        return {"setup_complete": db.is_setup_complete()}
+        return {"setup_complete": db.is_setup_complete(), "demo_mode": config.demo_mode}
 
     @app.post("/auth/setup", status_code=201)
     def setup(request: SetupRequest, response: Response) -> dict[str, Any]:

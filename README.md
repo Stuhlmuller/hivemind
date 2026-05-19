@@ -118,11 +118,17 @@ There is no baked-in default account. On first run, Hivemind shows a setup
 screen. The first username/password you submit becomes the local admin account.
 The setup form starts blank and requires an operator-entered password with at
 least 12 non-whitespace characters. After setup completes, use the same
-username and password on the login screen.
+username and password on the login screen. Default setup creates only that
+local admin account; it does not create starter agents or credentials.
 
 To start over during local development, stop the dev server and point
 `HIVEMIND_DB_PATH` at a new file before restarting. The dev shell and the
 explicit quickstart both default the database to `.data/hivemind.db`.
+
+To seed a disposable local demo hive, set `HIVEMIND_DEMO_MODE=true` before the
+first setup request. Demo mode creates a `Scout` agent and a demo GitHub
+credential policy that references `env://HIVEMIND_DEMO_GITHUB_TOKEN`; leave it
+unset for normal self-hosted bootstrap.
 
 Optional intent reviewer configuration:
 
