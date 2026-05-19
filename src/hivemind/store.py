@@ -57,6 +57,7 @@ from hivemind.tool_registry import (
 
 SCHEDULE_BACKFILL_BATCH_LIMIT = 100
 SCHEDULE_CATCH_UP_POLICIES = ("skip_missed", "run_once", "backfill")
+DEFAULT_LOCAL_DB_PATH = Path(".data") / "hivemind.db"
 HIVE_TRACKER_PROVIDERS = ("github", "jira", "linear", "custom")
 HIVE_STATUSES = ("active", "paused")
 ISSUE_KINDS = ("issue", "feature_request", "bug", "chore")
@@ -113,6 +114,10 @@ def loads(value: str | None, default: Any) -> Any:
     return json.loads(value)
 
 
+def default_local_db_path() -> Path:
+    return Path.cwd() / DEFAULT_LOCAL_DB_PATH
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
@@ -159,6 +164,7 @@ SENSITIVE_LOG_KEY_FRAGMENTS = (
     "token",
 )
 AUDIT_LOGGER = logging.getLogger("hivemind.audit")
+RUNTIME_LOGGER = logging.getLogger("hivemind.runtime")
 STRUCTURED_AUDIT_LOG_PREFIXES = ("credential.lease.", "credential.action.")
 TASK_BY_ID_QUERY = "SELECT * FROM tasks WHERE id = ?"
 AGENT_STATUS_ALIASES = {"working": "running"}
@@ -613,17 +619,19 @@ class HivemindStore:
         agent_provider_adapters: Mapping[str, AgentProviderAdapter] | None = None,
     ) -> "HivemindStore":
         config = HivemindConfig.from_env()
-        path = os.getenv("HIVEMIND_DB_PATH", "/data/hivemind.db")
+        path = os.getenv("HIVEMIND_DB_PATH")
         if path == ":memory:":
             if require_existing:
                 raise StoreError("cannot back up ephemeral in-memory database")
+            RUNTIME_LOGGER.info("using database path %s", path)
             return cls(
                 path,
                 config=config,
                 provider_reviewers=provider_reviewers,
                 agent_provider_adapters=agent_provider_adapters,
             )
-        db_path = Path(path)
+        db_path = Path(path) if path is not None else default_local_db_path()
+        RUNTIME_LOGGER.info("using database path %s", db_path)
         if require_existing:
             if not db_path.exists():
                 raise StoreError("configured database does not exist; check HIVEMIND_DB_PATH")
