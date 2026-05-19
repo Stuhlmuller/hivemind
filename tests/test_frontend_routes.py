@@ -26,6 +26,7 @@ def test_runtime_sidebar_frontend_routes_are_served(tmp_path: Path) -> None:
     client = client_for(tmp_path)
 
     routes = {
+        "/": ('id="queen-bee-panel"', 'id="queen-bee-provision"', "manual fallback"),
         "/control/agents": ('data-page-link="agents"', 'id="agents-page"', 'id="agents-list"'),
         "/control/agents/": ('data-page-link="agents"', 'id="agents-page"', 'id="agents-list"'),
         "/control/tasks": ('data-page-link="tasks"', 'id="tasks-page"', 'id="tasks-list"'),

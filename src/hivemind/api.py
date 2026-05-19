@@ -27,6 +27,12 @@ from hivemind.oauth import (
     build_pkce_pair,
     load_oauth_providers_from_env,
 )
+from hivemind.operator_tools import (
+    ensure_queen_bee_agent,
+    execute_queen_bee_tool,
+    queen_bee_profile,
+    queen_bee_tools_manifest,
+)
 from hivemind.models import TaskPriority, TaskStatus
 from hivemind.store import HivemindStore, SessionUser, StoreError, StoreNotFoundError, StoreValidationError, iso
 
@@ -296,6 +302,10 @@ class RunTaskRequest(BaseModel):
     input: str = ""
 
 
+class QueenBeeToolRequest(BaseModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 class CreateScheduleRequest(BaseModel):
     name: str = Field(min_length=1)
     enabled: bool = True
@@ -500,6 +510,38 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.get("/config")
     def read_config(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         return config.public_view()
+
+    @app.get("/queen-bee")
+    def read_queen_bee(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        return queen_bee_profile(db)
+
+    @app.post("/queen-bee/provision", status_code=201)
+    def provision_queen_bee(user: SessionUser = Depends(require_user)) -> dict[str, Any]:
+        return ensure_queen_bee_agent(db, actor_id=user.id)
+
+    @app.get("/queen-bee/tools")
+    def list_queen_bee_tools(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
+        return queen_bee_tools_manifest()
+
+    @app.post("/queen-bee/tools/{tool_name}")
+    def run_queen_bee_tool(
+        tool_name: str,
+        request: QueenBeeToolRequest,
+        user: SessionUser = Depends(require_user),
+    ) -> dict[str, Any]:
+        try:
+            return execute_queen_bee_tool(
+                db,
+                tool_name=tool_name,
+                arguments=request.arguments,
+                operator_id=user.id,
+            )
+        except StoreNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/hives")
     def list_hives(user: SessionUser = Depends(require_user)) -> list[dict[str, Any]]:
@@ -872,7 +914,7 @@ def create_app(store: HivemindStore | None = None, *, start_scheduler: bool | No
     @app.patch("/schedules/{schedule_id}")
     def update_schedule(schedule_id: str, request: UpdateScheduleRequest, user: SessionUser = Depends(require_user)) -> dict[str, Any]:
         try:
-            return db.update_schedule_enabled(schedule_id, request.enabled)
+            return db.update_schedule_enabled(schedule_id, request.enabled, actor_id=user.id)
         except StoreNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except StoreError as exc:

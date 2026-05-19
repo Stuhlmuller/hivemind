@@ -15,6 +15,14 @@ The current implementation includes:
 - Tasks, schedules with explicit catch-up policies, heartbeats, and an audit trail.
 - A FastAPI HTTP surface that runs as a single container.
 
+Queen Bee is the first-party operator agent for day-to-day administration.
+Authenticated operators can provision it explicitly, inspect its narrow tool
+catalog, and route runtime work through `/queen-bee/tools/{name}`. The current
+tool set covers redacted config and runtime inspection, agents, credentials,
+tasks, schedules, audit review, due-schedule runs, and declarative config
+validation/import. Direct UI forms and HTTP endpoints remain manual fallback
+controls for break-glass operation and local debugging.
+
 Schedules expose three operator-visible catch-up policies: `run_once` executes
 one immediate recovery task and resets cadence from now, `skip_missed` drops
 older missed slots while keeping the original cadence, and `backfill` creates
@@ -282,6 +290,12 @@ Agents never receive raw credentials. They request a capability from the
 credentials service with an explicit action and intent. The service validates
 that request against credential policy, creates a narrow lease when allowed,
 and rejects any later action that does not match the lease.
+
+Queen Bee follows the same boundary. Its tools are allowlisted, schema-checked,
+authenticated, and audited with both `agent_queen_bee` and the invoking
+operator ID. It can create credential policies from external secret references,
+but it does not accept raw secret values, lease tokens, OAuth payloads, provider
+keys, or hidden superuser operations.
 
 The current policy engine is deterministic so the core can be tested locally.
 When `HIVEMIND_INTENT_REVIEWER_PROVIDER` is set to a non-local value, lease
