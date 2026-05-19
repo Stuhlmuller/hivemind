@@ -34,6 +34,7 @@ from hivemind.store import (
 TEST_PASSWORD = "operator-not-secret"  # nosec B105
 RECOVERY_PASSWORD = "operator-recovery-secret"  # nosec B105
 PROVIDER_CREDENTIAL_ID = "cred_provider_openrouter"
+BROKER_ACTION_AUDIT_CONTRACT = "broker.action_attempt.v1"
 
 
 class RecordingProviderReviewer:
@@ -142,6 +143,42 @@ def require_equal(actual: object, expected: object, message: str) -> None:
 def require_true(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def require_broker_action_audit_contract(
+    event: dict[str, object],
+    *,
+    agent_id: str,
+    credential_id: str,
+    action: str,
+    state: str,
+    lease_id: str | None = None,
+    payload_key_count: int | None = None,
+) -> dict[str, object]:
+    metadata = event["metadata"]
+    if not isinstance(metadata, dict):
+        raise AssertionError("broker action audit metadata should be structured")
+    require_equal(metadata["audit_contract"], BROKER_ACTION_AUDIT_CONTRACT, "broker action audit should name its contract")
+    require_equal(metadata["action"], action, "broker action audit should include the sanitized action")
+    require_equal(metadata["agent_id"], agent_id, "broker action audit should identify the agent")
+    require_equal(metadata["credential_id"], credential_id, "broker action audit should identify the credential")
+    require_equal(metadata["broker_decision"], event["decision"], "broker action audit metadata should mirror the decision")
+    require_equal(metadata["broker_reason"], event["reason"], "broker action audit metadata should mirror the reason")
+    require_equal(metadata["broker_action_state"], state, "broker action audit should identify the action-attempt state")
+    require_equal(
+        metadata["resource_descriptor"],
+        {"type": "credential", "id": credential_id},
+        "broker action audit should expose a sanitized resource descriptor",
+    )
+    if lease_id is not None:
+        require_equal(metadata["lease_id"], lease_id, "broker action audit should include the lease id")
+    if payload_key_count is not None:
+        require_equal(
+            metadata["payload_key_count"],
+            payload_key_count,
+            "broker action audit should include only the payload key count",
+        )
+    return metadata
 
 
 def setup(client: TestClient) -> None:
@@ -1064,13 +1101,14 @@ def test_agents_public_responses_redact_legacy_secret_like_system_prompt(tmp_pat
     require_true("hunter2" not in response.text, "agents response should not expose password-like values")
 
 
-def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None:
+def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path, caplog) -> None:
     client = client_for(tmp_path)
     setup_demo(client)
     agent = client.get("/agents").json()[0]
     credential = client.get("/credentials").json()[0]
     payload_key = f"token-{secrets.token_hex(8)}"
     payload_secret = f"demo-{secrets.token_hex(8)}"
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
 
     assert "HIVEMIND_DEMO_GITHUB_TOKEN" not in credential["secret_ref_preview"]  # nosec B101
     lease_response = client.post(
@@ -1098,16 +1136,42 @@ def test_authenticated_jit_lease_flow_redacts_secret_ref(tmp_path: Path) -> None
     assert action_response.status_code == 200  # nosec B101
     assert action_response.json()["ok"] is True  # nosec B101
     audit_events = client.get("/audit-events").json()
+    issued_event = next(event for event in audit_events if event["type"] == "credential.lease.issued")
     performed_event = next(event for event in audit_events if event["type"] == "credential.action.performed")
+    require_broker_action_audit_contract(
+        issued_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="read_repo",
+        state="lease_issued",
+        lease_id=lease["id"],
+    )
     require_equal(performed_event["actor_id"], agent["id"], "performed audit event should identify the agent")
     require_equal(performed_event["target_id"], credential["id"], "performed audit event should identify the credential")
-    require_equal(
-        performed_event["metadata"],
-        {"action": "read_repo", "payload_key_count": 2},
-        "performed audit metadata should include action and payload key count only",
+    require_broker_action_audit_contract(
+        performed_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="read_repo",
+        state="action_performed",
+        lease_id=lease["id"],
+        payload_key_count=2,
     )
     require_true(payload_key not in str(audit_events), "audit events should not expose payload keys")
     require_true(payload_secret not in str(audit_events), "audit events should not expose payload values")
+    structured_records = [json.loads(record.getMessage()) for record in caplog.records if record.name == "hivemind.audit"]
+    performed_log = next(record for record in structured_records if record["type"] == "credential.action.performed")
+    require_equal(
+        performed_log["metadata"],
+        performed_event["metadata"],
+        "structured logs and audit-events should expose the same safe broker decision metadata",
+    )
+    require_true(payload_key not in caplog.text, "structured logs should not expose payload keys")
+    require_true(payload_secret not in caplog.text, "structured logs should not expose payload values")
+    backup_text = json.dumps(client.app.state.store.export_backup_bundle())
+    require_true(BROKER_ACTION_AUDIT_CONTRACT in backup_text, "backup export should preserve the audit contract")
+    require_true(payload_key not in backup_text, "backup export should not expose payload keys")
+    require_true(payload_secret not in backup_text, "backup export should not expose payload values")
 
 
 def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Path) -> None:
@@ -1151,14 +1215,14 @@ def test_denied_credential_action_is_audited_without_payload_values(tmp_path: Pa
     require_equal(denied_event["decision"], "denied", "denied action audit event should record the decision")
     require_equal(denied_event["actor_id"], agent["id"], "denied action audit event should identify the agent")
     require_equal(denied_event["target_id"], credential["id"], "denied action audit event should identify the credential")
-    require_equal(
-        {
-            "action": denied_event["metadata"]["action"],
-            "lease_id": denied_event["metadata"]["lease_id"],
-            "payload_key_count": denied_event["metadata"]["payload_key_count"],
-        },
-        {"action": "delete_repo", "lease_id": lease["id"], "payload_key_count": 2},
-        "denied action audit metadata should include action, lease id, and payload key count only",
+    require_broker_action_audit_contract(
+        denied_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="delete_repo",
+        state="action_denied",
+        lease_id=lease["id"],
+        payload_key_count=2,
     )
     require_true(payload_key not in str(audit_events), "audit events should not expose denied payload keys")
     require_true(payload_secret not in str(audit_events), "audit events should not expose denied payload values")
@@ -1204,28 +1268,37 @@ def test_denied_credential_lease_unknown_references_are_audited(tmp_path: Path) 
     )
 
     audit_events = client.get("/audit-events").json()
-    require_true(
-        any(
-            event["type"] == "credential.lease.denied"
-            and event["actor_id"] == "agent_missing"
-            and event["target_id"] == "cred_missing"
-            and event["reason"] == "unknown agent: agent_missing"
-            and event["metadata"] == {"action": "read_repo"}
-            for event in audit_events
-        ),
-        "unknown agent denial should be audited",
+    missing_agent_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied"
+        and event["actor_id"] == "agent_missing"
+        and event["target_id"] == "cred_missing"
+        and event["reason"] == "unknown agent: agent_missing"
     )
-    require_true(
-        any(
-            event["type"] == "credential.lease.denied"
-            and event["actor_id"] == agent["id"]
-            and event["target_id"] == "cred_missing"
-            and event["reason"] == "unknown credential: cred_missing"
-            and event["metadata"] == {"action": "read_repo"}
-            for event in audit_events
-        ),
-        "unknown credential denial should be audited",
+    require_broker_action_audit_contract(
+        missing_agent_event,
+        agent_id="agent_missing",
+        credential_id="cred_missing",
+        action="read_repo",
+        state="lease_denied",
     )
+    missing_credential_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.lease.denied"
+        and event["actor_id"] == agent["id"]
+        and event["target_id"] == "cred_missing"
+        and event["reason"] == "unknown credential: cred_missing"
+    )
+    require_broker_action_audit_contract(
+        missing_credential_event,
+        agent_id=agent["id"],
+        credential_id="cred_missing",
+        action="read_repo",
+        state="lease_denied",
+    )
+
 
 def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path) -> None:
     client = client_for(tmp_path)
@@ -1259,10 +1332,12 @@ def test_denied_credential_lease_redacts_unsafe_action_identifier(tmp_path: Path
         if event["type"] == "credential.lease.denied"
         and event["reason"] == "unknown tool action: <redacted>"
     )
-    require_equal(
-        denied_event["metadata"],
-        {"action": "<redacted>"},
-        "unsafe action identifier should be redacted in audit metadata",
+    require_broker_action_audit_contract(
+        denied_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="<redacted>",
+        state="lease_denied",
     )
     require_true(unsafe_action not in str(audit_events), "unsafe action identifier should not appear in audit events")
 
@@ -1691,6 +1766,79 @@ def test_tool_action_maps_to_required_credential_action_and_validates_payload(tm
     )
     require_equal(valid_action.status_code, 200, "valid payload should be accepted")
     require_equal(valid_action.json()["credential_action"], "read_repo", "result should expose the required credential action")
+
+
+def test_strict_payload_schema_denial_redacts_unknown_payload_fields(tmp_path: Path, caplog) -> None:
+    client = client_for(tmp_path)
+    setup_demo(client)
+    agent = client.get("/agents").json()[0]
+    credential = client.get("/credentials").json()[0]
+    payload_key = f"token-{secrets.token_hex(8)}"
+    payload_secret = f"demo-{secrets.token_hex(8)}"
+    caplog.set_level(logging.INFO, logger="hivemind.audit")
+
+    tool_response = client.post(
+        "/tool-actions",
+        json={
+            "name": "strict_repo_status",
+            "description": "Read repository status through the read_repo scope.",
+            "required_credential_action": "read_repo",
+            "risk_level": "low",
+            "input_schema": {
+                "type": "object",
+                "properties": {"repo": {"type": "string"}},
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    lease_response = client.post(
+        "/credential-leases",
+        json={
+            "credential_id": credential["id"],
+            "agent_id": agent["id"],
+            "action": "strict_repo_status",
+            "intent": "Read repository status for implementation triage.",
+            "ttl_seconds": 30,
+        },
+    )
+    action_response = client.post(
+        "/credential-actions",
+        json={
+            "lease_token": lease_response.json()["lease_token"],
+            "action": "strict_repo_status",
+            "payload": {"repo": "hivemind", payload_key: payload_secret},
+        },
+    )
+
+    require_equal(tool_response.status_code, 201, "strict custom tool action should be created")
+    require_equal(lease_response.status_code, 201, "strict custom tool action should issue a lease")
+    require_equal(action_response.status_code, 403, "unknown payload fields should fail before broker acceptance")
+    require_equal(
+        action_response.json()["detail"],
+        "payload includes unsupported field",
+        "payload schema denial should not echo the unknown field name",
+    )
+    audit_events = client.get("/audit-events").json()
+    denied_event = next(event for event in audit_events if event["type"] == "credential.action.denied")
+    require_equal(
+        denied_event["reason"],
+        "payload includes unsupported field",
+        "audit reason should not echo the unknown field name",
+    )
+    require_broker_action_audit_contract(
+        denied_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="strict_repo_status",
+        state="action_denied",
+        lease_id=lease_response.json()["id"],
+        payload_key_count=2,
+    )
+    backup_text = json.dumps(client.app.state.store.export_backup_bundle())
+    combined_output = action_response.text + str(audit_events) + caplog.text + backup_text
+    require_true(payload_key not in combined_output, "payload key should not leak")
+    require_true(payload_secret not in combined_output, "payload value should not leak")
 
 
 def test_lease_for_one_tool_action_cannot_execute_another_with_same_credential_scope(tmp_path: Path) -> None:
@@ -2377,24 +2525,42 @@ def test_registered_agent_provider_adapter_receives_model_and_brokered_credentia
         any(event["type"] == "task.execution.started" and event["target_id"] == task["id"] for event in audit_events),
         "task execution start should be audited",
     )
-    require_true(
-        any(
-            event["type"] == "credential.action.performed"
-            and event["target_id"] == PROVIDER_CREDENTIAL_ID
-            and event["metadata"]["payload_key_count"] == 4
-            for event in audit_events
-        ),
-        "provider credential use should consume a brokered credential action",
+    provider_action_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.action.performed" and event["target_id"] == PROVIDER_CREDENTIAL_ID
     )
-    require_true(
-        any(
-            event["type"] == "credential.action.performed"
-            and event["target_id"] == credential["id"]
-            and event["metadata"]["payload_key_count"] == 4
-            for event in audit_events
-        ),
-        "task tool credential use should consume a brokered credential action",
+    provider_action_metadata = require_broker_action_audit_contract(
+        provider_action_event,
+        agent_id=agent["id"],
+        credential_id=PROVIDER_CREDENTIAL_ID,
+        action="agent_provider_openrouter",
+        state="action_performed",
+        payload_key_count=4,
     )
+    require_equal(provider_action_metadata["task_id"], task["id"], "provider credential audit should link the task")
+    require_equal(provider_action_metadata["capability"], "agent_provider", "provider credential audit should name the capability")
+    require_equal(provider_action_metadata["provider"], "openrouter", "provider credential audit should name the provider")
+    require_equal(provider_action_metadata["model"], agent["model"], "provider credential audit should name the model")
+    require_true(str(provider_action_metadata["lease_id"]).startswith("lease_"), "provider credential audit should include the lease id")
+    tool_action_event = next(
+        event
+        for event in audit_events
+        if event["type"] == "credential.action.performed" and event["target_id"] == credential["id"]
+    )
+    tool_action_metadata = require_broker_action_audit_contract(
+        tool_action_event,
+        agent_id=agent["id"],
+        credential_id=credential["id"],
+        action="read_repo",
+        state="action_performed",
+        payload_key_count=4,
+    )
+    require_equal(tool_action_metadata["task_id"], task["id"], "tool credential audit should link the task")
+    require_equal(tool_action_metadata["capability"], "provider_tool", "tool credential audit should name the capability")
+    require_equal(tool_action_metadata["provider"], "openrouter", "tool credential audit should name the provider")
+    require_equal(tool_action_metadata["model"], agent["model"], "tool credential audit should name the model")
+    require_true(str(tool_action_metadata["lease_id"]).startswith("lease_"), "tool credential audit should include the lease id")
     require_true("OPENROUTER_API_KEY" not in response.text, "task run response should not expose raw provider credential refs")
     require_true("credential_ref" not in response.json(), "task run response should omit provider credential refs")
 

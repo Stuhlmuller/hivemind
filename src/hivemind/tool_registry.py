@@ -164,7 +164,7 @@ def payload_additional_properties_error(schema: Mapping[str, Any], payload: Mapp
     allowed_fields = set(properties) if isinstance(properties, Mapping) else set()
     extra_fields = sorted(set(payload) - allowed_fields)
     if extra_fields:
-        return f"payload includes unknown field: {extra_fields[0]}"
+        return "payload includes unsupported field"
     return None
 
 
